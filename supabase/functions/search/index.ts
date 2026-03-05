@@ -54,12 +54,16 @@ serve(async (req) => {
     console.log("Parsed params:", JSON.stringify(params));
 
     // Step 2: Fetch from all platforms in parallel
+    if (!YELP_API_KEY) {
+      console.warn("YELP_API_KEY missing — skipping Yelp to avoid low-confidence reservation results");
+    }
+
     const [resyCandidates, otCandidates, yelpResults] = await Promise.all([
       searchFirecrawl(params, FIRECRAWL_API_KEY, "resy"),
       searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable"),
       YELP_API_KEY
-        ? fetchYelpWithReservations(params, YELP_API_KEY)
-        : searchFirecrawl(params, FIRECRAWL_API_KEY, "yelp").then(c => normalizeCandidates("yelp", c, params)),
+        ? fetchYelpWithReservations(params, YELP_API_KEY, FIRECRAWL_API_KEY)
+        : Promise.resolve([] as Restaurant[]),
     ]);
 
     // Normalize Firecrawl results into Restaurant objects
@@ -197,11 +201,12 @@ async function searchFirecrawl(
 ): Promise<FirecrawlResult[]> {
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const city = params.city;
+  const resyCitySlug = getResyCitySlug(params);
 
   const queries = platform === "resy"
     ? [
-        `site:resy.com/cities ${city}${cuisine} restaurant reserve`,
-        `site:resy.com ${city}${cuisine} resy reservation`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} reservation`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} book table`,
       ]
     : platform === "opentable"
     ? [
@@ -235,16 +240,57 @@ async function searchFirecrawl(
     })
   );
 
-  // Dedupe by base URL
+  // Dedupe by base URL + platform-specific validity gate
   const map = new Map<string, FirecrawlResult>();
   for (const r of results.flat()) {
     if (!r?.url) continue;
+    if (!isPlatformCandidateUrlValid(platform, r.url, params)) continue;
     const key = r.url.split("?")[0].toLowerCase();
     if (!map.has(key)) map.set(key, r);
   }
   const deduped = Array.from(map.values());
   console.log(`${platform} candidates: ${deduped.length}`);
   return deduped;
+}
+
+function slugify(v: string): string {
+  return v
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function getResyCitySlug(params: SearchParams): string {
+  const city = slugify(params.city || "");
+  const state = slugify(params.state || "");
+  return state ? `${city}-${state}` : city;
+}
+
+function isPlatformCandidateUrlValid(
+  platform: "resy" | "opentable" | "yelp",
+  rawUrl: string,
+  params: SearchParams
+): boolean {
+  try {
+    const u = new URL(rawUrl);
+    const p = u.pathname.toLowerCase();
+
+    if (platform === "resy") {
+      const m = p.match(/^\/cities\/([^/]+)\/venues\/([^/?#]+)/i);
+      if (!m) return false;
+      const citySlug = m[1];
+      return citySlug === getResyCitySlug(params).toLowerCase();
+    }
+
+    if (platform === "opentable") {
+      return /^\/r\/[^/?#]+/i.test(p);
+    }
+
+    // Yelp candidates from web search are low-confidence by default, keep only reservation pages.
+    return /^\/reservations\/[^/?#]+/i.test(p);
+  } catch {
+    return false;
+  }
 }
 
 // ─── Normalize Firecrawl results → Restaurant objects ───
@@ -292,28 +338,21 @@ function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp", raw: strin
     const u = new URL(raw);
     const p = u.pathname;
     if (platform === "resy") {
-      // Match /cities/{city}/venues/{venue-name} (new Resy URL format)
-      const venueMatch = p.match(/^\/cities\/[^/]+\/venues\/([^/?#]+)/i);
-      if (venueMatch) return `https://resy.com${venueMatch[0]}`;
-      // Match /cities/{city}/{restaurant-slug} but exclude generic pages
-      const cityMatch = p.match(/^\/cities\/[^/]+\/([^/?#]+)/i);
-      if (cityMatch) {
-        const slug = cityMatch[1].toLowerCase();
-        if (RESY_EXCLUDED_SLUGS.has(slug)) return null;
-        return `https://resy.com${cityMatch[0]}`;
-      }
-      return null;
+      // Strictly require restaurant pages: /cities/{city}/venues/{venue-slug}
+      const venueMatch = p.match(/^\/cities\/([^/]+)\/venues\/([^/?#]+)/i);
+      if (!venueMatch) return null;
+      const citySlug = venueMatch[1];
+      const venueSlug = venueMatch[2].toLowerCase();
+      if (!venueSlug || RESY_EXCLUDED_SLUGS.has(venueSlug)) return null;
+      return `https://resy.com/cities/${citySlug}/venues/${venueMatch[2]}`;
     }
     if (platform === "opentable") {
       const m = p.match(/^\/r\/[^/?#]+/i);
       return m ? `https://www.opentable.com${m[0]}` : null;
     }
-    // Yelp: /reservations/slug or /biz/slug
+    // Yelp: only reservation pages count as valid booking URLs
     const resMatch = p.match(/^\/reservations\/[^/?#]+/i);
-    if (resMatch) return `https://www.yelp.com${resMatch[0]}`;
-    const bizMatch = p.match(/^\/biz\/[^/?#]+/i);
-    if (bizMatch) return `https://www.yelp.com${bizMatch[0]}`;
-    return null;
+    return resMatch ? `https://www.yelp.com${resMatch[0]}` : null;
   } catch { return null; }
 }
 
@@ -354,7 +393,7 @@ function cleanName(title: string | undefined, url: string, platform: string): st
 // ─── Yelp Fusion API: search for restaurants that accept reservations ───
 
 async function fetchYelpWithReservations(
-  params: SearchParams, yelpKey: string
+  params: SearchParams, yelpKey: string, firecrawlKey: string
 ): Promise<Restaurant[]> {
   try {
     // First try with reservation attribute
@@ -382,7 +421,7 @@ async function fetchYelpWithReservations(
 
     let businesses = data?.businesses || [];
 
-    // If reservation filter returned few results, also try with hot_and_new or without filter
+    // If reservation filter returned few results, broaden and keep reservation-capable transactions only.
     if (businesses.length < 5) {
       console.log(`Yelp reservation filter returned only ${businesses.length}, trying broader search`);
       sp.delete("attributes");
@@ -394,7 +433,6 @@ async function fetchYelpWithReservations(
         const broader = (data2.businesses || []).filter((b: any) =>
           b.transactions?.includes("restaurant_reservation")
         );
-        // Merge, preferring reservation-filtered results
         const seen = new Set(businesses.map((b: any) => b.id));
         for (const b of broader) {
           if (!seen.has(b.id)) {
@@ -405,25 +443,115 @@ async function fetchYelpWithReservations(
       }
     }
 
-    console.log(`Yelp final: ${businesses.length} reservation-capable restaurants`);
+    console.log(`Yelp pre-verify: ${businesses.length} reservation-capable businesses`);
 
-    return businesses.map((b: any): Restaurant => ({
-      id: `yelp-${b.id}`,
-      name: b.name,
-      cuisine: b.categories?.[0]?.title || params.cuisine || "Restaurant",
-      neighborhood: b.location?.neighborhood || b.location?.city || params.city,
-      rating: b.rating,
-      priceRange: b.price || undefined,
-      imageUrl: b.image_url || null,
-      platform: "yelp",
-      platformUrl: `https://www.yelp.com/reservations/${b.alias}`,
-      timeSlots: [],
-      distanceMiles: b.distance ? +(b.distance / 1609.34).toFixed(1) : null,
-    }));
+    const mapped = businesses
+      .filter((b: any) => !!b.alias)
+      .map((b: any): Restaurant => ({
+        id: `yelp-${b.id}`,
+        name: b.name,
+        cuisine: b.categories?.[0]?.title || params.cuisine || "Restaurant",
+        neighborhood: b.location?.neighborhood || b.location?.city || params.city,
+        rating: b.rating,
+        priceRange: b.price || undefined,
+        imageUrl: b.image_url || null,
+        platform: "yelp",
+        platformUrl: `https://www.yelp.com/reservations/${b.alias}`,
+        timeSlots: [],
+        distanceMiles: b.distance ? +(b.distance / 1609.34).toFixed(1) : null,
+      }));
+
+    const verified = await verifyYelpAvailabilityWithFirecrawl(mapped, params, firecrawlKey);
+    console.log(`Yelp verified available: ${verified.length}/${mapped.length}`);
+    return verified;
   } catch (err) {
     console.error("Yelp error:", err);
     return [];
   }
+}
+
+async function verifyYelpAvailabilityWithFirecrawl(
+  candidates: Restaurant[],
+  params: SearchParams,
+  firecrawlKey: string
+): Promise<Restaurant[]> {
+  const limited = candidates.slice(0, 10);
+  const keep: Restaurant[] = [];
+
+  for (let i = 0; i < limited.length; i += 10) {
+    const batch = limited.slice(i, i + 10);
+    const checked = await Promise.all(batch.map(async (r) => {
+      const verifyUrl = buildYelpAvailabilityUrl(r.platformUrl, params);
+
+      try {
+        const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${firecrawlKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url: verifyUrl,
+            formats: ["markdown"],
+            onlyMainContent: true,
+          }),
+        });
+
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        const markdown = extractFirecrawlMarkdown(data).toLowerCase();
+        if (!markdown) return null;
+
+        const blocked = [
+          "not currently accepting reservations",
+          "this business is not currently accepting reservations",
+          "no availability",
+          "temporarily unavailable",
+        ];
+        if (blocked.some((phrase) => markdown.includes(phrase))) return null;
+
+        const requestedTime = toTwelveHourLabel(params.time).toLowerCase();
+        const hasAnyTimes = /\b\d{1,2}:\d{2}\s?(am|pm)\b/i.test(markdown);
+        const hasRequestedTime = requestedTime ? markdown.includes(requestedTime) : false;
+
+        return hasRequestedTime || hasAnyTimes ? r : null;
+      } catch {
+        return null;
+      }
+    }));
+
+    for (const item of checked) {
+      if (item) keep.push(item);
+    }
+  }
+
+  return keep;
+}
+
+function buildYelpAvailabilityUrl(baseUrl: string, params: SearchParams): string {
+  try {
+    const u = new URL(baseUrl);
+    u.searchParams.set("covers", String(params.partySize));
+    u.searchParams.set("date", params.date);
+    u.searchParams.set("time", params.time.replace(":", ""));
+    return u.toString();
+  } catch {
+    return baseUrl;
+  }
+}
+
+function extractFirecrawlMarkdown(data: any): string {
+  return data?.data?.markdown || data?.markdown || "";
+}
+
+function toTwelveHourLabel(time24: string): string {
+  const m = time24.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return "";
+  const h = Number(m[1]);
+  const minutes = m[2];
+  const ampm = h >= 12 ? "pm" : "am";
+  const hour12 = h % 12 || 12;
+  return `${hour12}:${minutes} ${ampm}`;
 }
 
 // ─── AI enrichment ───
