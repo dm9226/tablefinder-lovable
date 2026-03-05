@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { SearchBar } from "@/components/SearchBar";
 import { ResultsGrid } from "@/components/ResultsGrid";
 import { Restaurant } from "@/types/restaurant";
@@ -12,6 +12,7 @@ const Index = () => {
   const [hasSearched, setHasSearched] = useState(false);
   const [location, setLocation] = useState<string | null>(null);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const detectLocation = useCallback(() => {
     if (!navigator.geolocation) {
@@ -38,8 +39,19 @@ const Index = () => {
     );
   }, []);
 
+  const cancelSearch = useCallback(() => {
+    abortRef.current?.abort();
+    setIsLoading(false);
+    toast.info("Search cancelled");
+  }, []);
+
   const handleSearch = useCallback(
     async (query: string) => {
+      // Cancel any in-flight search
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
       setIsLoading(true);
       setError(null);
       setHasSearched(true);
@@ -55,15 +67,21 @@ const Index = () => {
           },
         });
 
+        // Check if cancelled
+        if (controller.signal.aborted) return;
+
         if (fnError) throw new Error(fnError.message);
         if (data?.error) throw new Error(data.error);
 
         setResults(data?.results || []);
       } catch (err: any) {
+        if (controller.signal.aborted) return;
         console.error("Search error:", err);
         setError(err.message || "Search failed. Please try again.");
       } finally {
-        setIsLoading(false);
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
       }
     },
     [coords, location]
@@ -98,6 +116,7 @@ const Index = () => {
           isLoading={isLoading}
           error={error}
           hasSearched={hasSearched}
+          onCancel={cancelSearch}
         />
       </section>
 

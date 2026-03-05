@@ -616,6 +616,24 @@ async function verifyAvailability(
     try {
       const isYelp = r.platform === "yelp";
 
+      // For Yelp: skip the expensive scrape entirely — trust the Fusion API's
+      // reservation attribute. Only scrape Resy/OpenTable for time-slot verification.
+      if (isYelp) {
+        // Just do a lightweight HEAD/GET check to confirm the page exists
+        try {
+          const headResp = await fetch(r.platformUrl, { method: "HEAD", redirect: "follow" });
+          if (!headResp.ok || headResp.status >= 400) {
+            console.log(`Yelp page not found for ${r.name}`);
+            return null;
+          }
+          console.log(`✓ Verified ${r.name} [yelp] — reservation API + page exists`);
+          return r;
+        } catch {
+          console.log(`Yelp HEAD failed for ${r.name}`);
+          return null;
+        }
+      }
+
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
         method: "POST",
         headers: {
@@ -626,7 +644,6 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: ["markdown"],
           onlyMainContent: true,
-          ...(isYelp ? { waitFor: 3000 } : {}), // Yelp renders time slots via JS
         }),
       });
 
@@ -655,14 +672,14 @@ async function verifyAvailability(
       const hasTimeSlot24h = /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/.test(markdown);
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(markdown);
 
-      // Yelp-specific: also accept "available" or "reservation" near a date as a pass
-      const hasYelpAvailability = isYelp && (
-        lower.includes("available") ||
-        lower.includes("make a reservation") ||
-        lower.includes("find a table")
-      );
+      // Yelp: trust the API's reservation attribute — if no negative signal was found
+      // and we got content back, the restaurant accepts reservations
+      if (isYelp) {
+        console.log(`✓ Verified ${r.name} [yelp] — passed negative-signal check`);
+        return r;
+      }
 
-      if (hasTimeSlot12h || (hasTimeSlot24h && hasBookingAction) || hasYelpAvailability) {
+      if (hasTimeSlot12h || (hasTimeSlot24h && hasBookingAction)) {
         console.log(`✓ Verified ${r.name} [${r.platform}]`);
         return r;
       }
