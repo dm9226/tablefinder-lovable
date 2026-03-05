@@ -392,6 +392,8 @@ function addResyParams(base: string, p: SearchParams): string {
     const u = new URL(base);
     u.searchParams.set("date", p.date);
     u.searchParams.set("seats", String(p.partySize));
+    // Resy uses HH:MM format for time filtering
+    u.searchParams.set("time", p.time);
     return u.toString();
   } catch { return base; }
 }
@@ -703,18 +705,73 @@ async function verifyAvailability(
         return null;
       }
 
-      // Check for time slot patterns
-      const hasTimeSlot12h = /\b\d{1,2}:\d{2}\s?(am|pm)\b/i.test(markdown);
-      const hasTimeSlot24h = /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/.test(markdown);
+      // Extract all time slots from the page
+      const timeSlotRegex12 = /\b(\d{1,2}):(\d{2})\s?(am|pm)\b/gi;
+      const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(markdown);
       const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
 
-      if (hasTimeSlot12h || (hasTimeSlot24h && hasBookingAction) || hasYelpAvailabilityMarker) {
-        console.log(`✓ Verified ${r.name} [${r.platform}]`);
+      // Parse requested time into minutes for comparison
+      const [reqH, reqM] = params.time.split(":").map(Number);
+      const reqMinutes = reqH * 60 + reqM;
+
+      // Define the acceptable time window: ±2 hours from requested time
+      const WINDOW_MINUTES = 120;
+
+      // Collect all found times and check if any fall within the window
+      const foundTimes: { time: string; minutes: number }[] = [];
+
+      // 12-hour format matches
+      let match12;
+      while ((match12 = timeSlotRegex12.exec(markdown)) !== null) {
+        let h = parseInt(match12[1]);
+        const m = parseInt(match12[2]);
+        const ampm = match12[3].toLowerCase();
+        if (ampm === "pm" && h !== 12) h += 12;
+        if (ampm === "am" && h === 12) h = 0;
+        const totalMin = h * 60 + m;
+        const formatted = `${h}:${m.toString().padStart(2, "0")} ${ampm.toUpperCase()}`;
+        foundTimes.push({ time: formatted, minutes: totalMin });
+      }
+
+      // If no 12h times found but 24h times + booking action exist, try 24h
+      if (foundTimes.length === 0 && hasBookingAction) {
+        let match24;
+        while ((match24 = timeSlotRegex24.exec(markdown)) !== null) {
+          const [hStr, mStr] = match24[1].split(":");
+          const totalMin = parseInt(hStr) * 60 + parseInt(mStr);
+          // Skip common non-time numbers (years, prices, etc.)
+          if (totalMin >= 360 && totalMin <= 1380) { // 6:00 AM to 11:00 PM
+            foundTimes.push({ time: match24[1], minutes: totalMin });
+          }
+        }
+      }
+
+      // Filter times to those within the requested window
+      const matchingTimes = foundTimes.filter((t) => {
+        const diff = Math.abs(t.minutes - reqMinutes);
+        return diff <= WINDOW_MINUTES;
+      });
+
+      if (matchingTimes.length > 0) {
+        // Update the restaurant's timeSlots with verified times
+        r.timeSlots = matchingTimes.map((t) => ({ time: t.time }));
+        console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} slots in window (requested ${params.time})`);
         return r;
       }
 
-      console.log(`No time slots for ${r.name} [${r.platform}]`);
+      // For Yelp, if we see reservation markers but couldn't extract specific times,
+      // trust the availability marker (reservation widget may not expose times in markdown)
+      if (hasYelpAvailabilityMarker) {
+        console.log(`✓ Verified ${r.name} [yelp] — reservation markers present (no specific time extraction)`);
+        return r;
+      }
+
+      if (foundTimes.length > 0) {
+        console.log(`✗ ${r.name} [${r.platform}] — found ${foundTimes.length} slots but none near ${params.time} (closest: ${foundTimes.map(t => t.time).join(", ")})`);
+      } else {
+        console.log(`No time slots for ${r.name} [${r.platform}]`);
+      }
       return null;
     } catch (err) {
       console.log(`Verify error for ${r.name} [${r.platform}]:`, err);
