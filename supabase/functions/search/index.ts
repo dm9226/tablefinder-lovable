@@ -52,15 +52,15 @@ serve(async (req) => {
 
     const resyResults = buildPlatformResults("resy", resyCandidates, params);
     const otResults = buildPlatformResults("opentable", otCandidates, params);
-
     const merged = dedupeAndSortByRating([...resyResults, ...otResults]);
 
-    console.log(
-      `Returning ${merged.length} results (Resy: ${resyResults.length}, OpenTable: ${otResults.length})`
-    );
+    // Enrich with AI for ratings, cuisine, neighborhood
+    const enriched = await enrichWithAI(merged, LOVABLE_API_KEY);
+
+    console.log(`Returning ${enriched.length} results (Resy: ${resyResults.length}, OT: ${otResults.length})`);
 
     return new Response(
-      JSON.stringify({ results: merged, params }),
+      JSON.stringify({ results: enriched, params }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (e) {
@@ -348,10 +348,68 @@ function dedupeAndSortByRating(rows: any[]) {
     const key = `${row.platform}:${row.platformUrl.split("?")[0].toLowerCase()}`;
     if (!map.has(key)) map.set(key, row);
   }
+  return Array.from(map.values()).slice(0, 80);
+}
 
-  return Array.from(map.values())
-    .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))
-    .slice(0, 80);
+async function enrichWithAI(results: any[], apiKey: string): Promise<any[]> {
+  if (results.length === 0) return [];
+
+  const restaurantList = results.map((r, i) => `${i}. ${r.name} (${r.platform})`).join("\n");
+
+  try {
+    const resp = await fetch(AI_GATEWAY, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash-lite",
+        messages: [{
+          role: "user",
+          content: `For each restaurant below, provide its Google rating (out of 5, one decimal), cuisine type, neighborhood, and price range.
+Return a JSON object with a "restaurants" array where each item has: index (number), rating (number or null), cuisine (string), neighborhood (string), priceRange (string like "$$" or null).
+Only include restaurants you have confident data for. Use your training data.
+
+${restaurantList}`,
+        }],
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    if (!resp.ok) {
+      await resp.text();
+      console.error("AI enrich failed:", resp.status);
+      return results;
+    }
+
+    const aiData = await resp.json();
+    const content = aiData.choices?.[0]?.message?.content;
+    if (!content) return results;
+
+    const parsed = JSON.parse(content);
+    const enrichments = parsed.restaurants || [];
+
+    const enrichMap = new Map<number, any>();
+    for (const e of enrichments) {
+      if (typeof e.index === "number") enrichMap.set(e.index, e);
+    }
+
+    const enriched = results.map((r, i) => {
+      const e = enrichMap.get(i);
+      if (!e) return r;
+      return {
+        ...r,
+        rating: e.rating ?? r.rating,
+        cuisine: e.cuisine || r.cuisine,
+        neighborhood: e.neighborhood || r.neighborhood,
+        priceRange: e.priceRange || r.priceRange,
+      };
+    });
+
+    // Sort by rating descending
+    return enriched.sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+  } catch (err) {
+    console.error("AI enrich error:", err);
+    return results;
+  }
 }
 
 function extractName(title: string | undefined, canonicalUrl: string, platform: Platform): string {
