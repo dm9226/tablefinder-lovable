@@ -603,35 +603,71 @@ const NO_AVAILABILITY_SIGNALS = [
   "temporarily unavailable",
 ];
 
+function selectCandidatesForVerification(
+  candidates: Restaurant[],
+  maxCandidates: number
+): Restaurant[] {
+  const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp"];
+  const buckets = {
+    resy: candidates.filter((c) => c.platform === "resy"),
+    opentable: candidates.filter((c) => c.platform === "opentable"),
+    yelp: candidates.filter((c) => c.platform === "yelp"),
+  };
+
+  const cursors = { resy: 0, opentable: 0, yelp: 0 };
+  const selected: Restaurant[] = [];
+
+  while (selected.length < maxCandidates) {
+    let pushedInRound = false;
+
+    for (const platform of platformOrder) {
+      const cursor = cursors[platform];
+      const bucket = buckets[platform];
+      if (cursor < bucket.length) {
+        selected.push(bucket[cursor]);
+        cursors[platform] = cursor + 1;
+        pushedInRound = true;
+        if (selected.length >= maxCandidates) break;
+      }
+    }
+
+    if (!pushedInRound) break;
+  }
+
+  return selected;
+}
+
 async function verifyAvailability(
   candidates: Restaurant[],
   params: SearchParams,
   firecrawlKey: string
 ): Promise<Restaurant[]> {
-  // Cap at 20 candidates to keep response time under ~10s
-  const limited = candidates.slice(0, 20);
+  // Keep latency bounded, but ensure platform diversity in the verification set.
+  const limited = selectCandidatesForVerification(candidates, 24);
+  const limitedCounts = limited.reduce(
+    (acc, r) => {
+      acc[r.platform] += 1;
+      return acc;
+    },
+    { resy: 0, opentable: 0, yelp: 0 }
+  );
+  console.log(
+    `Verifying (capped): total=${limited.length}, resy=${limitedCounts.resy}, ot=${limitedCounts.opentable}, yelp=${limitedCounts.yelp}`
+  );
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency)
   const checked = await Promise.all(limited.map(async (r) => {
     try {
       const isYelp = r.platform === "yelp";
 
-      // For Yelp: skip the expensive scrape entirely — trust the Fusion API's
-      // reservation attribute. Only scrape Resy/OpenTable for time-slot verification.
+      const scrapePayload: Record<string, unknown> = {
+        url: r.platformUrl,
+        formats: ["markdown"],
+        onlyMainContent: true,
+      };
       if (isYelp) {
-        // Just do a lightweight HEAD/GET check to confirm the page exists
-        try {
-          const headResp = await fetch(r.platformUrl, { method: "HEAD", redirect: "follow" });
-          if (!headResp.ok || headResp.status >= 400) {
-            console.log(`Yelp page not found for ${r.name}`);
-            return null;
-          }
-          console.log(`✓ Verified ${r.name} [yelp] — reservation API + page exists`);
-          return r;
-        } catch {
-          console.log(`Yelp HEAD failed for ${r.name}`);
-          return null;
-        }
+        // Yelp reservation widgets are more JS-heavy; short wait improves extraction without large latency hit.
+        scrapePayload.waitFor = 2000;
       }
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -640,11 +676,7 @@ async function verifyAvailability(
           Authorization: `Bearer ${firecrawlKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          url: r.platformUrl,
-          formats: ["markdown"],
-          onlyMainContent: true,
-        }),
+        body: JSON.stringify(scrapePayload),
       });
 
       if (!resp.ok) {
@@ -671,15 +703,9 @@ async function verifyAvailability(
       const hasTimeSlot12h = /\b\d{1,2}:\d{2}\s?(am|pm)\b/i.test(markdown);
       const hasTimeSlot24h = /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/.test(markdown);
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(markdown);
+      const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
 
-      // Yelp: trust the API's reservation attribute — if no negative signal was found
-      // and we got content back, the restaurant accepts reservations
-      if (isYelp) {
-        console.log(`✓ Verified ${r.name} [yelp] — passed negative-signal check`);
-        return r;
-      }
-
-      if (hasTimeSlot12h || (hasTimeSlot24h && hasBookingAction)) {
+      if (hasTimeSlot12h || (hasTimeSlot24h && hasBookingAction) || hasYelpAvailabilityMarker) {
         console.log(`✓ Verified ${r.name} [${r.platform}]`);
         return r;
       }
