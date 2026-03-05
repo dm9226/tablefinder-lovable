@@ -9,7 +9,7 @@ const corsHeaders = {
 const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
 
-type Platform = "resy" | "opentable";
+type Platform = "resy" | "opentable" | "yelp";
 
 interface SearchParams {
   cuisine: string;
@@ -51,24 +51,22 @@ serve(async (req) => {
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
     console.log("Parsed params:", JSON.stringify(params));
 
-    // Step 2: Find candidate restaurants via Firecrawl search
-    const [resyCandidates, otCandidates] = await Promise.all([
+    // Step 2: Find candidate restaurants via Firecrawl search (all platforms in parallel)
+    const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
       fetchPlatformCandidates(params, FIRECRAWL_API_KEY, "resy"),
       fetchPlatformCandidates(params, FIRECRAWL_API_KEY, "opentable"),
+      fetchPlatformCandidates(params, FIRECRAWL_API_KEY, "yelp"),
     ]);
 
     const resyResults = buildPlatformResults("resy", resyCandidates, params);
     const otResults = buildPlatformResults("opentable", otCandidates, params);
-    const allCandidates = dedupeByUrl([...resyResults, ...otResults]);
+    const yelpResults = buildPlatformResults("yelp", yelpCandidates, params);
+    const allCandidates = dedupeByUrl([...resyResults, ...otResults, ...yelpResults]);
 
-    console.log(`Found ${allCandidates.length} unique candidates. Verifying availability...`);
+    console.log(`Found ${allCandidates.length} unique candidates (resy: ${resyResults.length}, OT: ${otResults.length}, yelp: ${yelpResults.length})`);
 
-    // Step 3: Verify availability by scraping top candidates (limit to 10 for speed/cost)
-    const verified = await verifyAvailability(allCandidates.slice(0, 10), FIRECRAWL_API_KEY, params);
-    console.log(`${verified.length} restaurants have confirmed availability`);
-
-    // Step 4: Enrich with AI for ratings, cuisine, neighborhood, coords
-    const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
+    // Step 3: Enrich with AI for ratings, cuisine, neighborhood, coords (skip expensive verification)
+    const enriched = await enrichWithAI(allCandidates, LOVABLE_API_KEY, params);
 
     console.log(`Returning ${enriched.length} results with verified availability`);
 
@@ -85,64 +83,7 @@ serve(async (req) => {
   }
 });
 
-// ─── Verify availability by scraping restaurant pages ───
-
-async function verifyAvailability(
-  candidates: any[],
-  firecrawlKey: string,
-  params: SearchParams
-): Promise<any[]> {
-  const results = await Promise.allSettled(
-    candidates.map(async (candidate) => {
-      try {
-        const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${firecrawlKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            url: candidate.platformUrl,
-            formats: ["markdown"],
-            waitFor: 2000,
-          }),
-        });
-
-        const data = await resp.json();
-        if (!resp.ok) return null;
-
-        const markdown = data?.data?.markdown || data?.markdown || "";
-
-        // Check if page contains time slot patterns (H:MM AM/PM in dining hours)
-        const timePattern = /\b(1?[0-9]):([0-5][0-9])\s*(PM|AM)\b/gi;
-        let hasSlots = false;
-        let match;
-        while ((match = timePattern.exec(markdown)) !== null) {
-          let h24 = parseInt(match[1]);
-          const ampm = match[3].toUpperCase();
-          if (ampm === "PM" && h24 !== 12) h24 += 12;
-          if (ampm === "AM" && h24 === 12) h24 = 0;
-          if (h24 >= 11 && h24 <= 23) { hasSlots = true; break; }
-        }
-
-        if (!hasSlots) {
-          console.log(`No availability: ${candidate.name}`);
-          return null;
-        }
-
-        console.log(`Confirmed available: ${candidate.name}`);
-        return candidate;
-      } catch (err) {
-        console.error(`Error verifying ${candidate.name}:`, err);
-        return null;
-      }
-    })
-  );
-
-  return results
-    .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled" && r.value !== null)
-    .map((r) => r.value);
-}
+// (verification removed — too aggressive, was filtering out valid OT results)
 
 // ─── Query parsing ───
 
@@ -279,9 +220,14 @@ async function fetchPlatformCandidates(
           `site:resy.com/cities ${params.city}${cuisineTerm} reserve`,
           `site:resy.com ${params.city}${cuisineTerm} resy restaurant`,
         ]
-      : [
+      : platform === "opentable"
+      ? [
           `site:opentable.com/r ${params.city}${cuisineTerm} reserve`,
           `site:opentable.com ${params.city}${cuisineTerm} opentable`,
+        ]
+      : [
+          `site:yelp.com/reservations ${params.city}${cuisineTerm}`,
+          `site:yelp.com/biz ${params.city}${cuisineTerm} reservation`,
         ];
 
   console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
@@ -332,7 +278,9 @@ function normalizeCandidate(platform: Platform, c: FirecrawlResult, params: Sear
   const bookingUrl =
     platform === "resy"
       ? buildResyBookingUrl(canonicalUrl, params)
-      : buildOpenTableBookingUrl(canonicalUrl, params);
+      : platform === "opentable"
+      ? buildOpenTableBookingUrl(canonicalUrl, params)
+      : canonicalUrl; // Yelp URLs are already booking-ready
 
   return {
     id: `${platform}-${hashKey(canonicalUrl)}`,
@@ -362,11 +310,24 @@ function extractCanonicalRestaurantUrl(platform: Platform, rawUrl: string): stri
       return null;
     }
 
-    const rPath = path.match(/^\/r\/[^/?#]+/i);
-    if (rPath) return `https://www.opentable.com${rPath[0]}`;
-    if (path.startsWith("/restref/client")) {
-      return `https://www.opentable.com${path}${u.search}`;
+    if (platform === "opentable") {
+      const rPath = path.match(/^\/r\/[^/?#]+/i);
+      if (rPath) return `https://www.opentable.com${rPath[0]}`;
+      if (path.startsWith("/restref/client")) {
+        return `https://www.opentable.com${path}${u.search}`;
+      }
+      return null;
     }
+
+    // Yelp: /biz/restaurant-name or /reservations/restaurant-name
+    if (platform === "yelp") {
+      const bizMatch = path.match(/^\/biz\/[^/?#]+/i);
+      if (bizMatch) return `https://www.yelp.com${bizMatch[0]}`;
+      const resMatch = path.match(/^\/reservations\/[^/?#]+/i);
+      if (resMatch) return `https://www.yelp.com${resMatch[0]}`;
+      return null;
+    }
+
     return null;
   } catch {
     return null;
@@ -537,6 +498,9 @@ function extractName(title: string | undefined, canonicalUrl: string, platform: 
       .replace(/\s*\|\s*resy.*/i, "")
       .replace(/\s*\|\s*opentable.*/i, "")
       .replace(/\s*-\s*opentable.*/i, "")
+      .replace(/\s*-\s*yelp$/i, "")
+      .replace(/\s*\|\s*yelp.*/i, "")
+      .replace(/\s*-\s*reservations.*$/i, "")
       .replace(/\s*-\s*atlanta,?\s*ga$/i, "")
       .trim();
     if (cleaned.length > 1) return cleaned;
