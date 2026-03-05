@@ -608,74 +608,74 @@ async function verifyAvailability(
   params: SearchParams,
   firecrawlKey: string
 ): Promise<Restaurant[]> {
-  // Cap at 30 to manage Firecrawl usage
-  const limited = candidates.slice(0, 30);
-  const keep: Restaurant[] = [];
+  // Cap at 20 candidates to keep response time under ~10s
+  const limited = candidates.slice(0, 20);
 
-  // Process in batches of 10
-  for (let i = 0; i < limited.length; i += 10) {
-    const batch = limited.slice(i, i + 10);
-    const checked = await Promise.all(batch.map(async (r) => {
-      try {
-        // Scrape the booking URL (which already has date/time/party params)
-        const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${firecrawlKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            url: r.platformUrl,
-            formats: ["markdown"],
-            onlyMainContent: true,
-          }),
-        });
+  // Run ALL scrapes in parallel (Firecrawl handles concurrency)
+  const checked = await Promise.all(limited.map(async (r) => {
+    try {
+      const isYelp = r.platform === "yelp";
 
-        if (!resp.ok) {
-          console.log(`Verification scrape failed (${resp.status}) for ${r.name} [${r.platform}]`);
-          return null;
-        }
+      const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${firecrawlKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: r.platformUrl,
+          formats: ["markdown"],
+          onlyMainContent: true,
+          ...(isYelp ? { waitFor: 3000 } : {}), // Yelp renders time slots via JS
+        }),
+      });
 
-        const data = await resp.json();
-        const markdown = extractFirecrawlMarkdown(data);
-        if (!markdown) {
-          console.log(`No content scraped for ${r.name} [${r.platform}]`);
-          return null;
-        }
-
-        const lower = markdown.toLowerCase();
-
-        // Check for "no availability" signals
-        if (NO_AVAILABILITY_SIGNALS.some((signal) => lower.includes(signal))) {
-          console.log(`No availability for ${r.name} [${r.platform}]`);
-          return null;
-        }
-
-        // Must find at least one time slot pattern (e.g. "7:00 pm", "19:00")
-        const hasTimeSlot12h = /\b\d{1,2}:\d{2}\s?(am|pm)\b/i.test(markdown);
-        const hasTimeSlot24h = /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/.test(markdown);
-        // Also check for Resy-style "Book" or "Reserve" buttons near times
-        const hasBookingAction = /\b(book|reserve|select)\b/i.test(markdown);
-
-        if (hasTimeSlot12h || (hasTimeSlot24h && hasBookingAction)) {
-          console.log(`✓ Verified ${r.name} [${r.platform}] — has time slots`);
-          return r;
-        }
-
-        console.log(`No time slots found for ${r.name} [${r.platform}]`);
-        return null;
-      } catch (err) {
-        console.log(`Verification error for ${r.name} [${r.platform}]:`, err);
+      if (!resp.ok) {
+        console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]`);
         return null;
       }
-    }));
 
-    for (const item of checked) {
-      if (item) keep.push(item);
+      const data = await resp.json();
+      const markdown = extractFirecrawlMarkdown(data);
+      if (!markdown) {
+        console.log(`No content for ${r.name} [${r.platform}]`);
+        return null;
+      }
+
+      const lower = markdown.toLowerCase();
+
+      // Check for "no availability" signals
+      if (NO_AVAILABILITY_SIGNALS.some((signal) => lower.includes(signal))) {
+        console.log(`No availability for ${r.name} [${r.platform}]`);
+        return null;
+      }
+
+      // Check for time slot patterns
+      const hasTimeSlot12h = /\b\d{1,2}:\d{2}\s?(am|pm)\b/i.test(markdown);
+      const hasTimeSlot24h = /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/.test(markdown);
+      const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(markdown);
+
+      // Yelp-specific: also accept "available" or "reservation" near a date as a pass
+      const hasYelpAvailability = isYelp && (
+        lower.includes("available") ||
+        lower.includes("make a reservation") ||
+        lower.includes("find a table")
+      );
+
+      if (hasTimeSlot12h || (hasTimeSlot24h && hasBookingAction) || hasYelpAvailability) {
+        console.log(`✓ Verified ${r.name} [${r.platform}]`);
+        return r;
+      }
+
+      console.log(`No time slots for ${r.name} [${r.platform}]`);
+      return null;
+    } catch (err) {
+      console.log(`Verify error for ${r.name} [${r.platform}]:`, err);
+      return null;
     }
-  }
+  }));
 
-  return keep;
+  return checked.filter(Boolean) as Restaurant[];
 }
 
 // ─── Utilities ───
