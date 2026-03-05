@@ -1,5 +1,5 @@
 import { Restaurant } from "@/types/restaurant";
-import { ExternalLink, Star, MapPin } from "lucide-react";
+import { Star, MapPin } from "lucide-react";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
@@ -54,7 +54,9 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
             {distLabel}
           </span>
         )}
-        <ExternalLink className="h-3.5 w-3.5 text-muted-foreground group-hover:text-primary transition-colors" />
+        <span className="text-xs text-muted-foreground group-hover:text-primary font-body transition-colors whitespace-nowrap">
+          Check availability →
+        </span>
       </div>
     </a>
   );

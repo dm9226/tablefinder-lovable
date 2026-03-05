@@ -80,21 +80,37 @@ async function parseQuery(
   apiKey: string
 ): Promise<SearchParams> {
   const now = new Date();
+  // Build a reference calendar for the AI
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const todayIdx = now.getDay();
+  const dateRef: string[] = [];
+  for (let d = 0; d <= 13; d++) {
+    const dt = new Date(now);
+    dt.setDate(dt.getDate() + d);
+    const label = d === 0 ? "today" : d === 1 ? "tomorrow" : "";
+    dateRef.push(`${dayNames[dt.getDay()]} ${dt.toISOString().split("T")[0]}${label ? ` (${label})` : ""}`);
+  }
+
   const parsePrompt = `You parse restaurant reservation search queries.
 
-Current date: ${now.toISOString().split("T")[0]}
-Current day of week: ${now.toLocaleDateString("en-US", { weekday: "long" })}
+Current date: ${now.toISOString().split("T")[0]} (${dayNames[todayIdx]})
 User location hint: ${location || "unknown"}
 Coordinates: lat=${lat || "unknown"}, lng=${lng || "unknown"}
 
+CALENDAR for next 14 days:
+${dateRef.join("\n")}
+
 Rules:
-- Convert suburbs to major metro city for booking platforms (e.g. "North Druid Hills" => "Atlanta").
-- "tomorrow" MUST map to the next calendar day.
-- dinner/tonight defaults to time "19:00"
+- "today" or "tonight" = ${now.toISOString().split("T")[0]}
+- "tomorrow" = the day AFTER today
+- "next Tuesday" = the FIRST Tuesday that appears AFTER today in the calendar above
+- "this Friday" = the FIRST Friday on or after today
+- Convert suburbs to major metro city (e.g. "North Druid Hills" => "Atlanta")
+- dinner/tonight defaults to time "19:00", lunch = "12:00"
 
 Return JSON:
 - cuisine: string ("" if unspecified)
-- date: YYYY-MM-DD
+- date: YYYY-MM-DD (MUST match a date from the calendar above)
 - time: HH:MM (24h)
 - partySize: number (default 2)
 - city: major city string
@@ -380,12 +396,23 @@ async function enrichWithAI(results: any[], apiKey: string, params: SearchParams
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash-lite",
+        model: "google/gemini-2.5-flash",
         messages: [{
           role: "user",
-          content: `For each restaurant in ${cityContext}, provide: Google rating (out of 5, one decimal), cuisine type, neighborhood, price range, and approximate latitude/longitude.
-Return JSON: { "restaurants": [{ "index": number, "rating": number|null, "cuisine": string, "neighborhood": string, "priceRange": string|null, "lat": number|null, "lng": number|null }] }
-Use your training data. Be as accurate as possible with coordinates.
+          content: `You are a restaurant data expert. For EVERY restaurant below in ${cityContext}, you MUST provide ALL fields. Do not skip any restaurant.
+
+For each, provide:
+- index: the number from the list
+- rating: Google Maps rating (out of 5, one decimal). If unsure, estimate based on the restaurant's reputation. NEVER leave null.
+- cuisine: specific cuisine type (e.g. "Italian", "Southern American", "Japanese")
+- neighborhood: the specific neighborhood in ${cityContext}
+- priceRange: "$", "$$", "$$$", or "$$$$"
+- lat: approximate latitude (must be a number, use the neighborhood's approximate location)
+- lng: approximate longitude (must be a number)
+
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "cuisine": string, "neighborhood": string, "priceRange": string, "lat": number, "lng": number }] }
+
+IMPORTANT: You MUST return an entry for EVERY restaurant in the list. Do not skip any.
 
 ${restaurantList}`,
         }],
