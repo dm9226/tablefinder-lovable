@@ -55,7 +55,7 @@ serve(async (req) => {
     const merged = dedupeAndSortByRating([...resyResults, ...otResults]);
 
     // Enrich with AI for ratings, cuisine, neighborhood
-    const enriched = await enrichWithAI(merged, LOVABLE_API_KEY);
+    const enriched = await enrichWithAI(merged, LOVABLE_API_KEY, params);
 
     console.log(`Returning ${enriched.length} results (Resy: ${resyResults.length}, OT: ${otResults.length})`);
 
@@ -155,7 +155,25 @@ User query: "${query}"`;
   parsed.time = /^\d{2}:\d{2}$/.test(parsed.time) ? parsed.time : "19:00";
   parsed.partySize = Number(parsed.partySize) > 0 ? Number(parsed.partySize) : 2;
 
-  // Always trust parsed date and propagate exactly to booking links.
+  // Propagate user coords
+  if (lat) parsed.lat = lat;
+  if (lng) parsed.lng = lng;
+
+  // Geocode if still missing
+  if ((!parsed.lat || parsed.lat === 0) && parsed.city) {
+    try {
+      const geoResp = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city + ", " + (parsed.state || ""))}&format=json&limit=1`,
+        { headers: { "User-Agent": "TableFinder/1.0" } }
+      );
+      const geoData = await geoResp.json();
+      if (geoData?.[0]) {
+        parsed.lat = parseFloat(geoData[0].lat);
+        parsed.lng = parseFloat(geoData[0].lon);
+      }
+    } catch (_e) { /* ignore */ }
+  }
+
   return parsed;
 }
 
@@ -351,10 +369,11 @@ function dedupeAndSortByRating(rows: any[]) {
   return Array.from(map.values()).slice(0, 80);
 }
 
-async function enrichWithAI(results: any[], apiKey: string): Promise<any[]> {
+async function enrichWithAI(results: any[], apiKey: string, params: SearchParams): Promise<any[]> {
   if (results.length === 0) return [];
 
-  const restaurantList = results.map((r, i) => `${i}. ${r.name} (${r.platform})`).join("\n");
+  const restaurantList = results.map((r, i) => `${i}. ${r.name} (${r.platform}, ${r.neighborhood})`).join("\n");
+  const cityContext = `${params.city}, ${params.state}`;
 
   try {
     const resp = await fetch(AI_GATEWAY, {
@@ -364,9 +383,9 @@ async function enrichWithAI(results: any[], apiKey: string): Promise<any[]> {
         model: "google/gemini-2.5-flash-lite",
         messages: [{
           role: "user",
-          content: `For each restaurant below, provide its Google rating (out of 5, one decimal), cuisine type, neighborhood, and price range.
-Return a JSON object with a "restaurants" array where each item has: index (number), rating (number or null), cuisine (string), neighborhood (string), priceRange (string like "$$" or null).
-Only include restaurants you have confident data for. Use your training data.
+          content: `For each restaurant in ${cityContext}, provide: Google rating (out of 5, one decimal), cuisine type, neighborhood, price range, and approximate latitude/longitude.
+Return JSON: { "restaurants": [{ "index": number, "rating": number|null, "cuisine": string, "neighborhood": string, "priceRange": string|null, "lat": number|null, "lng": number|null }] }
+Use your training data. Be as accurate as possible with coordinates.
 
 ${restaurantList}`,
         }],
@@ -392,24 +411,53 @@ ${restaurantList}`,
       if (typeof e.index === "number") enrichMap.set(e.index, e);
     }
 
+    const userLat = params.lat || 0;
+    const userLng = params.lng || 0;
+
     const enriched = results.map((r, i) => {
       const e = enrichMap.get(i);
-      if (!e) return r;
+      if (!e) return { ...r, distanceMiles: null };
+
+      const rLat = e.lat || null;
+      const rLng = e.lng || null;
+      let distanceMiles: number | null = null;
+
+      if (rLat && rLng && userLat && userLng) {
+        distanceMiles = haversine(userLat, userLng, rLat, rLng);
+      }
+
       return {
         ...r,
         rating: e.rating ?? r.rating,
         cuisine: e.cuisine || r.cuisine,
         neighborhood: e.neighborhood || r.neighborhood,
         priceRange: e.priceRange || r.priceRange,
+        distanceMiles,
       };
     });
 
-    // Sort by rating descending
-    return enriched.sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+    // Sort by distance first (nulls last), then rating descending
+    return enriched.sort((a, b) => {
+      const dA = a.distanceMiles ?? 9999;
+      const dB = b.distanceMiles ?? 9999;
+      if (Math.abs(dA - dB) > 0.1) return dA - dB;
+      return (b.rating ?? 0) - (a.rating ?? 0);
+    });
   } catch (err) {
     console.error("AI enrich error:", err);
     return results;
   }
+}
+
+function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 3959; // Earth radius in miles
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function extractName(title: string | undefined, canonicalUrl: string, platform: Platform): string {
