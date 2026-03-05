@@ -126,9 +126,11 @@ Rules:
 - dinner/tonight defaults to time "19:00", lunch = "12:00", breakfast = "08:00", brunch = "10:30"
 - If the user mentions a meal type (breakfast, brunch, lunch, dinner), use the corresponding default time above
 - If no meal or time is mentioned, default to "19:00"
+- IMPORTANT: "brunch" is BOTH a meal time AND a cuisine/experience. When the user says "brunch", set time to "10:30" AND set cuisine to "brunch" (so results include brunch-specific restaurants and menus). Same for "breakfast" — set cuisine to "breakfast" in addition to the time.
+- If the user says something like "brunch Italian", set cuisine to "brunch italian" to capture both the meal style and food preference.
 
 Return JSON:
-- cuisine: string ("" if unspecified)
+- cuisine: string ("" if unspecified — but include meal type like "brunch" or "breakfast" when mentioned)
 - date: YYYY-MM-DD
 - time: HH:MM (24h)
 - partySize: number (default 2)
