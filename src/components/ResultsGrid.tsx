@@ -1,22 +1,19 @@
 import { Restaurant } from "@/types/restaurant";
 import { RestaurantCard } from "./RestaurantCard";
-import { Loader2, SearchX } from "lucide-react";
+import { SearchX } from "lucide-react";
+import { SearchProgress } from "./SearchProgress";
 
 interface ResultsGridProps {
   results: Restaurant[];
   isLoading: boolean;
   error: string | null;
   hasSearched: boolean;
+  onCancel: () => void;
 }
 
-export function ResultsGrid({ results, isLoading, error, hasSearched }: ResultsGridProps) {
+export function ResultsGrid({ results, isLoading, error, hasSearched, onCancel }: ResultsGridProps) {
   if (isLoading) {
-    return (
-      <div className="flex flex-col items-center justify-center py-20 gap-3">
-        <Loader2 className="h-8 w-8 text-primary animate-spin" />
-        <p className="text-muted-foreground font-body text-sm">Searching for tables…</p>
-      </div>
-    );
+    return <SearchProgress onCancel={onCancel} />;
   }
 
   if (error) {
