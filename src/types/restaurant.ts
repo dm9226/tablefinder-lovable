@@ -1,7 +1,7 @@
 export interface TimeSlot {
-  time: string; // e.g. "7:30 PM"
-  token?: string; // Resy reservation token
-  type?: string; // e.g. "Dining Room", "Bar"
+  time: string;
+  token?: string;
+  type?: string;
 }
 
 export interface Restaurant {
@@ -10,17 +10,18 @@ export interface Restaurant {
   cuisine: string;
   neighborhood: string;
   rating?: number;
-  priceRange?: string; // e.g. "$$", "$$$"
+  priceRange?: string;
   imageUrl?: string;
   platform: "resy" | "opentable" | "yelp";
   platformUrl: string;
   timeSlots: TimeSlot[];
+  distanceMiles?: number | null;
 }
 
 export interface SearchParams {
   cuisine?: string;
-  date: string; // YYYY-MM-DD
-  time: string; // HH:MM (24h)
+  date: string;
+  time: string;
   partySize: number;
   city: string;
   state?: string;

@@ -1,5 +1,5 @@
 import { Restaurant } from "@/types/restaurant";
-import { ExternalLink, Star } from "lucide-react";
+import { ExternalLink, Star, MapPin } from "lucide-react";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
@@ -12,6 +12,9 @@ interface RestaurantCardProps {
 }
 
 export function RestaurantCard({ restaurant }: RestaurantCardProps) {
+  const dist = restaurant.distanceMiles;
+  const distLabel = dist != null ? (dist < 0.1 ? "< 0.1 mi" : `${dist.toFixed(1)} mi`) : null;
+
   return (
     <a
       href={restaurant.platformUrl}
@@ -44,7 +47,15 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
           </p>
         </div>
       </div>
-      <ExternalLink className="h-3.5 w-3.5 text-muted-foreground group-hover:text-primary shrink-0 transition-colors" />
+      <div className="flex items-center gap-3 shrink-0">
+        {distLabel && (
+          <span className="flex items-center gap-0.5 text-xs text-muted-foreground font-body">
+            <MapPin className="h-3 w-3" />
+            {distLabel}
+          </span>
+        )}
+        <ExternalLink className="h-3.5 w-3.5 text-muted-foreground group-hover:text-primary transition-colors" />
+      </div>
     </a>
   );
 }
