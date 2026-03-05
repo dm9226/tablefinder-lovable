@@ -170,8 +170,30 @@ User query: "${query}"`;
   if (!toolCall) throw new Error("Failed to parse search query");
 
   const parsed = JSON.parse(toolCall.function.arguments) as SearchParams;
-  parsed.city = parsed.city?.trim() || "Atlanta";
-  parsed.state = parsed.state?.trim() || "GA";
+  const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
+  parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
+  parsed.state = INVALID_CITY.has((parsed.state || "").trim().toLowerCase()) ? "" : parsed.state?.trim() || "";
+  // If city is still empty, try reverse-geocoding from coords or default to Atlanta
+  if (!parsed.city) {
+    if (lat && lng) {
+      try {
+        const revResp = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+          { headers: { "User-Agent": "TableFinder/1.0" } }
+        );
+        const revData = await revResp.json();
+        parsed.city = revData.address?.city || revData.address?.town || "Atlanta";
+        parsed.state = revData.address?.state_code || revData.address?.state || "GA";
+      } catch {
+        parsed.city = "Atlanta";
+        parsed.state = "GA";
+      }
+    } else {
+      parsed.city = "Atlanta";
+      parsed.state = "GA";
+    }
+  }
+  if (!parsed.state) parsed.state = "GA";
   parsed.cuisine = parsed.cuisine?.trim() || "";
   parsed.time = /^\d{2}:\d{2}$/.test(parsed.time) ? parsed.time : "19:00";
   parsed.partySize = Number(parsed.partySize) > 0 ? Number(parsed.partySize) : 2;
@@ -639,40 +661,71 @@ ${list}`,
 // ─── Verify platform URLs actually exist (HEAD check) ───
 
 async function verifyPlatformUrls(restaurants: Restaurant[]): Promise<Restaurant[]> {
-  const results = await Promise.all(
-    restaurants.map(async (r) => {
-      try {
-        // Use the canonical URL (without booking params) for the check
-        const checkUrl = r.platformUrl.split("?")[0];
-        const resp = await fetch(checkUrl, {
-          method: "HEAD",
-          redirect: "follow",
-          headers: { "User-Agent": "TableFinder/1.0" },
-        });
-        // Accept 200-299; reject 404, 410, redirects to error pages
-        if (resp.ok) return r;
-        // Some sites block HEAD, try GET with abort
-        if (resp.status === 405 || resp.status === 403) {
-          const getResp = await fetch(checkUrl, {
+  // Process in batches of 10 to avoid overwhelming the target
+  const keep: Restaurant[] = [];
+  for (let i = 0; i < restaurants.length; i += 10) {
+    const batch = restaurants.slice(i, i + 10);
+    const checked = await Promise.all(
+      batch.map(async (r) => {
+        try {
+          const checkUrl = r.platformUrl.split("?")[0];
+          const resp = await fetch(checkUrl, {
             method: "GET",
             redirect: "follow",
-            headers: { "User-Agent": "TableFinder/1.0" },
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; TableFinder/1.0)" },
           });
-          const body = await getResp.text();
-          // Check for common "not found" signals
-          if (getResp.ok && !body.toLowerCase().includes("page not found") && !body.toLowerCase().includes("404")) {
-            return r;
+          const body = await resp.text();
+          const lower = body.toLowerCase();
+
+          // Hard reject on non-200
+          if (!resp.ok) {
+            console.log(`Dropping ${r.platform} (${resp.status}): ${checkUrl}`);
+            return null;
           }
+
+          // OT-specific: check for "we can't find that restaurant" or redirect to search
+          if (r.platform === "opentable") {
+            const otBadSignals = [
+              "we couldn't find",
+              "we can't find",
+              "page not found",
+              "this restaurant is no longer",
+              "restaurant not found",
+              "no longer available on opentable",
+              "looking for something else",
+            ];
+            if (otBadSignals.some((s) => lower.includes(s))) {
+              console.log(`Dropping OT (content signals not-found): ${checkUrl}`);
+              return null;
+            }
+            // Check for redirect to homepage or search
+            const finalUrl = resp.url || checkUrl;
+            if (finalUrl.includes("/s?") || finalUrl === "https://www.opentable.com/" || finalUrl === "https://www.opentable.com") {
+              console.log(`Dropping OT (redirected to search/home): ${checkUrl}`);
+              return null;
+            }
+          }
+
+          // Resy-specific
+          if (r.platform === "resy") {
+            const resyBadSignals = ["page not found", "404", "venue not found"];
+            if (resyBadSignals.some((s) => lower.includes(s))) {
+              console.log(`Dropping Resy (not-found): ${checkUrl}`);
+              return null;
+            }
+          }
+
+          return r;
+        } catch {
+          return r; // network error — keep (benefit of the doubt)
         }
-        console.log(`Dropping invalid ${r.platform} URL (${resp.status}): ${checkUrl}`);
-        return null;
-      } catch {
-        // Network error — keep the result (benefit of the doubt)
-        return r;
-      }
-    })
-  );
-  return results.filter(Boolean) as Restaurant[];
+      })
+    );
+    for (const item of checked) {
+      if (item) keep.push(item);
+    }
+  }
+  return keep;
 }
 
 // ─── Utilities ───
