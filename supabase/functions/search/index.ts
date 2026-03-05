@@ -67,8 +67,15 @@ serve(async (req) => {
     ]);
 
     // Normalize Firecrawl results into Restaurant objects
-    const resyResults = normalizeCandidates("resy", resyCandidates, params);
-    const otResults = normalizeCandidates("opentable", otCandidates, params);
+    const resyRaw = normalizeCandidates("resy", resyCandidates, params);
+    const otRaw = normalizeCandidates("opentable", otCandidates, params);
+
+    // Step 2b: Verify Resy/OT pages actually exist (HEAD check)
+    const [resyResults, otResults] = await Promise.all([
+      verifyPlatformUrls(resyRaw),
+      verifyPlatformUrls(otRaw),
+    ]);
+    console.log(`Verified — Resy: ${resyResults.length}/${resyRaw.length}, OT: ${otResults.length}/${otRaw.length}`);
 
     const allResults = dedupeByName([...resyResults, ...otResults, ...yelpResults]);
     console.log(`Results — Resy: ${resyResults.length}, OT: ${otResults.length}, Yelp: ${yelpResults.length}, deduped: ${allResults.length}`);
@@ -627,6 +634,45 @@ ${list}`,
     console.error("AI enrich error:", err);
     return results;
   }
+}
+
+// ─── Verify platform URLs actually exist (HEAD check) ───
+
+async function verifyPlatformUrls(restaurants: Restaurant[]): Promise<Restaurant[]> {
+  const results = await Promise.all(
+    restaurants.map(async (r) => {
+      try {
+        // Use the canonical URL (without booking params) for the check
+        const checkUrl = r.platformUrl.split("?")[0];
+        const resp = await fetch(checkUrl, {
+          method: "HEAD",
+          redirect: "follow",
+          headers: { "User-Agent": "TableFinder/1.0" },
+        });
+        // Accept 200-299; reject 404, 410, redirects to error pages
+        if (resp.ok) return r;
+        // Some sites block HEAD, try GET with abort
+        if (resp.status === 405 || resp.status === 403) {
+          const getResp = await fetch(checkUrl, {
+            method: "GET",
+            redirect: "follow",
+            headers: { "User-Agent": "TableFinder/1.0" },
+          });
+          const body = await getResp.text();
+          // Check for common "not found" signals
+          if (getResp.ok && !body.toLowerCase().includes("page not found") && !body.toLowerCase().includes("404")) {
+            return r;
+          }
+        }
+        console.log(`Dropping invalid ${r.platform} URL (${resp.status}): ${checkUrl}`);
+        return null;
+      } catch {
+        // Network error — keep the result (benefit of the doubt)
+        return r;
+      }
+    })
+  );
+  return results.filter(Boolean) as Restaurant[];
 }
 
 // ─── Utilities ───
