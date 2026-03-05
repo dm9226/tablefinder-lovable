@@ -53,16 +53,16 @@ serve(async (req) => {
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
     console.log("Parsed params:", JSON.stringify(params));
 
-    // Step 2: Fetch from all platforms in parallel
+    // Step 2: Discover candidates from all platforms in parallel
     if (!YELP_API_KEY) {
-      console.warn("YELP_API_KEY missing — skipping Yelp to avoid low-confidence reservation results");
+      console.warn("YELP_API_KEY missing — skipping Yelp");
     }
 
-    const [resyCandidates, otCandidates, yelpResults] = await Promise.all([
+    const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
       searchFirecrawl(params, FIRECRAWL_API_KEY, "resy"),
       searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable"),
       YELP_API_KEY
-        ? fetchYelpWithReservations(params, YELP_API_KEY, FIRECRAWL_API_KEY)
+        ? fetchYelpCandidates(params, YELP_API_KEY)
         : Promise.resolve([] as Restaurant[]),
     ]);
 
@@ -70,18 +70,16 @@ serve(async (req) => {
     const resyRaw = normalizeCandidates("resy", resyCandidates, params);
     const otRaw = normalizeCandidates("opentable", otCandidates, params);
 
-    // Step 2b: Verify Resy/OT pages actually exist (HEAD check)
-    const [resyResults, otResults] = await Promise.all([
-      verifyPlatformUrls(resyRaw),
-      verifyPlatformUrls(otRaw),
-    ]);
-    console.log(`Verified — Resy: ${resyResults.length}/${resyRaw.length}, OT: ${otResults.length}/${otRaw.length}`);
+    const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates]);
+    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, deduped: ${allCandidates.length}`);
 
-    const allResults = dedupeByName([...resyResults, ...otResults, ...yelpResults]);
-    console.log(`Results — Resy: ${resyResults.length}, OT: ${otResults.length}, Yelp: ${yelpResults.length}, deduped: ${allResults.length}`);
+    // Step 3: UNIFIED VERIFICATION GATE
+    // Every candidate must pass a Firecrawl scrape check confirming real availability
+    const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY);
+    console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
 
-    // Step 3: Enrich with AI (ratings, cuisine, neighborhood, coords)
-    const enriched = await enrichWithAI(allResults, LOVABLE_API_KEY, params);
+    // Step 4: Enrich with AI (ratings, cuisine, neighborhood, coords)
+    const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
 
     return new Response(
       JSON.stringify({ results: enriched, params }),
@@ -421,11 +419,10 @@ function cleanName(title: string | undefined, url: string, platform: string): st
 
 // ─── Yelp Fusion API: search for restaurants that accept reservations ───
 
-async function fetchYelpWithReservations(
-  params: SearchParams, yelpKey: string, firecrawlKey: string
+async function fetchYelpCandidates(
+  params: SearchParams, yelpKey: string
 ): Promise<Restaurant[]> {
   try {
-    // First try with reservation attribute
     const sp = new URLSearchParams({
       term: `${params.cuisine || ""} restaurants`.trim(),
       location: `${params.city}, ${params.state}`,
@@ -443,38 +440,29 @@ async function fetchYelpWithReservations(
       headers: { Authorization: `Bearer ${yelpKey}` },
     });
 
-    let data: any;
-    if (resp.ok) {
-      data = await resp.json();
-    }
+    let businesses = resp.ok ? (await resp.json())?.businesses || [] : [];
 
-    let businesses = data?.businesses || [];
-
-    // If reservation filter returned few results, broaden and keep reservation-capable transactions only.
+    // Broaden if few results
     if (businesses.length < 5) {
-      console.log(`Yelp reservation filter returned only ${businesses.length}, trying broader search`);
+      console.log(`Yelp reservation filter returned only ${businesses.length}, broadening`);
       sp.delete("attributes");
       const resp2 = await fetch(`${YELP_API}/businesses/search?${sp}`, {
         headers: { Authorization: `Bearer ${yelpKey}` },
       });
       if (resp2.ok) {
-        const data2 = await resp2.json();
-        const broader = (data2.businesses || []).filter((b: any) =>
+        const broader = ((await resp2.json()).businesses || []).filter((b: any) =>
           b.transactions?.includes("restaurant_reservation")
         );
         const seen = new Set(businesses.map((b: any) => b.id));
         for (const b of broader) {
-          if (!seen.has(b.id)) {
-            businesses.push(b);
-            seen.add(b.id);
-          }
+          if (!seen.has(b.id)) { businesses.push(b); seen.add(b.id); }
         }
       }
     }
 
-    console.log(`Yelp pre-verify: ${businesses.length} reservation-capable businesses`);
+    console.log(`Yelp candidates: ${businesses.length}`);
 
-    const mapped = businesses
+    return businesses
       .filter((b: any) => !!b.alias)
       .map((b: any): Restaurant => ({
         id: `yelp-${b.id}`,
@@ -489,72 +477,10 @@ async function fetchYelpWithReservations(
         timeSlots: [],
         distanceMiles: b.distance ? +(b.distance / 1609.34).toFixed(1) : null,
       }));
-
-    const verified = await verifyYelpAvailabilityWithFirecrawl(mapped, params, firecrawlKey);
-    console.log(`Yelp verified available: ${verified.length}/${mapped.length}`);
-    return verified;
   } catch (err) {
     console.error("Yelp error:", err);
     return [];
   }
-}
-
-async function verifyYelpAvailabilityWithFirecrawl(
-  candidates: Restaurant[],
-  params: SearchParams,
-  firecrawlKey: string
-): Promise<Restaurant[]> {
-  const limited = candidates.slice(0, 10);
-  const keep: Restaurant[] = [];
-
-  for (let i = 0; i < limited.length; i += 10) {
-    const batch = limited.slice(i, i + 10);
-    const checked = await Promise.all(batch.map(async (r) => {
-      const verifyUrl = buildYelpAvailabilityUrl(r.platformUrl, params);
-
-      try {
-        const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${firecrawlKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            url: verifyUrl,
-            formats: ["markdown"],
-            onlyMainContent: true,
-          }),
-        });
-
-        if (!resp.ok) return null;
-        const data = await resp.json();
-        const markdown = extractFirecrawlMarkdown(data).toLowerCase();
-        if (!markdown) return null;
-
-        const blocked = [
-          "not currently accepting reservations",
-          "this business is not currently accepting reservations",
-          "no availability",
-          "temporarily unavailable",
-        ];
-        if (blocked.some((phrase) => markdown.includes(phrase))) return null;
-
-        const requestedTime = toTwelveHourLabel(params.time).toLowerCase();
-        const hasAnyTimes = /\b\d{1,2}:\d{2}\s?(am|pm)\b/i.test(markdown);
-        const hasRequestedTime = requestedTime ? markdown.includes(requestedTime) : false;
-
-        return hasRequestedTime || hasAnyTimes ? r : null;
-      } catch {
-        return null;
-      }
-    }));
-
-    for (const item of checked) {
-      if (item) keep.push(item);
-    }
-  }
-
-  return keep;
 }
 
 function buildYelpAvailabilityUrl(baseUrl: string, params: SearchParams): string {
@@ -658,73 +584,97 @@ ${list}`,
   }
 }
 
-// ─── Verify platform URLs actually exist (HEAD check) ───
+// ─── UNIFIED VERIFICATION GATE ───
+// Every candidate must pass this check before being returned.
+// Scrapes the booking URL via Firecrawl and confirms time slots exist.
 
-async function verifyPlatformUrls(restaurants: Restaurant[]): Promise<Restaurant[]> {
-  // Process in batches of 10 to avoid overwhelming the target
+const NO_AVAILABILITY_SIGNALS = [
+  // Generic
+  "no availability", "no online availability", "no tables available",
+  "not available", "fully booked", "sold out",
+  // Resy
+  "there's no online availability", "no online reservations", "at the moment, there's no",
+  // OpenTable
+  "we didn't find", "no results", "we couldn't find", "we can't find",
+  "this restaurant is no longer", "restaurant not found", "no longer available on opentable",
+  "page not found", "looking for something else",
+  // Yelp
+  "not currently accepting reservations", "this business is not currently accepting reservations",
+  "temporarily unavailable",
+];
+
+async function verifyAvailability(
+  candidates: Restaurant[],
+  params: SearchParams,
+  firecrawlKey: string
+): Promise<Restaurant[]> {
+  // Cap at 30 to manage Firecrawl usage
+  const limited = candidates.slice(0, 30);
   const keep: Restaurant[] = [];
-  for (let i = 0; i < restaurants.length; i += 10) {
-    const batch = restaurants.slice(i, i + 10);
-    const checked = await Promise.all(
-      batch.map(async (r) => {
-        try {
-          const checkUrl = r.platformUrl.split("?")[0];
-          const resp = await fetch(checkUrl, {
-            method: "GET",
-            redirect: "follow",
-            headers: { "User-Agent": "Mozilla/5.0 (compatible; TableFinder/1.0)" },
-          });
-          const body = await resp.text();
-          const lower = body.toLowerCase();
 
-          // Hard reject on non-200
-          if (!resp.ok) {
-            console.log(`Dropping ${r.platform} (${resp.status}): ${checkUrl}`);
-            return null;
-          }
+  // Process in batches of 10
+  for (let i = 0; i < limited.length; i += 10) {
+    const batch = limited.slice(i, i + 10);
+    const checked = await Promise.all(batch.map(async (r) => {
+      try {
+        // Scrape the booking URL (which already has date/time/party params)
+        const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${firecrawlKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url: r.platformUrl,
+            formats: ["markdown"],
+            onlyMainContent: true,
+          }),
+        });
 
-          // OT-specific: check for "we can't find that restaurant" or redirect to search
-          if (r.platform === "opentable") {
-            const otBadSignals = [
-              "we couldn't find",
-              "we can't find",
-              "page not found",
-              "this restaurant is no longer",
-              "restaurant not found",
-              "no longer available on opentable",
-              "looking for something else",
-            ];
-            if (otBadSignals.some((s) => lower.includes(s))) {
-              console.log(`Dropping OT (content signals not-found): ${checkUrl}`);
-              return null;
-            }
-            // Check for redirect to homepage or search
-            const finalUrl = resp.url || checkUrl;
-            if (finalUrl.includes("/s?") || finalUrl === "https://www.opentable.com/" || finalUrl === "https://www.opentable.com") {
-              console.log(`Dropping OT (redirected to search/home): ${checkUrl}`);
-              return null;
-            }
-          }
-
-          // Resy-specific
-          if (r.platform === "resy") {
-            const resyBadSignals = ["page not found", "404", "venue not found"];
-            if (resyBadSignals.some((s) => lower.includes(s))) {
-              console.log(`Dropping Resy (not-found): ${checkUrl}`);
-              return null;
-            }
-          }
-
-          return r;
-        } catch {
-          return r; // network error — keep (benefit of the doubt)
+        if (!resp.ok) {
+          console.log(`Verification scrape failed (${resp.status}) for ${r.name} [${r.platform}]`);
+          return null;
         }
-      })
-    );
+
+        const data = await resp.json();
+        const markdown = extractFirecrawlMarkdown(data);
+        if (!markdown) {
+          console.log(`No content scraped for ${r.name} [${r.platform}]`);
+          return null;
+        }
+
+        const lower = markdown.toLowerCase();
+
+        // Check for "no availability" signals
+        if (NO_AVAILABILITY_SIGNALS.some((signal) => lower.includes(signal))) {
+          console.log(`No availability for ${r.name} [${r.platform}]`);
+          return null;
+        }
+
+        // Must find at least one time slot pattern (e.g. "7:00 pm", "19:00")
+        const hasTimeSlot12h = /\b\d{1,2}:\d{2}\s?(am|pm)\b/i.test(markdown);
+        const hasTimeSlot24h = /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/.test(markdown);
+        // Also check for Resy-style "Book" or "Reserve" buttons near times
+        const hasBookingAction = /\b(book|reserve|select)\b/i.test(markdown);
+
+        if (hasTimeSlot12h || (hasTimeSlot24h && hasBookingAction)) {
+          console.log(`✓ Verified ${r.name} [${r.platform}] — has time slots`);
+          return r;
+        }
+
+        console.log(`No time slots found for ${r.name} [${r.platform}]`);
+        return null;
+      } catch (err) {
+        console.log(`Verification error for ${r.name} [${r.platform}]:`, err);
+        return null;
+      }
+    }));
+
     for (const item of checked) {
       if (item) keep.push(item);
     }
   }
+
   return keep;
 }
 
