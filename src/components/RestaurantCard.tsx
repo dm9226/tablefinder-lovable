@@ -1,5 +1,5 @@
 import { Restaurant } from "@/types/restaurant";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Star } from "lucide-react";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
@@ -26,9 +26,17 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
           {restaurant.platform === "opentable" ? "OT" : restaurant.platform}
         </span>
         <div className="min-w-0">
-          <h3 className="font-heading text-sm font-semibold text-foreground truncate">
-            {restaurant.name}
-          </h3>
+          <div className="flex items-center gap-2">
+            <h3 className="font-heading text-sm font-semibold text-foreground truncate">
+              {restaurant.name}
+            </h3>
+            {restaurant.rating && (
+              <span className="flex items-center gap-0.5 text-primary shrink-0">
+                <Star className="h-3 w-3 fill-current" />
+                <span className="text-xs font-body font-medium">{restaurant.rating}</span>
+              </span>
+            )}
+          </div>
           <p className="text-xs text-muted-foreground font-body truncate">
             {restaurant.cuisine}
             {restaurant.priceRange && ` · ${restaurant.priceRange}`}
