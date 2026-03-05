@@ -1,11 +1,14 @@
 import { useState, useRef, useEffect } from "react";
-import { Search, MapPin, Loader2 } from "lucide-react";
+import { Search, MapPin, Loader2, Coffee, Sun, Utensils, Moon } from "lucide-react";
+import type { MealType } from "@/pages/Index";
 
 interface SearchBarProps {
   onSearch: (query: string) => void;
   isLoading: boolean;
   location: string | null;
-  onDetectLocation: () => void;
+  locationLoading: boolean;
+  mealType: MealType;
+  onMealTypeChange: (meal: MealType) => void;
 }
 
 const SUGGESTIONS = [
@@ -16,7 +19,14 @@ const SUGGESTIONS = [
   "Steakhouse this weekend",
 ];
 
-export function SearchBar({ onSearch, isLoading, location, onDetectLocation }: SearchBarProps) {
+const MEAL_OPTIONS: { value: MealType; label: string; icon: typeof Coffee }[] = [
+  { value: "breakfast", label: "Breakfast", icon: Coffee },
+  { value: "brunch", label: "Brunch", icon: Sun },
+  { value: "lunch", label: "Lunch", icon: Utensils },
+  { value: "dinner", label: "Dinner", icon: Moon },
+];
+
+export function SearchBar({ onSearch, isLoading, location, locationLoading, mealType, onMealTypeChange }: SearchBarProps) {
   const [query, setQuery] = useState("");
   const [placeholder, setPlaceholder] = useState(SUGGESTIONS[0]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -39,6 +49,25 @@ export function SearchBar({ onSearch, isLoading, location, onDetectLocation }: S
 
   return (
     <form onSubmit={handleSubmit} className="w-full max-w-2xl mx-auto">
+      {/* Meal type selector */}
+      <div className="flex items-center justify-center gap-2 mb-4">
+        {MEAL_OPTIONS.map(({ value, label, icon: Icon }) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => onMealTypeChange(value)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-body font-medium transition-all ${
+              mealType === value
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "bg-secondary text-muted-foreground hover:text-foreground hover:bg-secondary/80"
+            }`}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+          </button>
+        ))}
+      </div>
+
       <div className="relative group">
         <div className="absolute -inset-0.5 bg-primary/20 rounded-xl blur-md opacity-0 group-focus-within:opacity-100 transition-opacity duration-300" />
         <div className="relative flex items-center bg-card border border-border rounded-xl overflow-hidden transition-colors focus-within:border-primary/50">
@@ -67,14 +96,17 @@ export function SearchBar({ onSearch, isLoading, location, onDetectLocation }: S
       </div>
 
       <div className="flex items-center justify-center mt-3 gap-2">
-        <button
-          type="button"
-          onClick={onDetectLocation}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary transition-colors font-body"
-        >
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-body">
           <MapPin className="h-3.5 w-3.5" />
-          {location || "Detect my location"}
-        </button>
+          {locationLoading ? (
+            <span className="flex items-center gap-1">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Detecting location…
+            </span>
+          ) : (
+            location || "Location not available"
+          )}
+        </div>
       </div>
     </form>
   );

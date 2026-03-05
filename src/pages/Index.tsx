@@ -1,9 +1,18 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { SearchBar } from "@/components/SearchBar";
 import { ResultsGrid } from "@/components/ResultsGrid";
 import { Restaurant } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+
+export type MealType = "breakfast" | "brunch" | "lunch" | "dinner";
+
+const MEAL_TIME_MAP: Record<MealType, string> = {
+  breakfast: "08:00",
+  brunch: "10:30",
+  lunch: "12:00",
+  dinner: "19:00",
+};
 
 const Index = () => {
   const [results, setResults] = useState<Restaurant[]>([]);
@@ -11,12 +20,15 @@ const Index = () => {
   const [error, setError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
   const [location, setLocation] = useState<string | null>(null);
+  const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [mealType, setMealType] = useState<MealType>("dinner");
   const abortRef = useRef<AbortController | null>(null);
 
-  const detectLocation = useCallback(() => {
+  // Auto-detect location on mount
+  useEffect(() => {
     if (!navigator.geolocation) {
-      toast.error("Geolocation not supported by your browser");
+      setLocationLoading(false);
       return;
     }
     navigator.geolocation.getCurrentPosition(
@@ -34,8 +46,11 @@ const Index = () => {
         } catch {
           setLocation("Location detected");
         }
+        setLocationLoading(false);
       },
-      () => toast.error("Could not detect location")
+      () => {
+        setLocationLoading(false);
+      }
     );
   }, []);
 
@@ -64,6 +79,8 @@ const Index = () => {
             lat: coords?.lat,
             lng: coords?.lng,
             location: location,
+            mealType,
+            preferredTime: MEAL_TIME_MAP[mealType],
           },
         });
 
@@ -84,7 +101,7 @@ const Index = () => {
         }
       }
     },
-    [coords, location]
+    [coords, location, mealType]
   );
 
   return (
@@ -105,7 +122,9 @@ const Index = () => {
           onSearch={handleSearch}
           isLoading={isLoading}
           location={location}
-          onDetectLocation={detectLocation}
+          locationLoading={locationLoading}
+          mealType={mealType}
+          onMealTypeChange={setMealType}
         />
       </section>
 
