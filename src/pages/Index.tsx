@@ -1,12 +1,112 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+import { useState, useCallback } from "react";
+import { SearchBar } from "@/components/SearchBar";
+import { ResultsGrid } from "@/components/ResultsGrid";
+import { Restaurant } from "@/types/restaurant";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 const Index = () => {
+  const [results, setResults] = useState<Restaurant[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [location, setLocation] = useState<string | null>(null);
+  const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+
+  const detectLocation = useCallback(() => {
+    if (!navigator.geolocation) {
+      toast.error("Geolocation not supported by your browser");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        setCoords({ lat: latitude, lng: longitude });
+        try {
+          const resp = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
+          );
+          const data = await resp.json();
+          const city = data.address?.city || data.address?.town || data.address?.village || "";
+          const state = data.address?.state || "";
+          setLocation(city ? `${city}, ${state}` : "Location detected");
+        } catch {
+          setLocation("Location detected");
+        }
+      },
+      () => toast.error("Could not detect location")
+    );
+  }, []);
+
+  const handleSearch = useCallback(
+    async (query: string) => {
+      setIsLoading(true);
+      setError(null);
+      setHasSearched(true);
+      setResults([]);
+
+      try {
+        const { data, error: fnError } = await supabase.functions.invoke("search", {
+          body: {
+            query,
+            lat: coords?.lat,
+            lng: coords?.lng,
+            location: location,
+          },
+        });
+
+        if (fnError) throw new Error(fnError.message);
+        if (data?.error) throw new Error(data.error);
+
+        setResults(data?.results || []);
+      } catch (err: any) {
+        console.error("Search error:", err);
+        setError(err.message || "Search failed. Please try again.");
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [coords, location]
+  );
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background">
-      <div className="text-center">
-        <h1 className="mb-4 text-4xl font-bold">Welcome to Your Blank App</h1>
-        <p className="text-xl text-muted-foreground">Start building your amazing project here!</p>
-      </div>
+    <div className="min-h-screen bg-background flex flex-col">
+      {/* Header */}
+      <header className="pt-16 pb-10 px-4 text-center">
+        <h1 className="font-heading text-4xl md:text-5xl font-bold text-foreground mb-2 tracking-tight">
+          Table<span className="text-primary">Finder</span>
+        </h1>
+        <p className="text-muted-foreground font-body text-base md:text-lg max-w-md mx-auto">
+          Search every reservation platform in one place
+        </p>
+      </header>
+
+      {/* Search */}
+      <section className="px-4 pb-10">
+        <SearchBar
+          onSearch={handleSearch}
+          isLoading={isLoading}
+          location={location}
+          onDetectLocation={detectLocation}
+        />
+      </section>
+
+      {/* Results */}
+      <section className="flex-1 pb-16">
+        <ResultsGrid
+          results={results}
+          isLoading={isLoading}
+          error={error}
+          hasSearched={hasSearched}
+        />
+      </section>
+
+      {/* Footer */}
+      <footer className="py-6 text-center border-t border-border">
+        <p className="text-xs text-muted-foreground font-body">
+          TableFinder aggregates availability from Resy, OpenTable & Yelp
+        </p>
+      </footer>
     </div>
   );
 };
