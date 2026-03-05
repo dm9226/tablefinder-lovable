@@ -40,11 +40,11 @@ export function ResultsGrid({ results, isLoading, error, hasSearched }: ResultsG
   if (!hasSearched) return null;
 
   return (
-    <div className="w-full max-w-6xl mx-auto px-4">
-      <p className="text-sm text-muted-foreground font-body mb-4">
-        {results.length} table{results.length !== 1 ? "s" : ""} found
+    <div className="w-full max-w-2xl mx-auto px-4">
+      <p className="text-xs text-muted-foreground font-body mb-2 px-4">
+        {results.length} result{results.length !== 1 ? "s" : ""}
       </p>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="border border-border rounded-lg overflow-hidden bg-card">
         {results.map((r) => (
           <RestaurantCard key={r.id} restaurant={r} />
         ))}
