@@ -8,8 +8,7 @@ const corsHeaders = {
 
 const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
-
-type Platform = "resy" | "opentable" | "yelp";
+const YELP_API = "https://api.yelp.com/v3";
 
 interface SearchParams {
   cuisine: string;
@@ -22,16 +21,18 @@ interface SearchParams {
   lng?: number;
 }
 
-interface FirecrawlResult {
-  url: string;
-  title?: string;
-  description?: string;
-  markdown?: string;
-}
-
-interface TimeSlot {
-  time: string;
-  type?: string;
+interface Restaurant {
+  id: string;
+  name: string;
+  cuisine: string;
+  neighborhood: string;
+  rating?: number;
+  priceRange?: string;
+  imageUrl?: string;
+  platform: "resy" | "opentable" | "yelp";
+  platformUrl: string;
+  timeSlots: { time: string; type?: string }[];
+  distanceMiles?: number | null;
 }
 
 serve(async (req) => {
@@ -43,6 +44,7 @@ serve(async (req) => {
     const { query, lat, lng, location } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
+    const YELP_API_KEY = Deno.env.get("YELP_API_KEY");
 
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
@@ -51,24 +53,21 @@ serve(async (req) => {
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
     console.log("Parsed params:", JSON.stringify(params));
 
-    // Step 2: Find candidate restaurants via Firecrawl search (all platforms in parallel)
-    const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
-      fetchPlatformCandidates(params, FIRECRAWL_API_KEY, "resy"),
-      fetchPlatformCandidates(params, FIRECRAWL_API_KEY, "opentable"),
-      fetchPlatformCandidates(params, FIRECRAWL_API_KEY, "yelp"),
+    // Step 2: Fetch from all platforms in parallel (scraping search pages = only available restaurants)
+    const [resyResults, otResults, yelpResults] = await Promise.all([
+      fetchResyAvailable(params, FIRECRAWL_API_KEY, LOVABLE_API_KEY),
+      fetchOpenTableAvailable(params, FIRECRAWL_API_KEY, LOVABLE_API_KEY),
+      YELP_API_KEY ? fetchYelpAvailable(params, YELP_API_KEY) : Promise.resolve([]),
     ]);
 
-    const resyResults = buildPlatformResults("resy", resyCandidates, params);
-    const otResults = buildPlatformResults("opentable", otCandidates, params);
-    const yelpResults = buildPlatformResults("yelp", yelpCandidates, params);
-    const allCandidates = dedupeByUrl([...resyResults, ...otResults, ...yelpResults]);
+    console.log(`Platform results — Resy: ${resyResults.length}, OT: ${otResults.length}, Yelp: ${yelpResults.length}`);
 
-    console.log(`Found ${allCandidates.length} unique candidates (resy: ${resyResults.length}, OT: ${otResults.length}, yelp: ${yelpResults.length})`);
+    // Step 3: Dedupe and merge
+    const allResults = dedupeByName([...resyResults, ...otResults, ...yelpResults]);
+    console.log(`After dedup: ${allResults.length} results`);
 
-    // Step 3: Enrich with AI for ratings, cuisine, neighborhood, coords (skip expensive verification)
-    const enriched = await enrichWithAI(allCandidates, LOVABLE_API_KEY, params);
-
-    console.log(`Returning ${enriched.length} results with verified availability`);
+    // Step 4: Enrich with distance
+    const enriched = enrichWithDistance(allResults, params);
 
     return new Response(
       JSON.stringify({ results: enriched, params }),
@@ -83,20 +82,14 @@ serve(async (req) => {
   }
 });
 
-// (verification removed — too aggressive, was filtering out valid OT results)
-
 // ─── Query parsing ───
 
 async function parseQuery(
-  query: string,
-  lat: number | undefined,
-  lng: number | undefined,
-  location: string | undefined,
-  apiKey: string
+  query: string, lat: number | undefined, lng: number | undefined,
+  location: string | undefined, apiKey: string
 ): Promise<SearchParams> {
   const now = new Date();
   const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const todayIdx = now.getDay();
   const dateRef: string[] = [];
   for (let d = 0; d <= 13; d++) {
     const dt = new Date(now);
@@ -107,7 +100,7 @@ async function parseQuery(
 
   const parsePrompt = `You parse restaurant reservation search queries.
 
-Current date: ${now.toISOString().split("T")[0]} (${dayNames[todayIdx]})
+Current date: ${now.toISOString().split("T")[0]} (${dayNames[now.getDay()]})
 User location hint: ${location || "unknown"}
 Coordinates: lat=${lat || "unknown"}, lng=${lng || "unknown"}
 
@@ -134,64 +127,53 @@ User query: "${query}"`;
 
   const aiResp = await fetch(AI_GATEWAY, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "google/gemini-2.5-flash-lite",
       messages: [{ role: "user", content: parsePrompt }],
-      tools: [
-        {
-          type: "function",
-          function: {
-            name: "extract_search_params",
-            description: "Extract structured restaurant search parameters",
-            parameters: {
-              type: "object",
-              properties: {
-                cuisine: { type: "string" },
-                date: { type: "string" },
-                time: { type: "string" },
-                partySize: { type: "number" },
-                city: { type: "string" },
-                state: { type: "string" },
-              },
-              required: ["cuisine", "date", "time", "partySize", "city", "state"],
-              additionalProperties: false,
+      tools: [{
+        type: "function",
+        function: {
+          name: "extract_search_params",
+          description: "Extract structured restaurant search parameters",
+          parameters: {
+            type: "object",
+            properties: {
+              cuisine: { type: "string" },
+              date: { type: "string" },
+              time: { type: "string" },
+              partySize: { type: "number" },
+              city: { type: "string" },
+              state: { type: "string" },
             },
+            required: ["cuisine", "date", "time", "partySize", "city", "state"],
+            additionalProperties: false,
           },
         },
-      ],
+      }],
       tool_choice: { type: "function", function: { name: "extract_search_params" } },
     }),
   });
 
-  if (!aiResp.ok) {
-    const errText = await aiResp.text();
-    console.error("AI parse error:", aiResp.status, errText);
-    throw new Error("Failed to parse search query");
-  }
+  if (!aiResp.ok) throw new Error("Failed to parse search query");
 
   const aiData = await aiResp.json();
   const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
   if (!toolCall) throw new Error("Failed to parse search query");
 
   const parsed = JSON.parse(toolCall.function.arguments) as SearchParams;
-
   parsed.city = parsed.city?.trim() || "Atlanta";
   parsed.state = parsed.state?.trim() || "GA";
   parsed.cuisine = parsed.cuisine?.trim() || "";
   parsed.time = /^\d{2}:\d{2}$/.test(parsed.time) ? parsed.time : "19:00";
   parsed.partySize = Number(parsed.partySize) > 0 ? Number(parsed.partySize) : 2;
-
   if (lat) parsed.lat = lat;
   if (lng) parsed.lng = lng;
 
-  if ((!parsed.lat || parsed.lat === 0) && parsed.city) {
+  if (!parsed.lat && parsed.city) {
     try {
       const geoResp = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city + ", " + (parsed.state || ""))}&format=json&limit=1`,
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city + ", " + parsed.state)}&format=json&limit=1`,
         { headers: { "User-Agent": "TableFinder/1.0" } }
       );
       const geoData = await geoResp.json();
@@ -199,266 +181,275 @@ User query: "${query}"`;
         parsed.lat = parseFloat(geoData[0].lat);
         parsed.lng = parseFloat(geoData[0].lon);
       }
-    } catch (_e) { /* ignore */ }
+    } catch { /* ignore */ }
   }
 
   return parsed;
 }
 
-// ─── Firecrawl candidate discovery ───
+// ─── Resy: Scrape search page (only shows available restaurants) ───
 
-async function fetchPlatformCandidates(
-  params: SearchParams,
-  firecrawlKey: string,
-  platform: Platform
-): Promise<FirecrawlResult[]> {
-  const cuisineTerm = params.cuisine ? ` ${params.cuisine}` : "";
-
-  const queries =
-    platform === "resy"
-      ? [
-          `site:resy.com/cities ${params.city}${cuisineTerm} reserve`,
-          `site:resy.com ${params.city}${cuisineTerm} resy restaurant`,
-        ]
-      : platform === "opentable"
-      ? [
-          `site:opentable.com/r ${params.city}${cuisineTerm} reserve`,
-          `site:opentable.com ${params.city}${cuisineTerm} opentable`,
-        ]
-      : [
-          `site:yelp.com/reservations ${params.city}${cuisineTerm}`,
-          `site:yelp.com/biz ${params.city}${cuisineTerm} reservation`,
-        ];
-
-  console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
-
-  const results = await Promise.all(
-    queries.map(async (query) => {
-      const resp = await fetch(`${FIRECRAWL_API}/search`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${firecrawlKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ query, limit: 25 }),
-      });
-
-      const data = await resp.json();
-      if (!resp.ok) {
-        console.error(`${platform} search failed:`, resp.status, JSON.stringify(data).slice(0, 300));
-        return [] as FirecrawlResult[];
-      }
-
-      return (data?.data || []) as FirecrawlResult[];
-    })
-  );
-
-  const merged = dedupeCandidates(results.flat());
-  console.log(`${platform} candidates fetched:`, merged.length);
-  return merged;
-}
-
-// ─── Candidate normalization ───
-
-function buildPlatformResults(
-  platform: Platform,
-  candidates: FirecrawlResult[],
-  params: SearchParams
-) {
-  return candidates
-    .map((c) => normalizeCandidate(platform, c, params))
-    .filter(Boolean) as any[];
-}
-
-function normalizeCandidate(platform: Platform, c: FirecrawlResult, params: SearchParams) {
-  const canonicalUrl = extractCanonicalRestaurantUrl(platform, c.url);
-  if (!canonicalUrl) return null;
-
-  const name = extractName(c.title, canonicalUrl, platform);
-  const bookingUrl =
-    platform === "resy"
-      ? buildResyBookingUrl(canonicalUrl, params)
-      : platform === "opentable"
-      ? buildOpenTableBookingUrl(canonicalUrl, params)
-      : canonicalUrl; // Yelp URLs are already booking-ready
-
-  return {
-    id: `${platform}-${hashKey(canonicalUrl)}`,
-    name,
-    cuisine: params.cuisine || "Restaurant",
-    neighborhood: params.city,
-    rating: undefined as number | undefined,
-    priceRange: undefined as string | undefined,
-    imageUrl: null,
-    platform,
-    platformUrl: bookingUrl,
-    timeSlots: [] as TimeSlot[],
-    distanceMiles: null as number | null,
-  };
-}
-
-function extractCanonicalRestaurantUrl(platform: Platform, rawUrl: string): string | null {
+async function fetchResyAvailable(
+  params: SearchParams, firecrawlKey: string, aiKey: string
+): Promise<Restaurant[]> {
   try {
-    const u = new URL(rawUrl);
-    const path = u.pathname;
+    // Build Resy search URL — the page only shows restaurants with availability
+    const citySlug = params.city.toLowerCase().replace(/\s+/g, "-");
+    const resyUrl = `https://resy.com/cities/${citySlug}?date=${params.date}&seats=${params.partySize}`;
+    console.log("Scraping Resy:", resyUrl);
 
-    if (platform === "resy") {
-      const cityVenue = path.match(/^\/cities\/[^/]+\/venues\/[^/?#]+/i);
-      if (cityVenue) return `https://resy.com${cityVenue[0]}`;
-      const cityRestaurant = path.match(/^\/cities\/[^/]+\/[^/?#]+/i);
-      if (cityRestaurant) return `https://resy.com${cityRestaurant[0]}`;
-      return null;
+    const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${firecrawlKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ url: resyUrl, formats: ["markdown"], waitFor: 5000 }),
+    });
+
+    const data = await resp.json();
+    if (!resp.ok || !data.success) {
+      console.error("Resy scrape failed:", JSON.stringify(data).slice(0, 300));
+      return [];
     }
 
-    if (platform === "opentable") {
-      const rPath = path.match(/^\/r\/[^/?#]+/i);
-      if (rPath) return `https://www.opentable.com${rPath[0]}`;
-      if (path.startsWith("/restref/client")) {
-        return `https://www.opentable.com${path}${u.search}`;
-      }
-      return null;
+    const markdown = data.data?.markdown || data.markdown || "";
+    if (!markdown || markdown.length < 100) {
+      console.log("Resy scrape returned empty content");
+      return [];
     }
 
-    // Yelp: /biz/restaurant-name or /reservations/restaurant-name
-    if (platform === "yelp") {
-      const bizMatch = path.match(/^\/biz\/[^/?#]+/i);
-      if (bizMatch) return `https://www.yelp.com${bizMatch[0]}`;
-      const resMatch = path.match(/^\/reservations\/[^/?#]+/i);
-      if (resMatch) return `https://www.yelp.com${resMatch[0]}`;
-      return null;
-    }
-
-    return null;
-  } catch {
-    return null;
+    // Use AI to parse the scraped markdown into structured restaurant data
+    return await parseScrapedResults(markdown, "resy", params, aiKey);
+  } catch (err) {
+    console.error("Resy fetch error:", err);
+    return [];
   }
 }
 
-function buildResyBookingUrl(baseUrl: string, params: SearchParams): string {
+// ─── OpenTable: Scrape search page (shows restaurants with time slots) ───
+
+async function fetchOpenTableAvailable(
+  params: SearchParams, firecrawlKey: string, aiKey: string
+): Promise<Restaurant[]> {
   try {
-    const u = new URL(baseUrl);
-    u.searchParams.set("date", params.date);
-    u.searchParams.set("seats", String(params.partySize));
-    return u.toString();
-  } catch {
-    return baseUrl;
+    const cuisineTerm = params.cuisine || "restaurant";
+    const otUrl = `https://www.opentable.com/s?dateTime=${params.date}T${params.time}&covers=${params.partySize}&term=${encodeURIComponent(cuisineTerm)}&queryUnderstandingType=cuisine&nearMe=false&sortBy=availability`;
+    console.log("Scraping OpenTable:", otUrl);
+
+    const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${firecrawlKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ url: otUrl, formats: ["markdown"], waitFor: 5000 }),
+    });
+
+    const data = await resp.json();
+    if (!resp.ok || !data.success) {
+      console.error("OT scrape failed:", JSON.stringify(data).slice(0, 300));
+      return [];
+    }
+
+    const markdown = data.data?.markdown || data.markdown || "";
+    if (!markdown || markdown.length < 100) {
+      console.log("OT scrape returned empty content");
+      return [];
+    }
+
+    return await parseScrapedResults(markdown, "opentable", params, aiKey);
+  } catch (err) {
+    console.error("OT fetch error:", err);
+    return [];
   }
 }
 
-function buildOpenTableBookingUrl(baseUrl: string, params: SearchParams): string {
+// ─── Yelp: Use Fusion API (searches businesses supporting reservations) ───
+
+async function fetchYelpAvailable(
+  params: SearchParams, yelpKey: string
+): Promise<Restaurant[]> {
   try {
-    const u = new URL(baseUrl);
-    if (u.pathname.startsWith("/r/")) {
-      u.searchParams.set("dateTime", `${params.date}T${params.time}`);
-      u.searchParams.set("covers", String(params.partySize));
-      return u.toString();
+    const searchParams = new URLSearchParams({
+      term: `${params.cuisine || ""} restaurants`.trim(),
+      location: `${params.city}, ${params.state}`,
+      limit: "20",
+      sort_by: "best_match",
+    });
+
+    // Add coordinates if available for better results
+    if (params.lat && params.lng) {
+      searchParams.set("latitude", String(params.lat));
+      searchParams.set("longitude", String(params.lng));
     }
-    if (u.pathname.startsWith("/restref/client")) {
-      u.searchParams.set("dateTime", `${params.date}T${params.time}`);
-      u.searchParams.set("covers", String(params.partySize));
-      u.searchParams.set("destination", "reservations");
-      return u.toString();
+
+    console.log("Yelp API search:", searchParams.toString());
+
+    const resp = await fetch(`${YELP_API}/businesses/search?${searchParams}`, {
+      headers: { Authorization: `Bearer ${yelpKey}` },
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error("Yelp API error:", resp.status, errText.slice(0, 300));
+      return [];
     }
-    return baseUrl;
-  } catch {
-    return baseUrl;
+
+    const data = await resp.json();
+    const businesses = data.businesses || [];
+
+    // Filter to only businesses that support reservations
+    const withReservations = businesses.filter((b: any) =>
+      b.transactions?.includes("restaurant_reservation")
+    );
+
+    console.log(`Yelp: ${businesses.length} total, ${withReservations.length} with reservations`);
+
+    return withReservations.map((b: any): Restaurant => {
+      const priceMap: Record<string, string> = { "$": "$", "$$": "$$", "$$$": "$$$", "$$$$": "$$$$" };
+      return {
+        id: `yelp-${b.id}`,
+        name: b.name,
+        cuisine: b.categories?.[0]?.title || params.cuisine || "Restaurant",
+        neighborhood: b.location?.city || params.city,
+        rating: b.rating,
+        priceRange: priceMap[b.price] || undefined,
+        imageUrl: b.image_url || null,
+        platform: "yelp",
+        platformUrl: b.url?.replace(/\?.*$/, "") || `https://www.yelp.com/biz/${b.alias}`,
+        timeSlots: [],
+        distanceMiles: b.distance ? b.distance / 1609.34 : null,
+      };
+    });
+  } catch (err) {
+    console.error("Yelp fetch error:", err);
+    return [];
   }
 }
 
-// ─── AI enrichment ───
+// ─── AI parsing of scraped platform pages ───
 
-async function enrichWithAI(results: any[], apiKey: string, params: SearchParams): Promise<any[]> {
-  if (results.length === 0) return [];
+async function parseScrapedResults(
+  markdown: string, platform: "resy" | "opentable", params: SearchParams, aiKey: string
+): Promise<Restaurant[]> {
+  const truncated = markdown.slice(0, 15000); // Limit context size
 
-  const restaurantList = results.map((r, i) => `${i}. ${r.name} (${r.platform}, ${r.neighborhood})`).join("\n");
-  const cityContext = `${params.city}, ${params.state}`;
+  const prompt = platform === "resy"
+    ? `Extract restaurants from this Resy search results page. Each restaurant listed here has availability for ${params.date} with ${params.partySize} guests.
+
+For each restaurant found, extract:
+- name: restaurant name
+- cuisine: cuisine type
+- neighborhood: neighborhood or area
+- rating: rating if shown (number)
+- priceRange: "$", "$$", "$$$", or "$$$$" if shown
+- slug: the URL slug (e.g. "restaurant-name" from the listing)
+
+Return JSON: { "restaurants": [{ "name": string, "cuisine": string, "neighborhood": string, "rating": number|null, "priceRange": string|null, "slug": string }] }
+
+If no restaurants are found, return { "restaurants": [] }.
+
+Page content:
+${truncated}`
+    : `Extract restaurants from this OpenTable search results page. Each restaurant listed here has availability for ${params.date} at ${params.time} with ${params.partySize} guests.
+
+For each restaurant found, extract:
+- name: restaurant name
+- cuisine: cuisine type
+- neighborhood: neighborhood or area
+- rating: rating if shown (number)
+- priceRange: "$", "$$", "$$$", or "$$$$" if shown
+- slug: the URL slug from the listing link (e.g. "restaurant-name-city" from /r/restaurant-name-city)
+- timeSlots: array of available time strings shown (e.g. ["6:30 PM", "7:00 PM", "7:30 PM"])
+
+Return JSON: { "restaurants": [{ "name": string, "cuisine": string, "neighborhood": string, "rating": number|null, "priceRange": string|null, "slug": string, "timeSlots": string[] }] }
+
+If no restaurants are found, return { "restaurants": [] }.
+
+Page content:
+${truncated}`;
 
   try {
     const resp = await fetch(AI_GATEWAY, {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${aiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "google/gemini-2.5-flash",
-        messages: [{
-          role: "user",
-          content: `You are a restaurant data expert. For EVERY restaurant below in ${cityContext}, you MUST provide ALL fields. Do not skip any restaurant.
-
-For each, provide:
-- index: the number from the list
-- rating: Google Maps rating (out of 5, one decimal). If unsure, estimate based on the restaurant's reputation. NEVER leave null.
-- cuisine: specific cuisine type (e.g. "Italian", "Southern American", "Japanese")
-- neighborhood: the specific neighborhood in ${cityContext}
-- priceRange: "$", "$$", "$$$", or "$$$$"
-- lat: approximate latitude (must be a number, use the neighborhood's approximate location)
-- lng: approximate longitude (must be a number)
-
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "cuisine": string, "neighborhood": string, "priceRange": string, "lat": number, "lng": number }] }
-
-IMPORTANT: You MUST return an entry for EVERY restaurant in the list. Do not skip any.
-
-${restaurantList}`,
-        }],
+        messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
       }),
     });
 
     if (!resp.ok) {
-      await resp.text();
-      console.error("AI enrich failed:", resp.status);
-      return results;
+      console.error(`AI parse ${platform} failed:`, resp.status);
+      return [];
     }
 
     const aiData = await resp.json();
     const content = aiData.choices?.[0]?.message?.content;
-    if (!content) return results;
+    if (!content) return [];
 
     const parsed = JSON.parse(content);
-    const enrichments = parsed.restaurants || [];
+    const restaurants = parsed.restaurants || [];
 
-    const enrichMap = new Map<number, any>();
-    for (const e of enrichments) {
-      if (typeof e.index === "number") enrichMap.set(e.index, e);
-    }
-
-    const userLat = params.lat || 0;
-    const userLng = params.lng || 0;
-
-    const enriched = results.map((r, i) => {
-      const e = enrichMap.get(i);
-      if (!e) return { ...r, distanceMiles: null };
-
-      const rLat = e.lat || null;
-      const rLng = e.lng || null;
-      let distanceMiles: number | null = null;
-
-      if (rLat && rLng && userLat && userLng) {
-        distanceMiles = haversine(userLat, userLng, rLat, rLng);
-      }
+    return restaurants.map((r: any): Restaurant => {
+      const citySlug = params.city.toLowerCase().replace(/\s+/g, "-");
+      const baseUrl = platform === "resy"
+        ? `https://resy.com/cities/${citySlug}/${r.slug || slugify(r.name)}?date=${params.date}&seats=${params.partySize}`
+        : `https://www.opentable.com/r/${r.slug || slugify(r.name)}?dateTime=${params.date}T${params.time}&covers=${params.partySize}`;
 
       return {
-        ...r,
-        rating: e.rating ?? r.rating,
-        cuisine: e.cuisine || r.cuisine,
-        neighborhood: e.neighborhood || r.neighborhood,
-        priceRange: e.priceRange || r.priceRange,
-        distanceMiles,
+        id: `${platform}-${hashKey(r.name)}`,
+        name: r.name,
+        cuisine: r.cuisine || params.cuisine || "Restaurant",
+        neighborhood: r.neighborhood || params.city,
+        rating: r.rating || undefined,
+        priceRange: r.priceRange || undefined,
+        imageUrl: null,
+        platform,
+        platformUrl: baseUrl,
+        timeSlots: (r.timeSlots || []).map((t: string) => ({ time: t })),
+        distanceMiles: null,
       };
     });
-
-    // Sort by distance first, then rating
-    return enriched.sort((a, b) => {
-      const dA = a.distanceMiles ?? 9999;
-      const dB = b.distanceMiles ?? 9999;
-      if (Math.abs(dA - dB) > 0.1) return dA - dB;
-      return (b.rating ?? 0) - (a.rating ?? 0);
-    });
   } catch (err) {
-    console.error("AI enrich error:", err);
-    return results;
+    console.error(`AI parse ${platform} error:`, err);
+    return [];
   }
 }
 
-// ─── Utilities ───
+// ─── Enrichment & utilities ───
+
+function enrichWithDistance(results: Restaurant[], params: SearchParams): Restaurant[] {
+  if (!params.lat || !params.lng) return results;
+
+  // Sort by distance if available, then rating
+  return results.sort((a, b) => {
+    const dA = a.distanceMiles ?? 9999;
+    const dB = b.distanceMiles ?? 9999;
+    if (Math.abs(dA - dB) > 0.5) return dA - dB;
+    return (b.rating ?? 0) - (a.rating ?? 0);
+  });
+}
+
+function dedupeByName(results: Restaurant[]): Restaurant[] {
+  const seen = new Map<string, Restaurant>();
+  for (const r of results) {
+    const key = r.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!seen.has(key)) {
+      seen.set(key, r);
+    }
+  }
+  return Array.from(seen.values()).slice(0, 50);
+}
+
+function slugify(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function hashKey(v: string): string {
+  let h = 0;
+  for (let i = 0; i < v.length; i++) {
+    h = (h << 5) - h + v.charCodeAt(i);
+    h |= 0;
+  }
+  return Math.abs(h).toString(36);
+}
 
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 3959;
@@ -469,56 +460,4 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number): numb
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function dedupeCandidates(rows: FirecrawlResult[]): FirecrawlResult[] {
-  const map = new Map<string, FirecrawlResult>();
-  for (const row of rows) {
-    if (!row?.url) continue;
-    const key = row.url.split("?")[0].toLowerCase();
-    if (!map.has(key)) map.set(key, row);
-  }
-  return Array.from(map.values());
-}
-
-function dedupeByUrl(rows: any[]) {
-  const map = new Map<string, any>();
-  for (const row of rows) {
-    const key = `${row.platform}:${row.platformUrl.split("?")[0].toLowerCase()}`;
-    if (!map.has(key)) map.set(key, row);
-  }
-  return Array.from(map.values()).slice(0, 80);
-}
-
-function extractName(title: string | undefined, canonicalUrl: string, platform: Platform): string {
-  if (title) {
-    const cleaned = title
-      .replace(/^book your\s+/i, "")
-      .replace(/\s+reservation now on resy.*$/i, "")
-      .replace(/\s*\|\s*resy.*/i, "")
-      .replace(/\s*\|\s*opentable.*/i, "")
-      .replace(/\s*-\s*opentable.*/i, "")
-      .replace(/\s*-\s*yelp$/i, "")
-      .replace(/\s*\|\s*yelp.*/i, "")
-      .replace(/\s*-\s*reservations.*$/i, "")
-      .replace(/\s*-\s*atlanta,?\s*ga$/i, "")
-      .trim();
-    if (cleaned.length > 1) return cleaned;
-  }
-
-  const parts = canonicalUrl.split("/");
-  const slug = parts[parts.length - 1] || "restaurant";
-  return slug
-    .split("-")
-    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-    .join(" ");
-}
-
-function hashKey(v: string): string {
-  let h = 0;
-  for (let i = 0; i < v.length; i++) {
-    h = (h << 5) - h + v.charCodeAt(i);
-    h |= 0;
-  }
-  return Math.abs(h).toString(36);
 }
