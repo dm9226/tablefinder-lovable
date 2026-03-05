@@ -54,17 +54,23 @@ serve(async (req) => {
     console.log("Parsed params:", JSON.stringify(params));
 
     // Step 2: Fetch from all platforms in parallel
-    const [resyCandidates, otCandidates, yelpResults] = await Promise.all([
+    const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
       searchFirecrawl(params, FIRECRAWL_API_KEY, "resy"),
       searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable"),
-      YELP_API_KEY ? fetchYelp(params, YELP_API_KEY) : Promise.resolve([]),
+      searchFirecrawl(params, FIRECRAWL_API_KEY, "yelp"),
     ]);
 
     // Normalize Firecrawl results into Restaurant objects
     const resyResults = normalizeCandidates("resy", resyCandidates, params);
     const otResults = normalizeCandidates("opentable", otCandidates, params);
+    const yelpResults = normalizeCandidates("yelp", yelpCandidates, params);
 
-    const allResults = dedupeByName([...resyResults, ...otResults, ...yelpResults]);
+    // Enrich Yelp results with API data (ratings, photos, distance) if key available
+    const enrichedYelp = YELP_API_KEY
+      ? await enrichYelpWithAPI(yelpResults, params, YELP_API_KEY)
+      : yelpResults;
+
+    const allResults = dedupeByName([...resyResults, ...otResults, ...enrichedYelp]);
     console.log(`Results — Resy: ${resyResults.length}, OT: ${otResults.length}, Yelp: ${yelpResults.length}, deduped: ${allResults.length}`);
 
     // Step 3: Enrich with AI (ratings, cuisine, neighborhood, coords)
@@ -191,7 +197,7 @@ interface FirecrawlResult {
 }
 
 async function searchFirecrawl(
-  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable"
+  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable" | "yelp"
 ): Promise<FirecrawlResult[]> {
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const city = params.city;
@@ -201,9 +207,14 @@ async function searchFirecrawl(
         `site:resy.com/cities ${city}${cuisine} restaurant reserve`,
         `site:resy.com ${city}${cuisine} resy reservation`,
       ]
-    : [
+    : platform === "opentable"
+    ? [
         `site:opentable.com/r ${city}${cuisine} restaurant reserve`,
         `site:opentable.com ${city}${cuisine} opentable reservation`,
+      ]
+    : [
+        `site:yelp.com/reservations ${city}${cuisine}`,
+        `site:yelp.com/biz ${city}${cuisine} reservation`,
       ];
 
   console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
@@ -243,7 +254,7 @@ async function searchFirecrawl(
 // ─── Normalize Firecrawl results → Restaurant objects ───
 
 function normalizeCandidates(
-  platform: "resy" | "opentable", candidates: FirecrawlResult[], params: SearchParams
+  platform: "resy" | "opentable" | "yelp", candidates: FirecrawlResult[], params: SearchParams
 ): Restaurant[] {
   return candidates
     .map((c) => {
@@ -253,7 +264,9 @@ function normalizeCandidates(
       const name = cleanName(c.title, canonUrl, platform);
       const bookingUrl = platform === "resy"
         ? addResyParams(canonUrl, params)
-        : addOTParams(canonUrl, params);
+        : platform === "opentable"
+        ? addOTParams(canonUrl, params)
+        : canonUrl;
 
       return {
         id: `${platform}-${hashKey(canonUrl)}`,
@@ -272,7 +285,7 @@ function normalizeCandidates(
     .filter(Boolean) as Restaurant[];
 }
 
-function extractCanonicalUrl(platform: "resy" | "opentable", raw: string): string | null {
+function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp", raw: string): string | null {
   try {
     const u = new URL(raw);
     const p = u.pathname;
@@ -280,8 +293,16 @@ function extractCanonicalUrl(platform: "resy" | "opentable", raw: string): strin
       const m = p.match(/^\/cities\/[^/]+\/[^/?#]+/i);
       return m ? `https://resy.com${m[0]}` : null;
     }
-    const m = p.match(/^\/r\/[^/?#]+/i);
-    return m ? `https://www.opentable.com${m[0]}` : null;
+    if (platform === "opentable") {
+      const m = p.match(/^\/r\/[^/?#]+/i);
+      return m ? `https://www.opentable.com${m[0]}` : null;
+    }
+    // Yelp: /reservations/slug or /biz/slug
+    const resMatch = p.match(/^\/reservations\/[^/?#]+/i);
+    if (resMatch) return `https://www.yelp.com${resMatch[0]}`;
+    const bizMatch = p.match(/^\/biz\/[^/?#]+/i);
+    if (bizMatch) return `https://www.yelp.com${bizMatch[0]}`;
+    return null;
   } catch { return null; }
 }
 
@@ -319,14 +340,19 @@ function cleanName(title: string | undefined, url: string, platform: string): st
   return slug.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
-// ─── Yelp Fusion API ───
+// ─── Yelp API enrichment (adds ratings, photos, distance to Firecrawl-found results) ───
 
-async function fetchYelp(params: SearchParams, yelpKey: string): Promise<Restaurant[]> {
+async function enrichYelpWithAPI(
+  yelpResults: Restaurant[], params: SearchParams, yelpKey: string
+): Promise<Restaurant[]> {
+  if (yelpResults.length === 0) return [];
+
   try {
+    // Search Yelp API for matching businesses to get ratings/photos/distance
     const sp = new URLSearchParams({
       term: `${params.cuisine || ""} restaurants`.trim(),
       location: `${params.city}, ${params.state}`,
-      limit: "20",
+      limit: "50",
       sort_by: "best_match",
     });
     if (params.lat && params.lng) {
@@ -334,46 +360,44 @@ async function fetchYelp(params: SearchParams, yelpKey: string): Promise<Restaur
       sp.set("longitude", String(params.lng));
     }
 
-    console.log("Yelp search:", sp.toString());
     const resp = await fetch(`${YELP_API}/businesses/search?${sp}`, {
       headers: { Authorization: `Bearer ${yelpKey}` },
     });
 
     if (!resp.ok) {
-      const t = await resp.text();
-      console.error("Yelp error:", resp.status, t.slice(0, 200));
-      return [];
+      await resp.text();
+      return yelpResults;
     }
 
     const data = await resp.json();
     const businesses = data.businesses || [];
 
-    // Include all restaurants (not just those tagged with reservation transaction)
-    // Filter out businesses that are clearly not restaurants
-    const restaurants = businesses.filter((b: any) => {
-      const cats = (b.categories || []).map((c: any) => c.alias).join(",");
-      // Exclude non-restaurant categories
-      return !cats.includes("grocery") && !cats.includes("convenience");
+    // Build a lookup by normalized name
+    const bizMap = new Map<string, any>();
+    for (const b of businesses) {
+      const key = b.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+      bizMap.set(key, b);
+    }
+
+    // Enrich each Firecrawl-found result with Yelp API data
+    return yelpResults.map((r) => {
+      const key = r.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const b = bizMap.get(key);
+      if (!b) return r;
+
+      return {
+        ...r,
+        rating: b.rating || r.rating,
+        priceRange: b.price || r.priceRange,
+        cuisine: b.categories?.[0]?.title || r.cuisine,
+        neighborhood: b.location?.neighborhood || b.location?.city || r.neighborhood,
+        imageUrl: b.image_url || r.imageUrl,
+        distanceMiles: b.distance ? +(b.distance / 1609.34).toFixed(1) : r.distanceMiles,
+      };
     });
-
-    console.log(`Yelp: ${businesses.length} total, ${restaurants.length} restaurants`);
-
-    return restaurants.map((b: any): Restaurant => ({
-      id: `yelp-${b.id}`,
-      name: b.name,
-      cuisine: b.categories?.[0]?.title || params.cuisine || "Restaurant",
-      neighborhood: b.location?.neighborhood || b.location?.city || params.city,
-      rating: b.rating,
-      priceRange: b.price || undefined,
-      imageUrl: b.image_url || null,
-      platform: "yelp",
-      platformUrl: b.url?.replace(/\?.*$/, "") || `https://www.yelp.com/biz/${b.alias}`,
-      timeSlots: [],
-      distanceMiles: b.distance ? +(b.distance / 1609.34).toFixed(1) : null,
-    }));
   } catch (err) {
-    console.error("Yelp error:", err);
-    return [];
+    console.error("Yelp enrich error:", err);
+    return yelpResults;
   }
 }
 
