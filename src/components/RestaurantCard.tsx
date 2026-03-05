@@ -1,5 +1,5 @@
 import { Restaurant } from "@/types/restaurant";
-import { Clock, Star, ExternalLink } from "lucide-react";
+import { Star, ExternalLink } from "lucide-react";
 
 const PLATFORM_COLORS: Record<string, string> = {
   resy: "bg-red-500/20 text-red-400",
@@ -13,7 +13,12 @@ interface RestaurantCardProps {
 
 export function RestaurantCard({ restaurant }: RestaurantCardProps) {
   return (
-    <div className="bg-card border border-border rounded-xl overflow-hidden hover:border-primary/30 transition-all duration-300 group">
+    <a
+      href={restaurant.platformUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block bg-card border border-border rounded-xl overflow-hidden hover:border-primary/30 transition-all duration-300 group"
+    >
       {/* Image */}
       <div className="relative h-40 overflow-hidden bg-muted">
         {restaurant.imageUrl ? (
@@ -57,34 +62,12 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
           {restaurant.neighborhood}
         </p>
 
-        {/* Time slots */}
-        {restaurant.timeSlots.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-3">
-            {restaurant.timeSlots.slice(0, 6).map((slot, i) => (
-              <a
-                key={i}
-                href={restaurant.platformUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 px-2.5 py-1.5 bg-primary/10 text-primary rounded-md text-xs font-body font-medium hover:bg-primary/20 transition-colors"
-              >
-                <Clock className="h-3 w-3" />
-                {slot.time}
-              </a>
-            ))}
-          </div>
-        )}
-
-        <a
-          href={restaurant.platformUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary transition-colors font-body"
-        >
-          Book on {restaurant.platform}
-          <ExternalLink className="h-3 w-3" />
-        </a>
+        {/* Book button */}
+        <div className="flex items-center gap-1 text-sm text-primary font-body font-medium group-hover:underline">
+          Reserve on {restaurant.platform}
+          <ExternalLink className="h-3.5 w-3.5" />
+        </div>
       </div>
-    </div>
+    </a>
   );
 }
