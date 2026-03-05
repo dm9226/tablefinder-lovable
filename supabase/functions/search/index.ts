@@ -456,7 +456,7 @@ async function fetchYelpWithReservations(
         priceRange: b.price || undefined,
         imageUrl: b.image_url || null,
         platform: "yelp",
-        platformUrl: `https://www.yelp.com/reservations/${b.alias}`,
+        platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${b.alias}`, params),
         timeSlots: [],
         distanceMiles: b.distance ? +(b.distance / 1609.34).toFixed(1) : null,
       }));
