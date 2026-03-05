@@ -578,7 +578,15 @@ ${list}`,
       };
     });
 
-    return enriched.sort((a, b) => {
+    // Filter out restaurants beyond 12 miles
+    const MAX_DISTANCE_MILES = 12;
+    const nearby = enriched.filter((r) => {
+      const d = r.distanceMiles;
+      if (d === null || d === undefined) return true; // keep if distance unknown
+      return d <= MAX_DISTANCE_MILES;
+    });
+
+    return nearby.sort((a, b) => {
       const dA = a.distanceMiles ?? 9999;
       const dB = b.distanceMiles ?? 9999;
       if (Math.abs(dA - dB) > 0.5) return dA - dB;

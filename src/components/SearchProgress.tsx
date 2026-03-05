@@ -5,7 +5,7 @@ const STAGES = [
   { label: "Understanding your request…", duration: 2000 },
   { label: "Searching Resy, OpenTable & Yelp…", duration: 4000 },
   { label: "Verifying real-time availability…", duration: 6000 },
-  { label: "Confirming open tables…", duration: 5000 },
+  { label: "Confirming available tables…", duration: 5000 },
   { label: "Finalizing results…", duration: 3000 },
 ];
 
