@@ -94,7 +94,36 @@ User query: "${query}"`;
     if (!params.lat && lat) params.lat = lat;
     if (!params.lng && lng) params.lng = lng;
 
-    // Step 2: Search Resy
+    // Step 2: If we still don't have coordinates, geocode the city
+    if ((!params.lat || params.lat === 0) && params.city && params.city !== "unknown") {
+      try {
+        const geoResp = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(params.city + (params.state ? ", " + params.state : ""))}&format=json&limit=1`,
+          { headers: { "User-Agent": "TableFinder/1.0" } }
+        );
+        const geoData = await geoResp.json();
+        if (geoData?.[0]) {
+          params.lat = parseFloat(geoData[0].lat);
+          params.lng = parseFloat(geoData[0].lon);
+          console.log("Geocoded city:", params.city, "→", params.lat, params.lng);
+        }
+      } catch (geoErr) {
+        console.error("Geocoding error:", geoErr);
+      }
+    }
+
+    // If city is still unknown and no coords, default to New York
+    if ((!params.city || params.city === "unknown") && (!params.lat || params.lat === 0)) {
+      params.city = "New York";
+      params.state = "NY";
+      params.lat = 40.7128;
+      params.lng = -73.9060;
+      console.log("Defaulting to New York");
+    }
+
+    console.log("Final params:", params);
+
+    // Step 3: Search Resy
     const resyResults = await searchResy(params);
 
     return new Response(
