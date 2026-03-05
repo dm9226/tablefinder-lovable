@@ -785,10 +785,11 @@ async function verifyAvailability(
         return r;
       }
 
-      // For Yelp, if we see reservation markers but couldn't extract specific times,
-      // trust the availability marker (reservation widget may not expose times in markdown)
-      if (hasYelpAvailabilityMarker) {
-        console.log(`✓ Verified ${r.name} [yelp] — reservation markers present (no specific time extraction)`);
+      // For Yelp, ONLY use the availability marker fallback if we couldn't extract
+      // ANY times at all (i.e. the JS widget didn't render into markdown).
+      // If we DID find times but none are in the meal window, that's a real rejection.
+      if (foundTimes.length === 0 && hasYelpAvailabilityMarker) {
+        console.log(`✓ Verified ${r.name} [yelp] — reservation markers present but no extractable times (trusting marker for ${mealLabel})`);
         return r;
       }
 
