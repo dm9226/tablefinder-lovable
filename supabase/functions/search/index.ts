@@ -7,7 +7,7 @@ const corsHeaders = {
 };
 
 const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
-const FIRECRAWL_API = "https://api.firecrawl.dev/v1/search";
+const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
 
 type Platform = "resy" | "opentable";
 
@@ -29,6 +29,11 @@ interface FirecrawlResult {
   markdown?: string;
 }
 
+interface TimeSlot {
+  time: string;
+  type?: string;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -42,9 +47,11 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
+    // Step 1: Parse user query
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
     console.log("Parsed params:", JSON.stringify(params));
 
+    // Step 2: Find candidate restaurants via Firecrawl search
     const [resyCandidates, otCandidates] = await Promise.all([
       fetchPlatformCandidates(params, FIRECRAWL_API_KEY, "resy"),
       fetchPlatformCandidates(params, FIRECRAWL_API_KEY, "opentable"),
@@ -52,12 +59,18 @@ serve(async (req) => {
 
     const resyResults = buildPlatformResults("resy", resyCandidates, params);
     const otResults = buildPlatformResults("opentable", otCandidates, params);
-    const merged = dedupeAndSortByRating([...resyResults, ...otResults]);
+    const allCandidates = dedupeByUrl([...resyResults, ...otResults]);
 
-    // Enrich with AI for ratings, cuisine, neighborhood
-    const enriched = await enrichWithAI(merged, LOVABLE_API_KEY, params);
+    console.log(`Found ${allCandidates.length} unique candidates. Scraping for availability...`);
 
-    console.log(`Returning ${enriched.length} results (Resy: ${resyResults.length}, OT: ${otResults.length})`);
+    // Step 3: Scrape each candidate's actual page for time slots
+    const withAvailability = await scrapeAvailability(allCandidates, FIRECRAWL_API_KEY, params);
+    console.log(`${withAvailability.length} restaurants have available time slots`);
+
+    // Step 4: Enrich with AI for ratings, cuisine, neighborhood, coords
+    const enriched = await enrichWithAI(withAvailability, LOVABLE_API_KEY, params);
+
+    console.log(`Returning ${enriched.length} results with verified availability`);
 
     return new Response(
       JSON.stringify({ results: enriched, params }),
@@ -72,6 +85,125 @@ serve(async (req) => {
   }
 });
 
+// ─── Scrape individual restaurant pages for real time slots ───
+
+async function scrapeAvailability(
+  candidates: any[],
+  firecrawlKey: string,
+  params: SearchParams
+): Promise<any[]> {
+  // Limit to top 30 to keep Firecrawl usage reasonable
+  const toScrape = candidates.slice(0, 30);
+
+  const results = await Promise.allSettled(
+    toScrape.map(async (candidate) => {
+      try {
+        const pageUrl = candidate.platformUrl; // already has date/party params
+        console.log(`Scraping: ${pageUrl}`);
+
+        const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${firecrawlKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url: pageUrl,
+            formats: ["markdown"],
+            waitFor: 3000, // wait for JS-rendered availability widgets
+          }),
+        });
+
+        const data = await resp.json();
+        if (!resp.ok) {
+          console.error(`Scrape failed for ${candidate.name}:`, resp.status);
+          return null;
+        }
+
+        const markdown = data?.data?.markdown || data?.markdown || "";
+        const slots = extractTimeSlots(markdown, candidate.platform, params);
+
+        if (slots.length === 0) {
+          console.log(`No slots found for ${candidate.name}`);
+          return null;
+        }
+
+        console.log(`Found ${slots.length} slots for ${candidate.name}: ${slots.map(s => s.time).join(", ")}`);
+        return { ...candidate, timeSlots: slots };
+      } catch (err) {
+        console.error(`Error scraping ${candidate.name}:`, err);
+        return null;
+      }
+    })
+  );
+
+  return results
+    .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled" && r.value !== null)
+    .map((r) => r.value);
+}
+
+function extractTimeSlots(markdown: string, platform: Platform, params: SearchParams): TimeSlot[] {
+  const slots: TimeSlot[] = [];
+  const seen = new Set<string>();
+
+  // Common patterns for time slots on reservation pages:
+  // "7:00 PM", "7:30 PM", "8:00 PM" etc.
+  // Resy: often shows as buttons like "7:00 PM" "7:15 PM" with types like "Dining Room", "Bar"
+  // OpenTable: shows time buttons like "7:00 PM", "7:30 PM"
+
+  // Match time patterns: "H:MM PM/AM" or "HH:MM PM/AM"
+  const timePattern = /\b(1?[0-9]):([0-5][0-9])\s*(PM|AM)\b/gi;
+  let match;
+
+  while ((match = timePattern.exec(markdown)) !== null) {
+    const hour = parseInt(match[1]);
+    const minute = match[2];
+    const ampm = match[3].toUpperCase();
+
+    // Convert to 24h for comparison
+    let h24 = hour;
+    if (ampm === "PM" && hour !== 12) h24 += 12;
+    if (ampm === "AM" && hour === 12) h24 = 0;
+
+    // Only include times that are reasonable for dining (11 AM - 11 PM)
+    if (h24 < 11 || h24 > 23) continue;
+
+    const timeStr = `${match[1]}:${minute} ${ampm}`;
+    if (!seen.has(timeStr)) {
+      seen.add(timeStr);
+
+      // Try to detect seating type from surrounding text
+      const idx = match.index;
+      const context = markdown.substring(Math.max(0, idx - 100), idx + 30);
+      let type: string | undefined;
+
+      const typeMatch = context.match(/(dining room|bar|patio|outdoor|terrace|lounge|counter|chef'?s? table|main|garden)/i);
+      if (typeMatch) {
+        type = typeMatch[1].replace(/\b\w/g, c => c.toUpperCase());
+      }
+
+      slots.push({ time: timeStr, type });
+    }
+  }
+
+  // Sort by time
+  slots.sort((a, b) => {
+    const toMin = (t: string) => {
+      const m = t.match(/(\d+):(\d+)\s*(AM|PM)/i);
+      if (!m) return 0;
+      let h = parseInt(m[1]);
+      if (m[3].toUpperCase() === "PM" && h !== 12) h += 12;
+      if (m[3].toUpperCase() === "AM" && h === 12) h = 0;
+      return h * 60 + parseInt(m[2]);
+    };
+    return toMin(a.time) - toMin(b.time);
+  });
+
+  return slots;
+}
+
+// ─── Query parsing ───
+
 async function parseQuery(
   query: string,
   lat: number | undefined,
@@ -80,7 +212,6 @@ async function parseQuery(
   apiKey: string
 ): Promise<SearchParams> {
   const now = new Date();
-  // Build a reference calendar for the AI
   const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const todayIdx = now.getDay();
   const dateRef: string[] = [];
@@ -171,11 +302,9 @@ User query: "${query}"`;
   parsed.time = /^\d{2}:\d{2}$/.test(parsed.time) ? parsed.time : "19:00";
   parsed.partySize = Number(parsed.partySize) > 0 ? Number(parsed.partySize) : 2;
 
-  // Propagate user coords
   if (lat) parsed.lat = lat;
   if (lng) parsed.lng = lng;
 
-  // Geocode if still missing
   if ((!parsed.lat || parsed.lat === 0) && parsed.city) {
     try {
       const geoResp = await fetch(
@@ -192,6 +321,8 @@ User query: "${query}"`;
 
   return parsed;
 }
+
+// ─── Firecrawl candidate discovery ───
 
 async function fetchPlatformCandidates(
   params: SearchParams,
@@ -215,7 +346,7 @@ async function fetchPlatformCandidates(
 
   const results = await Promise.all(
     queries.map(async (query) => {
-      const resp = await fetch(FIRECRAWL_API, {
+      const resp = await fetch(`${FIRECRAWL_API}/search`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${firecrawlKey}`,
@@ -239,43 +370,21 @@ async function fetchPlatformCandidates(
   return merged;
 }
 
+// ─── Candidate normalization ───
+
 function buildPlatformResults(
   platform: Platform,
   candidates: FirecrawlResult[],
   params: SearchParams
 ) {
-  const normalized = candidates
+  return candidates
     .map((c) => normalizeCandidate(platform, c, params))
-    .filter(Boolean) as Array<{
-    id: string;
-    name: string;
-    cuisine: string;
-    neighborhood: string;
-    rating?: number;
-    priceRange?: string;
-    imageUrl: string | null;
-    platform: "resy" | "opentable";
-    platformUrl: string;
-    timeSlots: [];
-    _availabilitySignal: boolean;
-  }>;
-
-  // Keep only entries that show reservation/availability intent in page snippet.
-  const withAvailability = normalized.filter((r) => r._availabilitySignal);
-  const finalRows = withAvailability.length > 0 ? withAvailability : normalized;
-
-  return finalRows.map(({ _availabilitySignal, ...row }) => row);
+    .filter(Boolean) as any[];
 }
 
 function normalizeCandidate(platform: Platform, c: FirecrawlResult, params: SearchParams) {
   const canonicalUrl = extractCanonicalRestaurantUrl(platform, c.url);
   if (!canonicalUrl) return null;
-
-  const sourceText = `${c.title || ""} ${c.description || ""} ${c.markdown || ""}`.toLowerCase();
-  const availabilitySignal = /(reserve|reservation|book now|available|tables?)/i.test(sourceText);
-
-  const rating = extractRating(`${c.title || ""} ${c.description || ""} ${c.markdown || ""}`);
-  const priceRange = extractPriceRange(`${c.title || ""} ${c.description || ""} ${c.markdown || ""}`);
 
   const name = extractName(c.title, canonicalUrl, platform);
   const bookingUrl =
@@ -288,13 +397,13 @@ function normalizeCandidate(platform: Platform, c: FirecrawlResult, params: Sear
     name,
     cuisine: params.cuisine || "Restaurant",
     neighborhood: params.city,
-    rating,
-    priceRange,
+    rating: undefined as number | undefined,
+    priceRange: undefined as string | undefined,
     imageUrl: null,
     platform,
     platformUrl: bookingUrl,
-    timeSlots: [],
-    _availabilitySignal: availabilitySignal,
+    timeSlots: [] as TimeSlot[],
+    distanceMiles: null as number | null,
   };
 }
 
@@ -304,86 +413,56 @@ function extractCanonicalRestaurantUrl(platform: Platform, rawUrl: string): stri
     const path = u.pathname;
 
     if (platform === "resy") {
-      // Supports:
-      // /cities/atlanta/restaurant-slug
-      // /cities/atlanta-ga/venues/restaurant-slug
       const cityVenue = path.match(/^\/cities\/[^/]+\/venues\/[^/?#]+/i);
       if (cityVenue) return `https://resy.com${cityVenue[0]}`;
-
       const cityRestaurant = path.match(/^\/cities\/[^/]+\/[^/?#]+/i);
       if (cityRestaurant) return `https://resy.com${cityRestaurant[0]}`;
-
       return null;
     }
 
-    // OpenTable supports /r/... and /restref/client
     const rPath = path.match(/^\/r\/[^/?#]+/i);
     if (rPath) return `https://www.opentable.com${rPath[0]}`;
-
     if (path.startsWith("/restref/client")) {
       return `https://www.opentable.com${path}${u.search}`;
     }
-
     return null;
   } catch {
     return null;
   }
 }
 
-function buildResyBookingUrl(baseRestaurantUrl: string, params: SearchParams): string {
+function buildResyBookingUrl(baseUrl: string, params: SearchParams): string {
   try {
-    const u = new URL(baseRestaurantUrl);
+    const u = new URL(baseUrl);
     u.searchParams.set("date", params.date);
     u.searchParams.set("seats", String(params.partySize));
     return u.toString();
   } catch {
-    return baseRestaurantUrl;
+    return baseUrl;
   }
 }
 
-function buildOpenTableBookingUrl(baseRestaurantUrl: string, params: SearchParams): string {
+function buildOpenTableBookingUrl(baseUrl: string, params: SearchParams): string {
   try {
-    const u = new URL(baseRestaurantUrl);
-
-    // Standard OpenTable restaurant page
+    const u = new URL(baseUrl);
     if (u.pathname.startsWith("/r/")) {
       u.searchParams.set("dateTime", `${params.date}T${params.time}`);
       u.searchParams.set("covers", String(params.partySize));
       return u.toString();
     }
-
-    // Legacy restref booking endpoint
     if (u.pathname.startsWith("/restref/client")) {
       u.searchParams.set("dateTime", `${params.date}T${params.time}`);
       u.searchParams.set("covers", String(params.partySize));
       u.searchParams.set("destination", "reservations");
       return u.toString();
     }
-
-    return baseRestaurantUrl;
+    return baseUrl;
   } catch {
-    return baseRestaurantUrl;
+    return baseUrl;
   }
 }
 
-function dedupeCandidates(rows: FirecrawlResult[]): FirecrawlResult[] {
-  const map = new Map<string, FirecrawlResult>();
-  for (const row of rows) {
-    if (!row?.url) continue;
-    const key = row.url.split("?")[0].toLowerCase();
-    if (!map.has(key)) map.set(key, row);
-  }
-  return Array.from(map.values());
-}
-
-function dedupeAndSortByRating(rows: any[]) {
-  const map = new Map<string, any>();
-  for (const row of rows) {
-    const key = `${row.platform}:${row.platformUrl.split("?")[0].toLowerCase()}`;
-    if (!map.has(key)) map.set(key, row);
-  }
-  return Array.from(map.values()).slice(0, 80);
-}
+// ─── AI enrichment ───
 
 async function enrichWithAI(results: any[], apiKey: string, params: SearchParams): Promise<any[]> {
   if (results.length === 0) return [];
@@ -463,7 +542,7 @@ ${restaurantList}`,
       };
     });
 
-    // Sort by distance first (nulls last), then rating descending
+    // Sort by distance first, then rating
     return enriched.sort((a, b) => {
       const dA = a.distanceMiles ?? 9999;
       const dB = b.distanceMiles ?? 9999;
@@ -476,8 +555,10 @@ ${restaurantList}`,
   }
 }
 
+// ─── Utilities ───
+
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 3959; // Earth radius in miles
+  const R = 3959;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const a =
@@ -485,6 +566,25 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number): numb
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function dedupeCandidates(rows: FirecrawlResult[]): FirecrawlResult[] {
+  const map = new Map<string, FirecrawlResult>();
+  for (const row of rows) {
+    if (!row?.url) continue;
+    const key = row.url.split("?")[0].toLowerCase();
+    if (!map.has(key)) map.set(key, row);
+  }
+  return Array.from(map.values());
+}
+
+function dedupeByUrl(rows: any[]) {
+  const map = new Map<string, any>();
+  for (const row of rows) {
+    const key = `${row.platform}:${row.platformUrl.split("?")[0].toLowerCase()}`;
+    if (!map.has(key)) map.set(key, row);
+  }
+  return Array.from(map.values()).slice(0, 80);
 }
 
 function extractName(title: string | undefined, canonicalUrl: string, platform: Platform): string {
@@ -506,34 +606,6 @@ function extractName(title: string | undefined, canonicalUrl: string, platform: 
     .split("-")
     .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
     .join(" ");
-}
-
-function extractRating(text: string): number | undefined {
-  const normalized = text.replace(/,/g, " ");
-  const patterns = [
-    /([0-5](?:\.[0-9])?)\s*\/\s*5/i,
-    /([0-5](?:\.[0-9])?)\s*stars?/i,
-    /rating\s*[:\-]?\s*([0-5](?:\.[0-9])?)/i,
-    /rated\s*([0-5](?:\.[0-9])?)/i,
-  ];
-
-  for (const p of patterns) {
-    const m = normalized.match(p);
-    if (m) {
-      const v = Number(m[1]);
-      if (!Number.isNaN(v) && v >= 0 && v <= 5) return v;
-    }
-  }
-  return undefined;
-}
-
-function extractPriceRange(text: string): string | undefined {
-  const m = text.match(/\${1,4}/);
-  return m?.[0];
-}
-
-function slugify(v: string): string {
-  return v.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 function hashKey(v: string): string {
