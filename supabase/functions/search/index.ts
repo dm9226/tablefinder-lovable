@@ -61,14 +61,14 @@ serve(async (req) => {
     const otResults = buildPlatformResults("opentable", otCandidates, params);
     const allCandidates = dedupeByUrl([...resyResults, ...otResults]);
 
-    console.log(`Found ${allCandidates.length} unique candidates. Scraping for availability...`);
+    console.log(`Found ${allCandidates.length} unique candidates. Verifying availability...`);
 
-    // Step 3: Scrape each candidate's actual page for time slots
-    const withAvailability = await scrapeAvailability(allCandidates, FIRECRAWL_API_KEY, params);
-    console.log(`${withAvailability.length} restaurants have available time slots`);
+    // Step 3: Verify availability by scraping top candidates (limit to 10 for speed/cost)
+    const verified = await verifyAvailability(allCandidates.slice(0, 10), FIRECRAWL_API_KEY, params);
+    console.log(`${verified.length} restaurants have confirmed availability`);
 
     // Step 4: Enrich with AI for ratings, cuisine, neighborhood, coords
-    const enriched = await enrichWithAI(withAvailability, LOVABLE_API_KEY, params);
+    const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
 
     console.log(`Returning ${enriched.length} results with verified availability`);
 
@@ -85,22 +85,16 @@ serve(async (req) => {
   }
 });
 
-// ─── Scrape individual restaurant pages for real time slots ───
+// ─── Verify availability by scraping restaurant pages ───
 
-async function scrapeAvailability(
+async function verifyAvailability(
   candidates: any[],
   firecrawlKey: string,
   params: SearchParams
 ): Promise<any[]> {
-  // Limit to top 30 to keep Firecrawl usage reasonable
-  const toScrape = candidates.slice(0, 30);
-
   const results = await Promise.allSettled(
-    toScrape.map(async (candidate) => {
+    candidates.map(async (candidate) => {
       try {
-        const pageUrl = candidate.platformUrl; // already has date/party params
-        console.log(`Scraping: ${pageUrl}`);
-
         const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
           method: "POST",
           headers: {
@@ -108,30 +102,38 @@ async function scrapeAvailability(
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            url: pageUrl,
+            url: candidate.platformUrl,
             formats: ["markdown"],
-            waitFor: 3000, // wait for JS-rendered availability widgets
+            waitFor: 2000,
           }),
         });
 
         const data = await resp.json();
-        if (!resp.ok) {
-          console.error(`Scrape failed for ${candidate.name}:`, resp.status);
-          return null;
-        }
+        if (!resp.ok) return null;
 
         const markdown = data?.data?.markdown || data?.markdown || "";
-        const slots = extractTimeSlots(markdown, candidate.platform, params);
 
-        if (slots.length === 0) {
-          console.log(`No slots found for ${candidate.name}`);
+        // Check if page contains time slot patterns (H:MM AM/PM in dining hours)
+        const timePattern = /\b(1?[0-9]):([0-5][0-9])\s*(PM|AM)\b/gi;
+        let hasSlots = false;
+        let match;
+        while ((match = timePattern.exec(markdown)) !== null) {
+          let h24 = parseInt(match[1]);
+          const ampm = match[3].toUpperCase();
+          if (ampm === "PM" && h24 !== 12) h24 += 12;
+          if (ampm === "AM" && h24 === 12) h24 = 0;
+          if (h24 >= 11 && h24 <= 23) { hasSlots = true; break; }
+        }
+
+        if (!hasSlots) {
+          console.log(`No availability: ${candidate.name}`);
           return null;
         }
 
-        console.log(`Found ${slots.length} slots for ${candidate.name}: ${slots.map(s => s.time).join(", ")}`);
-        return { ...candidate, timeSlots: slots };
+        console.log(`Confirmed available: ${candidate.name}`);
+        return candidate;
       } catch (err) {
-        console.error(`Error scraping ${candidate.name}:`, err);
+        console.error(`Error verifying ${candidate.name}:`, err);
         return null;
       }
     })
@@ -140,66 +142,6 @@ async function scrapeAvailability(
   return results
     .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled" && r.value !== null)
     .map((r) => r.value);
-}
-
-function extractTimeSlots(markdown: string, platform: Platform, params: SearchParams): TimeSlot[] {
-  const slots: TimeSlot[] = [];
-  const seen = new Set<string>();
-
-  // Common patterns for time slots on reservation pages:
-  // "7:00 PM", "7:30 PM", "8:00 PM" etc.
-  // Resy: often shows as buttons like "7:00 PM" "7:15 PM" with types like "Dining Room", "Bar"
-  // OpenTable: shows time buttons like "7:00 PM", "7:30 PM"
-
-  // Match time patterns: "H:MM PM/AM" or "HH:MM PM/AM"
-  const timePattern = /\b(1?[0-9]):([0-5][0-9])\s*(PM|AM)\b/gi;
-  let match;
-
-  while ((match = timePattern.exec(markdown)) !== null) {
-    const hour = parseInt(match[1]);
-    const minute = match[2];
-    const ampm = match[3].toUpperCase();
-
-    // Convert to 24h for comparison
-    let h24 = hour;
-    if (ampm === "PM" && hour !== 12) h24 += 12;
-    if (ampm === "AM" && hour === 12) h24 = 0;
-
-    // Only include times that are reasonable for dining (11 AM - 11 PM)
-    if (h24 < 11 || h24 > 23) continue;
-
-    const timeStr = `${match[1]}:${minute} ${ampm}`;
-    if (!seen.has(timeStr)) {
-      seen.add(timeStr);
-
-      // Try to detect seating type from surrounding text
-      const idx = match.index;
-      const context = markdown.substring(Math.max(0, idx - 100), idx + 30);
-      let type: string | undefined;
-
-      const typeMatch = context.match(/(dining room|bar|patio|outdoor|terrace|lounge|counter|chef'?s? table|main|garden)/i);
-      if (typeMatch) {
-        type = typeMatch[1].replace(/\b\w/g, c => c.toUpperCase());
-      }
-
-      slots.push({ time: timeStr, type });
-    }
-  }
-
-  // Sort by time
-  slots.sort((a, b) => {
-    const toMin = (t: string) => {
-      const m = t.match(/(\d+):(\d+)\s*(AM|PM)/i);
-      if (!m) return 0;
-      let h = parseInt(m[1]);
-      if (m[3].toUpperCase() === "PM" && h !== 12) h += 12;
-      if (m[3].toUpperCase() === "AM" && h === 12) h = 0;
-      return h * 60 + parseInt(m[2]);
-    };
-    return toMin(a.time) - toMin(b.time);
-  });
-
-  return slots;
 }
 
 // ─── Query parsing ───
