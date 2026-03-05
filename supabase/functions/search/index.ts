@@ -41,7 +41,7 @@ serve(async (req) => {
   }
 
   try {
-    const { query, lat, lng, location, mealType, preferredTime } = await req.json();
+    const { query, lat, lng, location } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
     const YELP_API_KEY = Deno.env.get("YELP_API_KEY");
@@ -124,7 +124,8 @@ Rules:
 - "tomorrow" = the day AFTER today
 - Convert suburbs to major metro city (e.g. "North Druid Hills" => "Atlanta")
 - dinner/tonight defaults to time "19:00", lunch = "12:00", breakfast = "08:00", brunch = "10:30"
-- The user has selected meal type: "${mealType || "dinner"}". If the query does NOT specify a time, use "${preferredTime || "19:00"}" as the default time.
+- If the user mentions a meal type (breakfast, brunch, lunch, dinner), use the corresponding default time above
+- If no meal or time is mentioned, default to "19:00"
 
 Return JSON:
 - cuisine: string ("" if unspecified)

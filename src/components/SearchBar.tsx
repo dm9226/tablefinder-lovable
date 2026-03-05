@@ -1,32 +1,22 @@
 import { useState, useRef, useEffect } from "react";
-import { Search, MapPin, Loader2, Coffee, Sun, Utensils, Moon } from "lucide-react";
-import type { MealType } from "@/pages/Index";
+import { Search, MapPin, Loader2 } from "lucide-react";
 
 interface SearchBarProps {
   onSearch: (query: string) => void;
   isLoading: boolean;
   location: string | null;
   locationLoading: boolean;
-  mealType: MealType;
-  onMealTypeChange: (meal: MealType) => void;
 }
 
 const SUGGESTIONS = [
   "Italian for 2 Friday night",
   "Sushi near me tonight",
-  "Romantic dinner for 2 Saturday",
+  "Romantic brunch for 2 Saturday",
   "Thai food tomorrow 7pm party of 4",
   "Steakhouse this weekend",
 ];
 
-const MEAL_OPTIONS: { value: MealType; label: string; icon: typeof Coffee }[] = [
-  { value: "breakfast", label: "Breakfast", icon: Coffee },
-  { value: "brunch", label: "Brunch", icon: Sun },
-  { value: "lunch", label: "Lunch", icon: Utensils },
-  { value: "dinner", label: "Dinner", icon: Moon },
-];
-
-export function SearchBar({ onSearch, isLoading, location, locationLoading, mealType, onMealTypeChange }: SearchBarProps) {
+export function SearchBar({ onSearch, isLoading, location, locationLoading }: SearchBarProps) {
   const [query, setQuery] = useState("");
   const [placeholder, setPlaceholder] = useState(SUGGESTIONS[0]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -49,25 +39,6 @@ export function SearchBar({ onSearch, isLoading, location, locationLoading, meal
 
   return (
     <form onSubmit={handleSubmit} className="w-full max-w-2xl mx-auto">
-      {/* Meal type selector */}
-      <div className="flex items-center justify-center gap-2 mb-4">
-        {MEAL_OPTIONS.map(({ value, label, icon: Icon }) => (
-          <button
-            key={value}
-            type="button"
-            onClick={() => onMealTypeChange(value)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-body font-medium transition-all ${
-              mealType === value
-                ? "bg-primary text-primary-foreground shadow-sm"
-                : "bg-secondary text-muted-foreground hover:text-foreground hover:bg-secondary/80"
-            }`}
-          >
-            <Icon className="h-3.5 w-3.5" />
-            {label}
-          </button>
-        ))}
-      </div>
-
       <div className="relative group">
         <div className="absolute -inset-0.5 bg-primary/20 rounded-xl blur-md opacity-0 group-focus-within:opacity-100 transition-opacity duration-300" />
         <div className="relative flex items-center bg-card border border-border rounded-xl overflow-hidden transition-colors focus-within:border-primary/50">

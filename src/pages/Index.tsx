@@ -5,15 +5,6 @@ import { Restaurant } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
-export type MealType = "breakfast" | "brunch" | "lunch" | "dinner";
-
-const MEAL_TIME_MAP: Record<MealType, string> = {
-  breakfast: "08:00",
-  brunch: "10:30",
-  lunch: "12:00",
-  dinner: "19:00",
-};
-
 const Index = () => {
   const [results, setResults] = useState<Restaurant[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -22,7 +13,6 @@ const Index = () => {
   const [location, setLocation] = useState<string | null>(null);
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [mealType, setMealType] = useState<MealType>("dinner");
   const abortRef = useRef<AbortController | null>(null);
 
   // Auto-detect location on mount
@@ -79,8 +69,6 @@ const Index = () => {
             lat: coords?.lat,
             lng: coords?.lng,
             location: location,
-            mealType,
-            preferredTime: MEAL_TIME_MAP[mealType],
           },
         });
 
@@ -101,7 +89,7 @@ const Index = () => {
         }
       }
     },
-    [coords, location, mealType]
+    [coords, location]
   );
 
   return (
@@ -123,8 +111,6 @@ const Index = () => {
           isLoading={isLoading}
           location={location}
           locationLoading={locationLoading}
-          mealType={mealType}
-          onMealTypeChange={setMealType}
         />
       </section>
 
