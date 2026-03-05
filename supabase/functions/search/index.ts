@@ -711,12 +711,38 @@ async function verifyAvailability(
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(markdown);
       const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
 
-      // Parse requested time into minutes for comparison
-      const [reqH, reqM] = params.time.split(":").map(Number);
-      const reqMinutes = reqH * 60 + reqM;
+      // Determine meal window from requested time
+      const [reqH] = params.time.split(":").map(Number);
+      // Meal windows (in minutes from midnight):
+      // Breakfast: 6:00 AM (360) — 12:00 PM (720)
+      // Brunch:   10:30 AM (630) — 3:00 PM (900)
+      // Lunch:    11:00 AM (660) — 4:00 PM (960)
+      // Dinner:    4:00 PM (960) — 11:59 PM (1439)
+      let windowStart: number;
+      let windowEnd: number;
+      let mealLabel: string;
 
-      // Define the acceptable time window: ±2 hours from requested time
-      const WINDOW_MINUTES = 120;
+      if (reqH < 10) {
+        // Breakfast window
+        windowStart = 360;  // 6:00 AM
+        windowEnd = 720;    // 12:00 PM
+        mealLabel = "breakfast";
+      } else if (reqH < 12) {
+        // Brunch window
+        windowStart = 630;  // 10:30 AM
+        windowEnd = 900;    // 3:00 PM
+        mealLabel = "brunch";
+      } else if (reqH < 16) {
+        // Lunch window
+        windowStart = 660;  // 11:00 AM
+        windowEnd = 960;    // 4:00 PM
+        mealLabel = "lunch";
+      } else {
+        // Dinner window
+        windowStart = 960;  // 4:00 PM
+        windowEnd = 1439;   // 11:59 PM
+        mealLabel = "dinner";
+      }
 
       // Collect all found times and check if any fall within the window
       const foundTimes: { time: string; minutes: number }[] = [];
@@ -747,16 +773,15 @@ async function verifyAvailability(
         }
       }
 
-      // Filter times to those within the requested window
-      const matchingTimes = foundTimes.filter((t) => {
-        const diff = Math.abs(t.minutes - reqMinutes);
-        return diff <= WINDOW_MINUTES;
-      });
+      // Filter times to those within the meal window
+      const matchingTimes = foundTimes.filter((t) =>
+        t.minutes >= windowStart && t.minutes <= windowEnd
+      );
 
       if (matchingTimes.length > 0) {
         // Update the restaurant's timeSlots with verified times
         r.timeSlots = matchingTimes.map((t) => ({ time: t.time }));
-        console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} slots in window (requested ${params.time})`);
+        console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} ${mealLabel} slots (${windowStart/60|0}:${(windowStart%60).toString().padStart(2,"0")}–${windowEnd/60|0}:${(windowEnd%60).toString().padStart(2,"0")})`);
         return r;
       }
 
@@ -768,7 +793,7 @@ async function verifyAvailability(
       }
 
       if (foundTimes.length > 0) {
-        console.log(`✗ ${r.name} [${r.platform}] — found ${foundTimes.length} slots but none near ${params.time} (closest: ${foundTimes.map(t => t.time).join(", ")})`);
+        console.log(`✗ ${r.name} [${r.platform}] — found ${foundTimes.length} slots but none in ${mealLabel} window (found: ${foundTimes.map(t => t.time).join(", ")})`);
       } else {
         console.log(`No time slots for ${r.name} [${r.platform}]`);
       }
