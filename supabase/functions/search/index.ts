@@ -557,9 +557,9 @@ function addResyParams(base: string, p: SearchParams): string {
     const u = new URL(base);
     u.searchParams.set("date", p.date);
     u.searchParams.set("seats", String(p.partySize));
-    // Note: Resy does NOT support a "time" query parameter — adding one causes
-    // the page to display "All Day" instead of the relevant meal period.
-    // Time filtering is handled on-page by the user after clicking through.
+    // Resy uses HHMM format (no colon) for time filtering, e.g. "1900" for 7:00 PM
+    const resyTime = p.time.replace(":", "");
+    u.searchParams.set("time", resyTime);
     return u.toString();
   } catch { return base; }
 }
