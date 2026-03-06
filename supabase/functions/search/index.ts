@@ -654,7 +654,7 @@ User query: "${query}"`;
   const candidatePool = stateFiltered.length > 0 ? stateFiltered : usableCandidates;
   let selectedCandidate = (candidatePool.sort((a: any, b: any) => cityTypeRank(a.type) - cityTypeRank(b.type))[0]) || null;
 
-  if (selectedCandidate) {
+  if (selectedCandidate && !cityFromBrowser) {
     parsed.lat = selectedCandidate.lat;
     parsed.lng = selectedCandidate.lng;
   }
