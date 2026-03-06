@@ -1524,7 +1524,7 @@ async function verifyAvailability(
 
       // Extract street address from Firecrawl JSON extraction (for geocoding later)
       if (r.platform !== "yelp" && !r._address) {
-        const jsonData = data?.data?.json || data?.json;
+        const jsonData = data?.data?.extract || data?.extract;
         const extractedAddr = jsonData?.address;
         if (extractedAddr && typeof extractedAddr === "string" && extractedAddr.length > 5) {
           r._address = extractedAddr;
