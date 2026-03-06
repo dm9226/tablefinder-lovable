@@ -922,8 +922,11 @@ async function fetchYelpCandidates(
   try {
     // Include amenity terms in Yelp search to discover rooftop/patio restaurants
     const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
+    // Strip generic meal terms from Yelp search — "dinner restaurants" → "restaurants"
+    const YELP_MEAL_STRIP = /\b(dinner|lunch|breakfast|supper|brunch|meal|dining)\b/gi;
+    const yelpCuisine = (params.cuisine || "").replace(YELP_MEAL_STRIP, "").trim();
     const sp = new URLSearchParams({
-      term: `${params.cuisine || ""}${amenitySuffix} restaurants`.trim(),
+      term: `${yelpCuisine}${amenitySuffix} restaurants`.trim(),
       location: `${params.city}, ${params.state}`,
       limit: "20",
       sort_by: "best_match",
