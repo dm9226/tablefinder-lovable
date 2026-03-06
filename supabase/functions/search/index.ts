@@ -1542,6 +1542,16 @@ async function verifyAvailability(
         return null;
       }
 
+      // Extract street address from scraped content (for geocoding later)
+      if (r.platform !== "yelp" && !r._address) {
+        const addr = extractAddressFromMarkdown(markdown);
+        if (addr) {
+          r._address = addr.full;
+          r._addressCity = addr.city;
+          console.log(`  Address extracted for ${r.name}: ${addr.full}`);
+        }
+      }
+
       // Extract image from scrape metadata if not already set
       if (!r.imageUrl) {
         const meta = data?.data?.metadata || data?.metadata;
