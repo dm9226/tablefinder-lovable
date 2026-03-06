@@ -15,7 +15,7 @@ export interface Restaurant {
   imageUrl?: string;
   description?: string;
   vibeTags?: string[];
-  platform: "resy" | "opentable" | "yelp";
+  platform: "resy" | "opentable" | "yelp" | "tock";
   platformUrl: string;
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
