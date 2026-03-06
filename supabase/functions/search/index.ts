@@ -1392,25 +1392,42 @@ async function verifyAvailability(
         return null;
       }
 
-      // CUISINE RELEVANCE CHECK: If user searched for a specific cuisine or dish,
-      // verify the scraped page actually mentions it (applies to ALL platforms).
+      // TWO-TIER CUISINE/DISH RELEVANCE CHECK (applies to ALL platforms).
+      // For DISH searches (e.g. "oysters"): accept if page mentions the dish keyword
+      // OR the parent cuisine type (e.g. "seafood"). A seafood restaurant likely serves
+      // oysters even if "oysters" isn't on the booking page.
+      // For CUISINE searches (e.g. "seafood"): standard check — page must mention the cuisine.
       const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
       const MEAL_TERMS_SET = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
       const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS_SET.has(t));
-      if (cuisineTokens.length > 0) {
+      
+      // Build expanded check tokens: include parent cuisine types for dish searches
+      const verifyTokens = [...cuisineTokens];
+      if (params.dishKeyword) {
+        const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
+        for (const pc of parentCuisines) {
+          if (!verifyTokens.includes(pc)) verifyTokens.push(pc);
+        }
+        if (params.cuisineType && !verifyTokens.includes(params.cuisineType)) {
+          verifyTokens.push(params.cuisineType);
+        }
+      }
+      
+      if (verifyTokens.length > 0) {
         const pageText = `${lower} ${(r.name || "").toLowerCase()}`;
-        // Check each token with singular/plural flexibility
-        const hasCuisineMatch = cuisineTokens.some((token) => {
+        const hasMatch = verifyTokens.some((token) => {
           if (pageText.includes(token)) return true;
-          // Try singular/plural variants (oysters↔oyster, tacos↔taco, steaks↔steak)
           const singular = token.endsWith("s") ? token.slice(0, -1) : null;
           const plural = !token.endsWith("s") ? token + "s" : null;
           if (singular && pageText.includes(singular)) return true;
           if (plural && pageText.includes(plural)) return true;
           return false;
         });
-        if (!hasCuisineMatch) {
-          console.log(`✗ ${r.name} [${r.platform}] — failed cuisine/dish relevance check for: ${cuisineTokens.join(", ")}`);
+        if (!hasMatch) {
+          const label = params.dishKeyword 
+            ? `dish="${params.dishKeyword}" OR cuisineType="${params.cuisineType}"`
+            : cuisineTokens.join(", ");
+          console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${label} (checked: ${verifyTokens.join(", ")})`);
           return null;
         }
       }
