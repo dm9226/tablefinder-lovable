@@ -328,20 +328,8 @@ User query: "${query}"`;
     return 5;
   };
 
-  let selectedCandidate = (stateFiltered.sort((a: any, b: any) => cityTypeRank(a.type) - cityTypeRank(b.type))[0]) || null;
-
-  if (!selectedCandidate && lat && lng && usableCandidates.length > 0) {
-    let closest = usableCandidates[0];
-    let closestDist = Infinity;
-    for (const c of usableCandidates) {
-      const d = haversine(lat, lng, c.lat, c.lng);
-      if (d < closestDist) {
-        closestDist = d;
-        closest = c;
-      }
-    }
-    selectedCandidate = closest;
-  }
+  const candidatePool = stateFiltered.length > 0 ? stateFiltered : usableCandidates;
+  let selectedCandidate = (candidatePool.sort((a: any, b: any) => cityTypeRank(a.type) - cityTypeRank(b.type))[0]) || null;
 
   if (selectedCandidate) {
     parsed.lat = selectedCandidate.lat;
