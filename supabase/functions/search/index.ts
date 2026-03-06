@@ -540,7 +540,7 @@ function isPlatformCandidateUrlValid(
 // ─── Normalize Firecrawl results → Restaurant objects ───
 
 function normalizeCandidates(
-  platform: "resy" | "opentable" | "yelp", candidates: FirecrawlResult[], params: SearchParams
+  platform: "resy" | "opentable" | "yelp" | "tock", candidates: FirecrawlResult[], params: SearchParams
 ): Restaurant[] {
   return candidates
     .map((c) => {
@@ -552,6 +552,8 @@ function normalizeCandidates(
         ? addResyParams(canonUrl, params)
         : platform === "opentable"
         ? addOTParams(canonUrl, params)
+        : platform === "tock"
+        ? addTockParams(canonUrl, params)
         : canonUrl;
 
       return {
