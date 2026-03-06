@@ -87,7 +87,9 @@ const Index = () => {
         if (fnError) throw new Error(fnError.message);
         if (data?.error) throw new Error(data.error);
 
-        setResults(data?.results || []);
+        const newResults = data?.results || [];
+        setResults(newResults);
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(newResults));
       } catch (err: any) {
         if (controller.signal.aborted) return;
         console.error("Search error:", err);
