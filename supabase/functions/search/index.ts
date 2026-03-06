@@ -540,6 +540,7 @@ User query: "${query}"`;
   }
 
   // If city is still empty, try reverse-geocoding from coords — otherwise ask the user
+  let cityFromBrowser = false;
   if (!parsed.city) {
     if (lat && lng) {
       try {
@@ -550,6 +551,13 @@ User query: "${query}"`;
         const revData = await revResp.json();
         parsed.city = revData.address?.city || revData.address?.town || "";
         parsed.state = revData.address?.state_code || revData.address?.state || "";
+        if (parsed.city) {
+          cityFromBrowser = true;
+          // Keep precise browser coords as distance origin
+          parsed.lat = lat;
+          parsed.lng = lng;
+          console.log(`City from browser location: ${parsed.city}, ${parsed.state} (using precise coords ${lat},${lng})`);
+        }
       } catch { /* leave empty */ }
     }
     if (!parsed.city) {
