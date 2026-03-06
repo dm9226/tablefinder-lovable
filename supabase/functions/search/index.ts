@@ -914,6 +914,19 @@ function getResyMetroCityName(params: SearchParams): string {
   return params.city || "";
 }
 
+// Generic helper: returns the metro city name for ANY platform search.
+// Used by Yelp and Firecrawl to search the broader metro area instead of tiny CDPs.
+function getMetroCityName(city: string, state: string): string {
+  const c = (city || "").trim().toLowerCase();
+  const s = (state || "").trim().toLowerCase();
+  const key = s ? `${c}|${s}` : c;
+  const metroSlug = RESY_METRO_MAP[key];
+  if (metroSlug) {
+    return metroSlug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  }
+  return city;
+}
+
 
 function isPlatformCandidateUrlValid(
   platform: "resy" | "opentable" | "yelp",
