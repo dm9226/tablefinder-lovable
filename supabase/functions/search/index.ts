@@ -73,9 +73,15 @@ serve(async (req) => {
     const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates]);
     console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, deduped: ${allCandidates.length}`);
 
+    // Detect amenity/experience keywords that require relevance filtering
+    const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
+    if (amenityTerms.length > 0) {
+      console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
+    }
+
     // Step 3: UNIFIED VERIFICATION GATE
     // Every candidate must pass a Firecrawl scrape check confirming real availability
-    const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY);
+    const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY, amenityTerms);
     console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
 
     // Step 4: Enrich with AI (ratings, cuisine, neighborhood, coords)
@@ -827,7 +833,8 @@ function selectCandidatesForVerification(
 async function verifyAvailability(
   candidates: Restaurant[],
   params: SearchParams,
-  firecrawlKey: string
+  firecrawlKey: string,
+  amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   // Keep latency bounded, but ensure platform diversity in the verification set.
   const limited = selectCandidatesForVerification(candidates, 24);
@@ -883,6 +890,13 @@ async function verifyAvailability(
       // Check for "no availability" signals
       if (NO_AVAILABILITY_SIGNALS.some((signal) => lower.includes(signal))) {
         console.log(`No availability for ${r.name} [${r.platform}]`);
+        return null;
+      }
+
+      // RELEVANCE CHECK: If user searched for an amenity (rooftop, patio, etc.),
+      // verify the restaurant page actually mentions it. Zero extra latency — uses already-scraped markdown.
+      if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(markdown, amenityTerms)) {
+        console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${amenityTerms.join(", ")}`);
         return null;
       }
 
@@ -987,6 +1001,42 @@ async function verifyAvailability(
   }));
 
   return checked.filter(Boolean) as Restaurant[];
+}
+
+// ─── Amenity / experience keywords ───
+// These are NOT standard cuisines — they describe an experience or venue feature.
+// When a user searches for these, we must verify the restaurant actually offers it.
+const AMENITY_KEYWORDS: Record<string, string[]> = {
+  rooftop: ["rooftop", "roof top", "roof deck", "rooftop bar", "rooftop dining", "sky bar", "terrace"],
+  waterfront: ["waterfront", "water front", "lakefront", "riverside", "oceanfront", "harborside", "dockside", "bayfront"],
+  patio: ["patio", "outdoor dining", "outdoor seating", "al fresco", "garden dining", "sidewalk cafe"],
+  outdoor: ["outdoor", "outside", "open air", "open-air", "courtyard", "terrace", "beer garden", "biergarten"],
+  brunch: ["brunch", "brunch menu", "bottomless brunch", "weekend brunch"],
+  breakfast: ["breakfast", "morning menu", "breakfast menu"],
+  "live music": ["live music", "live band", "live jazz", "live entertainment", "live performance"],
+  "private dining": ["private dining", "private room", "private event", "private party"],
+  "happy hour": ["happy hour", "drink specials", "bar specials"],
+};
+
+function extractAmenityTerms(cuisine: string, query: string): string[] {
+  const combined = `${cuisine} ${query}`.toLowerCase();
+  const matched: string[] = [];
+  for (const [keyword] of Object.entries(AMENITY_KEYWORDS)) {
+    if (combined.includes(keyword)) {
+      matched.push(keyword);
+    }
+  }
+  return matched;
+}
+
+function checkRelevanceInMarkdown(markdown: string, amenities: string[]): boolean {
+  if (amenities.length === 0) return true; // no amenity filter needed
+  const lower = markdown.toLowerCase();
+  // Restaurant page must mention at least ONE synonym for each required amenity
+  return amenities.every((amenity) => {
+    const synonyms = AMENITY_KEYWORDS[amenity] || [amenity];
+    return synonyms.some((syn) => lower.includes(syn));
+  });
 }
 
 // ─── Utilities ───
