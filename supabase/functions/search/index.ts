@@ -657,8 +657,23 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp candidates: ${businesses.length}`);
 
-    return businesses
-      .filter((b: any) => !!b.alias)
+    // Filter by cuisine relevance: if user searched for a specific cuisine,
+    // exclude businesses whose Yelp categories don't match at all.
+    const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
+    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean);
+
+    const filtered = businesses.filter((b: any) => {
+      if (!b.alias) return false;
+      if (cuisineTokens.length === 0) return true; // no cuisine filter
+      // Check if any Yelp category matches any cuisine token
+      const cats = (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`.toLowerCase()).join(" ");
+      const bizName = (b.name || "").toLowerCase();
+      return cuisineTokens.some((token: string) => cats.includes(token) || bizName.includes(token));
+    });
+
+    console.log(`Yelp after cuisine filter: ${filtered.length}/${businesses.length} (cuisine: "${cuisineFilter}")`);
+
+    return filtered
       .map((b: any): Restaurant => ({
         id: `yelp-${b.id}`,
         name: b.name,
@@ -1076,12 +1091,21 @@ function checkRelevanceInMarkdown(markdown: string, amenities: string[]): boolea
 // ─── Utilities ───
 
 function dedupeByName(results: Restaurant[]): Restaurant[] {
-  const seen = new Map<string, Restaurant>();
+  const kept: Restaurant[] = [];
+  const keys: string[] = [];
+
   for (const r of results) {
     const key = r.name.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (!seen.has(key)) seen.set(key, r);
+    // Check exact match OR substring containment (e.g. "thechophouse" vs "thechophouseaugustarestaurant")
+    const isDupe = keys.some((existing) =>
+      existing === key || existing.startsWith(key) || key.startsWith(existing)
+    );
+    if (!isDupe) {
+      kept.push(r);
+      keys.push(key);
+    }
   }
-  return Array.from(seen.values()).slice(0, 60);
+  return kept.slice(0, 60);
 }
 
 function hashKey(v: string): string {
