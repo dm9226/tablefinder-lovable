@@ -861,6 +861,8 @@ const NO_AVAILABILITY_SIGNALS = [
   // Yelp
   "not currently accepting reservations", "this business is not currently accepting reservations",
   "temporarily unavailable",
+  // Tock
+  "no upcoming availability", "currently not accepting", "check back soon",
 ];
 
 function selectCandidatesForVerification(
