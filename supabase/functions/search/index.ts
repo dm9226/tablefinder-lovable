@@ -61,20 +61,22 @@ serve(async (req) => {
       console.warn("YELP_API_KEY missing — skipping Yelp");
     }
 
-    const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
+    const [resyCandidates, otCandidates, yelpCandidates, tockCandidates] = await Promise.all([
       searchFirecrawl(params, FIRECRAWL_API_KEY, "resy"),
       searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable"),
       YELP_API_KEY
         ? fetchYelpCandidates(params, YELP_API_KEY)
         : Promise.resolve([] as Restaurant[]),
+      searchFirecrawl(params, FIRECRAWL_API_KEY, "tock"),
     ]);
 
     // Normalize Firecrawl results into Restaurant objects
     const resyRaw = normalizeCandidates("resy", resyCandidates, params);
     const otRaw = normalizeCandidates("opentable", otCandidates, params);
+    const tockRaw = normalizeCandidates("tock", tockCandidates, params);
 
-    const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates]);
-    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, deduped: ${allCandidates.length}`);
+    const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates, ...tockRaw]);
+    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, Tock: ${tockRaw.length}, deduped: ${allCandidates.length}`);
 
     // Detect amenity/experience keywords that require relevance filtering
     const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
