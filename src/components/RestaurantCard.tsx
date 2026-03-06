@@ -1,5 +1,8 @@
 import { Restaurant } from "@/types/restaurant";
 import { Star, MapPin, ChevronRight, Clock, Users } from "lucide-react";
+import resyLogo from "@/assets/resy_logo.png";
+import opentableLogo from "@/assets/opentable_logo.png";
+import yelpLogo from "@/assets/yelp_logo.png";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
@@ -7,16 +10,10 @@ const PLATFORM_STYLES: Record<string, string> = {
   yelp: "bg-orange-500/15 text-orange-400",
 };
 
-const PLATFORM_LABELS: Record<string, string> = {
-  resy: "R",
-  opentable: "OT",
-  yelp: "Y",
-};
-
-const PLATFORM_LABEL_COLORS: Record<string, string> = {
-  resy: "text-red-400",
-  opentable: "text-emerald-400",
-  yelp: "text-orange-400",
+const PLATFORM_LOGOS: Record<string, string> = {
+  resy: resyLogo,
+  opentable: opentableLogo,
+  yelp: yelpLogo,
 };
 
 interface RestaurantCardProps {
