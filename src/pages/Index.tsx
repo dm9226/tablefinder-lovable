@@ -84,8 +84,17 @@ const Index = () => {
         // Check if cancelled
         if (controller.signal.aborted) return;
 
-        if (fnError) throw new Error(fnError.message);
+        // Check for clarification / user-facing errors first (returned as 200 with error payload)
         if (data?.error) throw new Error(data.error);
+        
+        // Generic invoke failure — extract a useful message
+        if (fnError) {
+          const msg = fnError.message || "";
+          if (msg.includes("non-2xx")) {
+            throw new Error("Something went wrong with the search. Please try again.");
+          }
+          throw new Error(msg);
+        }
 
         const newResults = data?.results || [];
         setResults(newResults);
