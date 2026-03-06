@@ -193,73 +193,175 @@ User query: "${query}"`;
     }
   }
 
-  // If we have a city but no state, and no coordinates to disambiguate, check for ambiguity
-  if (!parsed.state) {
-    try {
-      const geoCheck = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=10&addressdetails=1&countrycodes=us`,
-        { headers: { "User-Agent": "TableFinder/1.0" } }
-      );
-      const geoResults = await geoCheck.json();
-      // Collect distinct US states from all results (don't filter by type — Nominatim types vary)
-      const stateSet = new Map<string, string>(); // state_code -> full state name
-      for (const r of (geoResults || [])) {
-        const sc = r.address?.state_code || r.address?.["ISO3166-2-lvl4"]?.split("-")?.[1] || "";
-        const sn = r.address?.state || "";
-        if (sc && !stateSet.has(sc.toUpperCase())) {
-          stateSet.set(sc.toUpperCase(), sn);
-        }
-      }
+  const hasExplicitState = hasExplicitStateInQuery(query);
 
-      if (stateSet.size > 1 && !(lat && lng)) {
-        // Multiple US states — ask user to specify
-        const options = [...stateSet.entries()].slice(0, 4).map(([code, name]) =>
-          `${parsed.city}, ${code}`
-        );
-        throw new Error(`Multiple locations found for "${parsed.city}". Please include the state — e.g. ${options.join(" or ")}.`);
-      } else if (stateSet.size === 1) {
-        parsed.state = [...stateSet.keys()][0];
-      } else if (stateSet.size > 1 && lat && lng) {
-        // Use coordinates to pick the closest match
-        let closest: any = null;
-        let closestDist = Infinity;
-        for (const r of geoResults) {
-          const d = haversine(lat, lng, parseFloat(r.lat), parseFloat(r.lon));
-          if (d < closestDist) { closestDist = d; closest = r; }
-        }
-        if (closest) {
-          parsed.state = closest.address?.state_code || closest.address?.["ISO3166-2-lvl4"]?.split("-")?.[1] || "";
+  // Geocode city name (without trusting AI-guessed state) for disambiguation and coordinates.
+  let cityGeoResults: any[] = [];
+  try {
+    const geoCheck = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=12&addressdetails=1&countrycodes=us`,
+      { headers: { "User-Agent": "TableFinder/1.0" } }
+    );
+    cityGeoResults = await geoCheck.json();
+  } catch {
+    cityGeoResults = [];
+  }
+
+  const cityNorm = normalizePlaceToken(parsed.city);
+  const candidates = (cityGeoResults || [])
+    .map((r: any) => {
+      const stateCode = extractStateCode(r.address);
+      const locality = extractLocalityName(r.address);
+      return {
+        lat: parseFloat(r.lat),
+        lng: parseFloat(r.lon),
+        stateCode,
+        locality,
+        localityNorm: normalizePlaceToken(locality),
+        type: `${r.class || ""}/${r.type || ""}`.toLowerCase(),
+      };
+    })
+    .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && !!c.stateCode)
+    .filter((c: any) => {
+      // Prefer true locality matches; avoid county-only matches when possible.
+      if (!c.localityNorm) return false;
+      return c.localityNorm === cityNorm;
+    });
+
+  const usableCandidates = candidates.length > 0
+    ? candidates
+    : (cityGeoResults || [])
+        .map((r: any) => ({
+          lat: parseFloat(r.lat),
+          lng: parseFloat(r.lon),
+          stateCode: extractStateCode(r.address),
+          locality: extractLocalityName(r.address),
+          localityNorm: normalizePlaceToken(extractLocalityName(r.address)),
+          type: `${r.class || ""}/${r.type || ""}`.toLowerCase(),
+        }))
+        .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && !!c.stateCode);
+
+  const distinctStates = [...new Set(usableCandidates.map((c: any) => c.stateCode))];
+
+  // If user did NOT explicitly include a state, never trust AI's guessed state for ambiguous cities.
+  if (!hasExplicitState) {
+    if (distinctStates.length > 1 && !(lat && lng)) {
+      const options = [...new Set(usableCandidates.map((c: any) => `${parsed.city}, ${c.stateCode}`))].slice(0, 4);
+      throw new Error(`Multiple locations found for "${parsed.city}". Please include the state — e.g. ${options.join(" or ")}.`);
+    }
+
+    if (distinctStates.length === 1) {
+      parsed.state = distinctStates[0];
+    } else if (distinctStates.length > 1 && lat && lng) {
+      let closest = usableCandidates[0];
+      let closestDist = Infinity;
+      for (const c of usableCandidates) {
+        const d = haversine(lat, lng, c.lat, c.lng);
+        if (d < closestDist) {
+          closestDist = d;
+          closest = c;
         }
       }
-    } catch (e) {
-      if (e instanceof Error && e.message.includes("Multiple locations")) throw e;
-      /* geocoding failed, proceed without state */
+      parsed.state = closest?.stateCode || parsed.state;
     }
+  } else if (!parsed.state && distinctStates.length === 1) {
+    parsed.state = distinctStates[0];
   }
+
   parsed.cuisine = parsed.cuisine?.trim() || "";
   parsed.time = /^\d{2}:\d{2}$/.test(parsed.time) ? parsed.time : "19:00";
   parsed.partySize = Number(parsed.partySize) > 0 ? Number(parsed.partySize) : 2;
 
-  // Always geocode the SEARCHED city for distance calculations.
-  // Browser coords are only used as a fallback if no city was specified, or for Yelp proximity boost.
-  if (parsed.city) {
-    try {
-      const geoResp = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city + ", " + parsed.state)}&format=json&limit=1`,
-        { headers: { "User-Agent": "TableFinder/1.0" } }
-      );
-      const geoData = await geoResp.json();
-      if (geoData?.[0]) {
-        parsed.lat = parseFloat(geoData[0].lat);
-        parsed.lng = parseFloat(geoData[0].lon);
+  // Coordinates should represent the searched city (for distance filtering), not browser position.
+  const stateFiltered = parsed.state
+    ? usableCandidates.filter((c: any) => c.stateCode === parsed.state.toUpperCase())
+    : usableCandidates;
+
+  const cityTypeRank = (type: string): number => {
+    if (type.includes("place/city")) return 1;
+    if (type.includes("place/town")) return 2;
+    if (type.includes("place/village")) return 3;
+    if (type.includes("boundary/administrative")) return 4;
+    return 5;
+  };
+
+  let selectedCandidate = (stateFiltered.sort((a: any, b: any) => cityTypeRank(a.type) - cityTypeRank(b.type))[0]) || null;
+
+  if (!selectedCandidate && lat && lng && usableCandidates.length > 0) {
+    let closest = usableCandidates[0];
+    let closestDist = Infinity;
+    for (const c of usableCandidates) {
+      const d = haversine(lat, lng, c.lat, c.lng);
+      if (d < closestDist) {
+        closestDist = d;
+        closest = c;
       }
-    } catch { /* ignore */ }
+    }
+    selectedCandidate = closest;
   }
-  // Fallback to browser coords if geocoding failed
-  if (!parsed.lat && lat) { parsed.lat = lat; }
-  if (!parsed.lng && lng) { parsed.lng = lng; }
+
+  if (selectedCandidate) {
+    parsed.lat = selectedCandidate.lat;
+    parsed.lng = selectedCandidate.lng;
+  }
+
+  // Last fallback to browser coordinates.
+  if (!parsed.lat && lat) parsed.lat = lat;
+  if (!parsed.lng && lng) parsed.lng = lng;
 
   return parsed;
+}
+
+const US_STATE_NAMES = [
+  "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida", "georgia",
+  "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland",
+  "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
+  "new mexico", "new york", "north carolina", "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
+  "south dakota", "tennessee", "texas", "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming", "district of columbia"
+];
+
+const STATE_CODE_AFTER_COMMA = /,\s*(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)\b/i;
+const STATE_CODE_STANDALONE_SAFE = /\b(al|ak|az|ar|ca|co|ct|de|fl|ga|id|il|ia|ks|ky|la|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)\b/i;
+function normalizePlaceToken(value: string): string {
+  return (value || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+}
+
+function extractStateCode(address: any): string {
+  const fromStateCode = address?.state_code;
+  if (fromStateCode && typeof fromStateCode === "string") return fromStateCode.toUpperCase();
+
+  const iso = address?.["ISO3166-2-lvl4"];
+  if (iso && typeof iso === "string" && iso.includes("-")) {
+    return iso.split("-")[1]?.toUpperCase() || "";
+  }
+
+  return "";
+}
+
+function extractLocalityName(address: any): string {
+  return address?.city
+    || address?.town
+    || address?.village
+    || address?.hamlet
+    || address?.municipality
+    || address?.county
+    || "";
+}
+
+function hasExplicitStateInQuery(query: string): boolean {
+  const q = (query || "").toLowerCase();
+
+  if (STATE_CODE_AFTER_COMMA.test(q)) {
+    return true;
+  }
+
+  // Detect safe standalone two-letter state codes (e.g. "decatur ga").
+  if (STATE_CODE_STANDALONE_SAFE.test(` ${q.replace(/[^a-z\s]/g, " ")} `)) {
+    return true;
+  }
+
+  const padded = ` ${q.replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ")} `;
+  return US_STATE_NAMES.some((state) => padded.includes(` ${state} `));
 }
 
 // ─── Firecrawl web search for Resy / OpenTable ───
