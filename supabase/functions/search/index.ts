@@ -1074,6 +1074,12 @@ async function verifyAvailability(
         return r;
       }
 
+      // Tock: experience-based pages may not show traditional time slots
+      if (foundTimes.length === 0 && hasTockAvailabilityMarker) {
+        console.log(`✓ Verified ${r.name} [tock] — booking markers present (trusting marker for ${mealLabel})`);
+        return r;
+      }
+
       if (foundTimes.length > 0) {
         console.log(`✗ ${r.name} [${r.platform}] — found ${foundTimes.length} slots but none in ${mealLabel} window (found: ${foundTimes.map(t => t.time).join(", ")})`);
       } else {
