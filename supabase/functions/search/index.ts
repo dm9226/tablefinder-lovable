@@ -657,8 +657,23 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp candidates: ${businesses.length}`);
 
-    return businesses
-      .filter((b: any) => !!b.alias)
+    // Filter by cuisine relevance: if user searched for a specific cuisine,
+    // exclude businesses whose Yelp categories don't match at all.
+    const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
+    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean);
+
+    const filtered = businesses.filter((b: any) => {
+      if (!b.alias) return false;
+      if (cuisineTokens.length === 0) return true; // no cuisine filter
+      // Check if any Yelp category matches any cuisine token
+      const cats = (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`.toLowerCase()).join(" ");
+      const bizName = (b.name || "").toLowerCase();
+      return cuisineTokens.some((token: string) => cats.includes(token) || bizName.includes(token));
+    });
+
+    console.log(`Yelp after cuisine filter: ${filtered.length}/${businesses.length} (cuisine: "${cuisineFilter}")`);
+
+    return filtered
       .map((b: any): Restaurant => ({
         id: `yelp-${b.id}`,
         name: b.name,
