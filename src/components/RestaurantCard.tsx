@@ -64,7 +64,7 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
               {distLabel}
             </span>
           )}
-          <ExternalLink className="h-3.5 w-3.5 text-muted-foreground group-hover:text-primary transition-colors" />
+          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground group-hover:text-primary transition-colors" />
         </div>
       </div>
       {slots.length > 0 && (
