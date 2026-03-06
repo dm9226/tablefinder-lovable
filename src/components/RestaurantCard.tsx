@@ -1,5 +1,8 @@
 import { Restaurant } from "@/types/restaurant";
 import { Star, MapPin, ChevronRight, Clock, Users } from "lucide-react";
+import resyLogo from "@/assets/resy_logo.png";
+import opentableLogo from "@/assets/opentable_logo.png";
+import yelpLogo from "@/assets/yelp_logo.png";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
@@ -7,16 +10,10 @@ const PLATFORM_STYLES: Record<string, string> = {
   yelp: "bg-orange-500/15 text-orange-400",
 };
 
-const PLATFORM_LABELS: Record<string, string> = {
-  resy: "R",
-  opentable: "OT",
-  yelp: "Y",
-};
-
-const PLATFORM_LABEL_COLORS: Record<string, string> = {
-  resy: "text-red-400",
-  opentable: "text-emerald-400",
-  yelp: "text-orange-400",
+const PLATFORM_LOGOS: Record<string, string> = {
+  resy: resyLogo,
+  opentable: opentableLogo,
+  yelp: yelpLogo,
 };
 
 interface RestaurantCardProps {
@@ -52,20 +49,18 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
             className="w-full h-full object-cover"
             loading="lazy"
             onError={(e) => {
-              // Replace broken image with platform text logo
               const img = e.currentTarget;
-              const parent = img.parentElement;
-              if (parent) {
-                const label = PLATFORM_LABELS[restaurant.platform] || "?";
-                const color = PLATFORM_LABEL_COLORS[restaurant.platform] || "text-muted-foreground";
-                parent.innerHTML = `<span class="font-heading font-bold text-xl ${color} opacity-60">${label}</span>`;
-              }
+              img.className = "w-10 h-10 object-contain rounded";
+              img.src = PLATFORM_LOGOS[restaurant.platform] || "";
+              img.onerror = null; // prevent loop
             }}
           />
         ) : (
-          <span className={`font-heading font-bold text-xl opacity-60 ${PLATFORM_LABEL_COLORS[restaurant.platform] || "text-muted-foreground"}`}>
-            {PLATFORM_LABELS[restaurant.platform] || "?"}
-          </span>
+          <img
+            src={PLATFORM_LOGOS[restaurant.platform] || ""}
+            alt={restaurant.platform}
+            className="w-10 h-10 object-contain rounded"
+          />
         )}
       </div>
 
