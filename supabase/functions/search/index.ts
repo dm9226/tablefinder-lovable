@@ -193,33 +193,43 @@ User query: "${query}"`;
     }
   }
 
-  // If we have a city but no state, and no coordinates to disambiguate, ask the user to clarify
-  if (!parsed.state && !(lat && lng)) {
-    // Check if the city name is ambiguous (multiple results from geocoding)
+  // If we have a city but no state, and no coordinates to disambiguate, check for ambiguity
+  if (!parsed.state) {
     try {
       const geoCheck = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=5&addressdetails=1`,
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=10&addressdetails=1&countrycodes=us`,
         { headers: { "User-Agent": "TableFinder/1.0" } }
       );
       const geoResults = await geoCheck.json();
-      // Filter to US results that are actual cities/towns
-      const usCities = (geoResults || []).filter((r: any) =>
-        r.address?.country_code === "us" &&
-        (r.type === "city" || r.type === "town" || r.type === "village" || r.class === "place")
-      );
-      if (usCities.length > 1) {
-        // Multiple US cities with this name — ask user to specify state
-        const options = usCities.slice(0, 5).map((r: any) =>
-          `${r.address?.city || r.address?.town || parsed.city}, ${r.address?.state || ""}`
-        );
-        const unique = [...new Set(options)];
-        if (unique.length > 1) {
-          throw new Error(`Multiple locations found for "${parsed.city}". Please include the state — e.g. ${unique.slice(0, 3).join(" or ")}.`);
+      // Collect distinct US states from all results (don't filter by type — Nominatim types vary)
+      const stateSet = new Map<string, string>(); // state_code -> full state name
+      for (const r of (geoResults || [])) {
+        const sc = r.address?.state_code || r.address?.["ISO3166-2-lvl4"]?.split("-")?.[1] || "";
+        const sn = r.address?.state || "";
+        if (sc && !stateSet.has(sc.toUpperCase())) {
+          stateSet.set(sc.toUpperCase(), sn);
         }
-        // All results point to same state — use it
-        parsed.state = usCities[0].address?.state_code || usCities[0].address?.state || "";
-      } else if (usCities.length === 1) {
-        parsed.state = usCities[0].address?.state_code || usCities[0].address?.state || "";
+      }
+
+      if (stateSet.size > 1 && !(lat && lng)) {
+        // Multiple US states — ask user to specify
+        const options = [...stateSet.entries()].slice(0, 4).map(([code, name]) =>
+          `${parsed.city}, ${code}`
+        );
+        throw new Error(`Multiple locations found for "${parsed.city}". Please include the state — e.g. ${options.join(" or ")}.`);
+      } else if (stateSet.size === 1) {
+        parsed.state = [...stateSet.keys()][0];
+      } else if (stateSet.size > 1 && lat && lng) {
+        // Use coordinates to pick the closest match
+        let closest: any = null;
+        let closestDist = Infinity;
+        for (const r of geoResults) {
+          const d = haversine(lat, lng, parseFloat(r.lat), parseFloat(r.lon));
+          if (d < closestDist) { closestDist = d; closest = r; }
+        }
+        if (closest) {
+          parsed.state = closest.address?.state_code || closest.address?.["ISO3166-2-lvl4"]?.split("-")?.[1] || "";
+        }
       }
     } catch (e) {
       if (e instanceof Error && e.message.includes("Multiple locations")) throw e;
@@ -375,7 +385,7 @@ function normalizeCandidates(
         id: `${platform}-${hashKey(canonUrl)}`,
         name,
         cuisine: params.cuisine || "Restaurant",
-        neighborhood: params.city,
+        neighborhood: extractNeighborhoodFromTitle(c.title, c.description, params.city),
         rating: undefined,
         priceRange: undefined,
         imageUrl: null,
@@ -453,7 +463,17 @@ function cleanName(title: string | undefined, url: string, platform: string): st
   return slug.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
-// ─── Yelp Fusion API: search for restaurants that accept reservations ───
+// Extract neighborhood/location from platform title/description
+function extractNeighborhoodFromTitle(title: string | undefined, description: string | undefined, fallback: string): string {
+  // OpenTable titles often have "Restaurant Name - City, ST" or description has location
+  // Resy titles often have "Restaurant Name | City"
+  const text = `${title || ""} ${description || ""}`;
+  // Look for "City, ST" or "Neighborhood - City" patterns
+  const cityStateMatch = text.match(/[-–|]\s*([A-Za-z\s]+),\s*([A-Z]{2})\b/);
+  if (cityStateMatch) return cityStateMatch[1].trim();
+  return fallback;
+}
+
 
 async function fetchYelpCandidates(
   params: SearchParams, yelpKey: string
