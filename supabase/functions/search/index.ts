@@ -963,8 +963,10 @@ async function fetchYelpCandidates(
 
     // Filter by cuisine relevance: if user searched for a specific cuisine,
     // exclude businesses whose Yelp categories don't match at all.
+    // Skip filtering for generic meal terms — they're meal times, not cuisines.
+    const MEAL_TERMS = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
     const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
-    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean);
+    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t));
 
     const filtered = businesses.filter((b: any) => {
       if (!b.alias) return false;
