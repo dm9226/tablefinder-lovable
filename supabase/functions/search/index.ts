@@ -1217,6 +1217,122 @@ function toTwelveHourLabel(time24: string): string {
   return `${hour12}:${minutes} ${ampm}`;
 }
 
+// ─── Address extraction from scraped markdown ───
+
+/**
+ * Extract a US street address from scraped page markdown.
+ * Looks for patterns like "123 Main St, Atlanta, GA 30309" or "1065 Huff Rd NW Atlanta GA".
+ * Returns { full, city } or null.
+ */
+function extractAddressFromMarkdown(markdown: string): { full: string; city: string } | null {
+  // Pattern: street number + street name + optional directional + city + state (+ optional zip)
+  // Handles common formats from Resy/OpenTable/Yelp pages
+  const patterns = [
+    // "123 Main St, Atlanta, GA 30309" or "123 Main St, Atlanta, GA"
+    /(\d{1,5}\s+[A-Za-z0-9\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Rd|Road|Ln|Lane|Way|Ct|Court|Pl(?:ace)?|Pkwy|Parkway|Cir(?:cle)?|Hwy|Highway|Trail|Tr|Pike|Pass|Run|Crossing|Xing|Loop|Terr?(?:ace)?|Walk|Row|Path|Square|Sq|Commons|Center|Centre)\.?\s*(?:NW|NE|SW|SE|N|S|E|W)?)\s*,?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,?\s+(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\s*(\d{5})?/i,
+    // Simpler: "123 Any Street City, ST"
+    /(\d{1,5}\s+[\w\s.]+)\s*,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/i,
+  ];
+
+  for (const pat of patterns) {
+    const m = markdown.match(pat);
+    if (m) {
+      const street = m[1].trim();
+      const city = m[2].trim();
+      const state = m[3].toUpperCase();
+      const zip = m[4] || "";
+      const full = zip ? `${street}, ${city}, ${state} ${zip}` : `${street}, ${city}, ${state}`;
+      return { full, city };
+    }
+  }
+  return null;
+}
+
+// ─── Batch geocode verified results ───
+
+async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams): Promise<void> {
+  const toGeocode = results.filter(r => r.platform !== "yelp" && r._address && !r.distanceMiles);
+  if (toGeocode.length === 0) return;
+
+  const cityLat = params.lat || 0;
+  const cityLng = params.lng || 0;
+  if (!cityLat || !cityLng) {
+    console.log("No search coordinates for distance calculation, skipping geocode");
+    return;
+  }
+
+  console.log(`Geocoding ${toGeocode.length} addresses via Nominatim...`);
+
+  // Fire requests in parallel with 300ms stagger to avoid rate limiting
+  const geocodePromises = toGeocode.map((r, i) => {
+    return new Promise<void>(async (resolve) => {
+      // Stagger starts by 300ms
+      await new Promise(wait => setTimeout(wait, i * 300));
+      try {
+        const addr = r._address!;
+        const resp = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1&addressdetails=1`,
+          { headers: { "User-Agent": "TableFinder/1.0" } }
+        );
+
+        if (resp.status === 429) {
+          // Rate limited — wait and retry once
+          await new Promise(wait => setTimeout(wait, 1000));
+          const retry = await fetch(
+            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1&addressdetails=1`,
+            { headers: { "User-Agent": "TableFinder/1.0" } }
+          );
+          if (!retry.ok) { resolve(); return; }
+          const retryData = await retry.json();
+          if (retryData?.[0]) {
+            const lat = parseFloat(retryData[0].lat);
+            const lng = parseFloat(retryData[0].lon);
+            if (Number.isFinite(lat) && Number.isFinite(lng)) {
+              r.distanceMiles = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
+              // Extract neighborhood from geocoded address
+              const geoAddr = retryData[0].address;
+              const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+              if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+              else if (r._addressCity) r.neighborhood = r._addressCity;
+              console.log(`  Geocoded (retry) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+            }
+          }
+          resolve();
+          return;
+        }
+
+        if (!resp.ok) { resolve(); return; }
+        const data = await resp.json();
+        if (data?.[0]) {
+          const lat = parseFloat(data[0].lat);
+          const lng = parseFloat(data[0].lon);
+          if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            r.distanceMiles = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
+            // Extract neighborhood from geocoded address
+            const geoAddr = data[0].address;
+            const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+            if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+            else if (r._addressCity) r.neighborhood = r._addressCity;
+            console.log(`  Geocoded ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+          }
+        } else {
+          // Nominatim couldn't find it — use address city as neighborhood at least
+          if (r._addressCity) r.neighborhood = r._addressCity;
+          console.log(`  Geocode miss for ${r.name}: ${addr}`);
+        }
+      } catch (err) {
+        console.log(`  Geocode error for ${r.name}:`, err);
+        if (r._addressCity) r.neighborhood = r._addressCity;
+      }
+      resolve();
+    });
+  });
+
+  await Promise.all(geocodePromises);
+  const geocoded = toGeocode.filter(r => r.distanceMiles != null).length;
+  console.log(`Geocoded ${geocoded}/${toGeocode.length} restaurants`);
+}
+
 // ─── AI enrichment ───
 
 async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams): Promise<Restaurant[]> {
