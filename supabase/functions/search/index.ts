@@ -628,11 +628,17 @@ function addOTParams(base: string, p: SearchParams): string {
   } catch { return base; }
 }
 
+function addTockParams(base: string, p: SearchParams): string {
+  // Tock doesn't use URL params for date/time/party in the same way,
+  // but we link to the restaurant's main page which shows availability
+  return base;
+}
+
 function cleanName(title: string | undefined, url: string, platform: string): string {
   if (title) {
     const cleaned = title
       .replace(/\s*\|.*$/i, "")
-      .replace(/\s*-\s*(resy|opentable|yelp).*$/i, "")
+      .replace(/\s*-\s*(resy|opentable|yelp|tock).*$/i, "")
       .replace(/^book\s+(your\s+)?/i, "")
       .replace(/\s+reservation(s)?.*$/i, "")
       .replace(/\s*-\s*\w+,?\s*\w{2}$/i, "") // trailing "- Atlanta, GA"
