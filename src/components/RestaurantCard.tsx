@@ -1,5 +1,5 @@
 import { Restaurant } from "@/types/restaurant";
-import { Star, MapPin, ExternalLink, Clock } from "lucide-react";
+import { Star, MapPin, ExternalLink, Clock, ChevronRight } from "lucide-react";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
