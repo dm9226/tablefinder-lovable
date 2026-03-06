@@ -841,17 +841,14 @@ function selectCandidatesForVerification(
   candidates: Restaurant[],
   maxCandidates: number
 ): Restaurant[] {
-  const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp", "tock"];
+  const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp"];
   const buckets = {
     resy: candidates.filter((c) => c.platform === "resy"),
     opentable: candidates.filter((c) => c.platform === "opentable"),
     yelp: candidates.filter((c) => c.platform === "yelp"),
-    tock: candidates.filter((c) => c.platform === "tock"),
   };
 
-  // Guarantee each platform with candidates gets at least MIN_PER_PLATFORM slots
-  const MIN_PER_PLATFORM = 4;
-  const cursors = { resy: 0, opentable: 0, yelp: 0, tock: 0 };
+  const cursors = { resy: 0, opentable: 0, yelp: 0 };
   const selected: Restaurant[] = [];
 
   // Phase 1: Guarantee minimum slots per platform
