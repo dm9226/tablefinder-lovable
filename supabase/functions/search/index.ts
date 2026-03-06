@@ -922,8 +922,11 @@ async function fetchYelpCandidates(
   try {
     // Include amenity terms in Yelp search to discover rooftop/patio restaurants
     const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
+    // Strip generic meal terms from Yelp search — "dinner restaurants" → "restaurants"
+    const YELP_MEAL_STRIP = /\b(dinner|lunch|breakfast|supper|brunch|meal|dining)\b/gi;
+    const yelpCuisine = (params.cuisine || "").replace(YELP_MEAL_STRIP, "").trim();
     const sp = new URLSearchParams({
-      term: `${params.cuisine || ""}${amenitySuffix} restaurants`.trim(),
+      term: `${yelpCuisine}${amenitySuffix} restaurants`.trim(),
       location: `${params.city}, ${params.state}`,
       limit: "20",
       sort_by: "best_match",
@@ -963,8 +966,10 @@ async function fetchYelpCandidates(
 
     // Filter by cuisine relevance: if user searched for a specific cuisine,
     // exclude businesses whose Yelp categories don't match at all.
+    // Skip filtering for generic meal terms — they're meal times, not cuisines.
+    const MEAL_TERMS = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
     const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
-    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean);
+    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t));
 
     const filtered = businesses.filter((b: any) => {
       if (!b.alias) return false;
