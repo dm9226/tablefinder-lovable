@@ -88,9 +88,7 @@ serve(async (req) => {
     console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
 
     // Step 4: Enrich with AI (ratings, cuisine, neighborhood, coords)
-    const enrichStart = Date.now();
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
-    console.log(`AI enrichment: ${enriched.length} results in ${Date.now() - enrichStart}ms`);
 
     return new Response(
       JSON.stringify({ results: enriched, params }),
@@ -570,6 +568,7 @@ function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp", raw: strin
     const u = new URL(raw);
     const p = u.pathname;
     if (platform === "resy") {
+      // Strictly require restaurant pages: /cities/{city}/venues/{venue-slug}
       const venueMatch = p.match(/^\/cities\/([^/]+)\/venues\/([^/?#]+)/i);
       if (!venueMatch) return null;
       const citySlug = venueMatch[1];
@@ -609,7 +608,7 @@ function addOTParams(base: string, p: SearchParams): string {
 }
 
 function cleanName(title: string | undefined, url: string, platform: string): string {
-    if (title) {
+  if (title) {
     const cleaned = title
       .replace(/\s*\|.*$/i, "")
       .replace(/\s*-\s*(resy|opentable|yelp).*$/i, "")
@@ -851,7 +850,6 @@ function selectCandidatesForVerification(
   const cursors = { resy: 0, opentable: 0, yelp: 0 };
   const selected: Restaurant[] = [];
 
-  // Round-robin across platforms
   while (selected.length < maxCandidates) {
     let pushedInRound = false;
 
@@ -879,8 +877,17 @@ async function verifyAvailability(
   amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   // Keep latency bounded, but ensure platform diversity in the verification set.
-  const limited = selectCandidatesForVerification(candidates, 36);
-  console.log(`Verifying ${limited.length} candidates`);
+  const limited = selectCandidatesForVerification(candidates, 24);
+  const limitedCounts = limited.reduce(
+    (acc, r) => {
+      acc[r.platform] += 1;
+      return acc;
+    },
+    { resy: 0, opentable: 0, yelp: 0 }
+  );
+  console.log(
+    `Verifying (capped): total=${limited.length}, resy=${limitedCounts.resy}, ot=${limitedCounts.opentable}, yelp=${limitedCounts.yelp}`
+  );
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency)
   const checked = await Promise.all(limited.map(async (r) => {
