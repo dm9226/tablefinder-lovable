@@ -967,7 +967,9 @@ async function verifyAvailability(
           const totalMin = parseInt(hStr) * 60 + parseInt(mStr);
           // Skip common non-time numbers (years, prices, etc.)
           if (totalMin >= 360 && totalMin <= 1380) { // 6:00 AM to 11:00 PM
-            foundTimes.push({ time: match24[1], minutes: totalMin });
+            const displayH = parseInt(hStr) % 12 || 12;
+            const displayAmpm = parseInt(hStr) >= 12 ? "PM" : "AM";
+            foundTimes.push({ time: `${displayH}:${mStr} ${displayAmpm}`, minutes: totalMin });
           }
         }
       }
