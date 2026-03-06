@@ -94,7 +94,9 @@ serve(async (req) => {
     console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
 
     // Step 4: Enrich with AI (ratings, cuisine, neighborhood, coords)
+    const enrichStart = Date.now();
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
+    console.log(`AI enrichment: ${enriched.length} results in ${Date.now() - enrichStart}ms`);
 
     return new Response(
       JSON.stringify({ results: enriched, params }),
