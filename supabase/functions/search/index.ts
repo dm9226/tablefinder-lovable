@@ -975,10 +975,19 @@ async function fetchYelpCandidates(
     const filtered = businesses.filter((b: any) => {
       if (!b.alias) return false;
       if (cuisineTokens.length === 0) return true; // no cuisine filter
-      // Check if any Yelp category matches any cuisine token
+      // Check if any Yelp category or business name matches any cuisine/dish token
       const cats = (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`.toLowerCase()).join(" ");
       const bizName = (b.name || "").toLowerCase();
-      return cuisineTokens.some((token: string) => cats.includes(token) || bizName.includes(token));
+      const searchText = `${cats} ${bizName}`;
+      return cuisineTokens.some((token: string) => {
+        if (searchText.includes(token)) return true;
+        // Singular/plural flexibility for dish names
+        const singular = token.endsWith("s") ? token.slice(0, -1) : null;
+        const plural = !token.endsWith("s") ? token + "s" : null;
+        if (singular && searchText.includes(singular)) return true;
+        if (plural && searchText.includes(plural)) return true;
+        return false;
+      });
     });
 
     console.log(`Yelp after cuisine filter: ${filtered.length}/${businesses.length} (cuisine: "${cuisineFilter}")`);
