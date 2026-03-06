@@ -937,6 +937,19 @@ async function verifyAvailability(
         return null;
       }
 
+      // CUISINE RELEVANCE CHECK: If user searched for a specific cuisine,
+      // verify the scraped page actually mentions it (applies to ALL platforms).
+      const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
+      const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean);
+      if (cuisineTokens.length > 0) {
+        const pageText = `${lower} ${(r.name || "").toLowerCase()} ${(r.cuisine || "").toLowerCase()}`;
+        const hasCuisineMatch = cuisineTokens.some((token) => pageText.includes(token));
+        if (!hasCuisineMatch) {
+          console.log(`✗ ${r.name} [${r.platform}] — failed cuisine relevance check for: ${cuisineTokens.join(", ")}`);
+          return null;
+        }
+      }
+
       // RELEVANCE CHECK: If user searched for an amenity (rooftop, patio, etc.),
       // verify the restaurant page actually mentions it. Zero extra latency — uses already-scraped markdown.
       if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(markdown, amenityTerms)) {

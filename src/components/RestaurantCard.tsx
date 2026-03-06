@@ -45,6 +45,12 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
             alt={restaurant.name}
             className="w-full h-full object-cover"
             loading="lazy"
+            onError={(e) => {
+              // Fallback to platform logo if restaurant image fails
+              const img = e.currentTarget;
+              img.className = "w-8 h-8 object-contain opacity-60";
+              img.src = PLATFORM_LOGOS[restaurant.platform] || "";
+            }}
           />
         ) : (
           <img
