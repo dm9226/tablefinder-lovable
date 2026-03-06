@@ -76,7 +76,11 @@ serve(async (req) => {
     const tockRaw = normalizeCandidates("tock", tockCandidates, params);
 
     const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates, ...tockRaw]);
-    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, Tock: ${tockRaw.length}, deduped: ${allCandidates.length}`);
+    const dedupedCounts = allCandidates.reduce(
+      (acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; },
+      { resy: 0, opentable: 0, yelp: 0, tock: 0 } as Record<string, number>
+    );
+    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, Tock: ${tockRaw.length}, deduped: ${allCandidates.length} (resy=${dedupedCounts.resy}, ot=${dedupedCounts.opentable}, yelp=${dedupedCounts.yelp}, tock=${dedupedCounts.tock})`);
 
     // Detect amenity/experience keywords that require relevance filtering
     const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
