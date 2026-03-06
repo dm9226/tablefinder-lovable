@@ -15,6 +15,7 @@ const Index = () => {
     } catch { return []; }
   });
   const [isLoading, setIsLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(() => {
     try { return !!sessionStorage.getItem(SESSION_KEY); } catch { return false; }
@@ -56,6 +57,7 @@ const Index = () => {
   const cancelSearch = useCallback(() => {
     abortRef.current?.abort();
     setIsLoading(false);
+    setIsRefreshing(false);
     toast.info("Search cancelled");
   }, []);
 
@@ -67,27 +69,68 @@ const Index = () => {
       abortRef.current = controller;
 
       setIsLoading(true);
+      setIsRefreshing(false);
       setError(null);
       setHasSearched(true);
       setResults([]);
 
+      const searchBody = {
+        query,
+        lat: coords?.lat,
+        lng: coords?.lng,
+        location: location,
+      };
+
       try {
-        const { data, error: fnError } = await supabase.functions.invoke("search", {
-          body: {
-            query,
-            lat: coords?.lat,
-            lng: coords?.lng,
-            location: location,
-          },
+        // Phase 1: Try cache-only (instant)
+        const { data: cacheData, error: cacheFnError } = await supabase.functions.invoke("search", {
+          body: { ...searchBody, cacheOnly: true },
         });
 
-        // Check if cancelled
         if (controller.signal.aborted) return;
 
-        // Check for clarification / user-facing errors first (returned as 200 with error payload)
+        if (!cacheFnError && cacheData?.cached && cacheData.results?.length > 0) {
+          // Show cached results immediately
+          setResults(cacheData.results);
+          sessionStorage.setItem(SESSION_KEY, JSON.stringify(cacheData.results));
+          setIsLoading(false);
+          setIsRefreshing(true); // show "updating" indicator
+
+          // Phase 2: Run fresh search in background
+          try {
+            const { data: freshData, error: freshFnError } = await supabase.functions.invoke("search", {
+              body: searchBody,
+            });
+
+            if (controller.signal.aborted) return;
+
+            if (freshData?.error) {
+              // Fresh search failed but we have cached results — just stop refreshing
+              console.warn("Fresh search error (cached results retained):", freshData.error);
+            } else if (!freshFnError && freshData?.results) {
+              const freshResults = freshData.results;
+              setResults(freshResults);
+              sessionStorage.setItem(SESSION_KEY, JSON.stringify(freshResults));
+            }
+          } catch (err) {
+            if (controller.signal.aborted) return;
+            console.warn("Background refresh failed:", err);
+          } finally {
+            if (!controller.signal.aborted) {
+              setIsRefreshing(false);
+            }
+          }
+          return;
+        }
+
+        // No cache hit — do full search (show loading state)
+        const { data, error: fnError } = await supabase.functions.invoke("search", {
+          body: searchBody,
+        });
+
+        if (controller.signal.aborted) return;
+
         if (data?.error) throw new Error(data.error);
-        
-        // Generic invoke failure — extract a useful message
         if (fnError) {
           const msg = fnError.message || "";
           if (msg.includes("non-2xx")) {
@@ -134,12 +177,12 @@ const Index = () => {
         />
       </section>
 
-
       {/* Results */}
       <section className="flex-1 overflow-y-auto pb-4">
         <ResultsGrid
           results={results}
           isLoading={isLoading}
+          isRefreshing={isRefreshing}
           error={error}
           hasSearched={hasSearched}
           onCancel={cancelSearch}
