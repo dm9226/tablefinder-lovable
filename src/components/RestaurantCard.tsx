@@ -1,5 +1,5 @@
 import { Restaurant } from "@/types/restaurant";
-import { Star, MapPin, ExternalLink, Clock } from "lucide-react";
+import { Star, MapPin, ExternalLink, Clock, ChevronRight } from "lucide-react";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
@@ -9,19 +9,19 @@ const PLATFORM_STYLES: Record<string, string> = {
 
 interface RestaurantCardProps {
   restaurant: Restaurant;
+  onSelect?: (restaurant: Restaurant) => void;
 }
 
-export function RestaurantCard({ restaurant }: RestaurantCardProps) {
+export function RestaurantCard({ restaurant, onSelect }: RestaurantCardProps) {
   const dist = restaurant.distanceMiles;
   const distLabel = dist != null ? (dist < 0.1 ? "< 0.1 mi" : `${dist.toFixed(1)} mi`) : null;
   const slots = restaurant.timeSlots || [];
 
   return (
-    <a
-      href={restaurant.platformUrl}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="flex flex-col gap-2 px-4 py-3 border-b border-border hover:bg-muted/50 transition-colors group"
+    <button
+      type="button"
+      onClick={() => onSelect?.(restaurant)}
+      className="flex flex-col gap-2 px-4 py-3 border-b border-border hover:bg-muted/50 transition-colors group w-full text-left"
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
@@ -56,7 +56,7 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
               {distLabel}
             </span>
           )}
-          <ExternalLink className="h-3.5 w-3.5 text-muted-foreground group-hover:text-primary transition-colors" />
+          <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
         </div>
       </div>
       {slots.length > 0 && (
@@ -77,6 +77,6 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
           )}
         </div>
       )}
-    </a>
+    </button>
   );
 }
