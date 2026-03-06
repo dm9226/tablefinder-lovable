@@ -175,7 +175,7 @@ User query: "${query}"`;
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
   parsed.state = INVALID_CITY.has((parsed.state || "").trim().toLowerCase()) ? "" : parsed.state?.trim() || "";
-  // If city is still empty, try reverse-geocoding from coords or default to Atlanta
+  // If city is still empty, try reverse-geocoding from coords — otherwise ask the user
   if (!parsed.city) {
     if (lat && lng) {
       try {
@@ -184,18 +184,48 @@ User query: "${query}"`;
           { headers: { "User-Agent": "TableFinder/1.0" } }
         );
         const revData = await revResp.json();
-        parsed.city = revData.address?.city || revData.address?.town || "Atlanta";
-        parsed.state = revData.address?.state_code || revData.address?.state || "GA";
-      } catch {
-        parsed.city = "Atlanta";
-        parsed.state = "GA";
-      }
-    } else {
-      parsed.city = "Atlanta";
-      parsed.state = "GA";
+        parsed.city = revData.address?.city || revData.address?.town || "";
+        parsed.state = revData.address?.state_code || revData.address?.state || "";
+      } catch { /* leave empty */ }
+    }
+    if (!parsed.city) {
+      throw new Error("Please include a city and state in your search (e.g. 'rooftop dining Friday Decatur GA') so we can find the right location.");
     }
   }
-  if (!parsed.state) parsed.state = "GA";
+
+  // If we have a city but no state, and no coordinates to disambiguate, ask the user to clarify
+  if (!parsed.state && !(lat && lng)) {
+    // Check if the city name is ambiguous (multiple results from geocoding)
+    try {
+      const geoCheck = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=5&addressdetails=1`,
+        { headers: { "User-Agent": "TableFinder/1.0" } }
+      );
+      const geoResults = await geoCheck.json();
+      // Filter to US results that are actual cities/towns
+      const usCities = (geoResults || []).filter((r: any) =>
+        r.address?.country_code === "us" &&
+        (r.type === "city" || r.type === "town" || r.type === "village" || r.class === "place")
+      );
+      if (usCities.length > 1) {
+        // Multiple US cities with this name — ask user to specify state
+        const options = usCities.slice(0, 5).map((r: any) =>
+          `${r.address?.city || r.address?.town || parsed.city}, ${r.address?.state || ""}`
+        );
+        const unique = [...new Set(options)];
+        if (unique.length > 1) {
+          throw new Error(`Multiple locations found for "${parsed.city}". Please include the state — e.g. ${unique.slice(0, 3).join(" or ")}.`);
+        }
+        // All results point to same state — use it
+        parsed.state = usCities[0].address?.state_code || usCities[0].address?.state || "";
+      } else if (usCities.length === 1) {
+        parsed.state = usCities[0].address?.state_code || usCities[0].address?.state || "";
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("Multiple locations")) throw e;
+      /* geocoding failed, proceed without state */
+    }
+  }
   parsed.cuisine = parsed.cuisine?.trim() || "";
   parsed.time = /^\d{2}:\d{2}$/.test(parsed.time) ? parsed.time : "19:00";
   parsed.partySize = Number(parsed.partySize) > 0 ? Number(parsed.partySize) : 2;

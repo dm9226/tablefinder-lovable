@@ -48,17 +48,19 @@ function pickRandomFillers(count: number): string[] {
 }
 
 function buildStages(): { label: string; duration: number }[] {
-  const fillers = pickRandomFillers(3);
-  // Interleave: real, filler, real, filler, real, filler, real, real
+  const fillers = pickRandomFillers(5);
+  // Interleave real stages with fillers — total ~30s to cover actual search time
   return [
-    { label: REAL_STAGES[0], duration: 2000 },
-    { label: REAL_STAGES[1], duration: 3000 },
-    { label: fillers[0], duration: 1500 },
-    { label: REAL_STAGES[2], duration: 4000 },
-    { label: fillers[1], duration: 1500 },
-    { label: REAL_STAGES[3], duration: 3000 },
-    { label: fillers[2], duration: 1500 },
-    { label: REAL_STAGES[4], duration: 2000 },
+    { label: REAL_STAGES[0], duration: 2500 },
+    { label: REAL_STAGES[1], duration: 4000 },
+    { label: fillers[0], duration: 2000 },
+    { label: REAL_STAGES[2], duration: 5000 },
+    { label: fillers[1], duration: 2000 },
+    { label: fillers[2], duration: 2000 },
+    { label: REAL_STAGES[3], duration: 5000 },
+    { label: fillers[3], duration: 2000 },
+    { label: REAL_STAGES[4], duration: 4000 },
+    { label: fillers[4], duration: 2000 },
   ];
 }
 
