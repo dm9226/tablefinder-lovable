@@ -1,7 +1,5 @@
-import { useState } from "react";
 import { Restaurant } from "@/types/restaurant";
 import { RestaurantCard } from "./RestaurantCard";
-import { BookingDrawer } from "./BookingDrawer";
 import { SearchX } from "lucide-react";
 import { SearchProgress } from "./SearchProgress";
 
@@ -14,8 +12,6 @@ interface ResultsGridProps {
 }
 
 export function ResultsGrid({ results, isLoading, error, hasSearched, onCancel }: ResultsGridProps) {
-  const [selected, setSelected] = useState<Restaurant | null>(null);
-
   if (isLoading) {
     return <SearchProgress onCancel={onCancel} />;
   }
@@ -47,14 +43,9 @@ export function ResultsGrid({ results, isLoading, error, hasSearched, onCancel }
       </p>
       <div className="border border-border rounded-lg overflow-hidden bg-card">
         {results.map((r) => (
-          <RestaurantCard key={r.id} restaurant={r} onSelect={setSelected} />
+          <RestaurantCard key={r.id} restaurant={r} />
         ))}
       </div>
-      <BookingDrawer
-        restaurant={selected}
-        open={!!selected}
-        onOpenChange={(open) => !open && setSelected(null)}
-      />
     </div>
   );
 }
