@@ -318,7 +318,7 @@ Rules:
 - If the user provides a US zip code (5-digit number), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
 
 Return JSON:
-- cuisine: string ("" if unspecified — but include meal type like "brunch" or "breakfast" when mentioned)
+- cuisine: string ("" if unspecified — but include meal type like "brunch" or "breakfast" when mentioned. Also include specific dish/ingredient names like "oysters", "sushi", "steak", "tacos", etc.)
 - date: YYYY-MM-DD
 - time: HH:MM (24h)
 - partySize: number (default 2)
