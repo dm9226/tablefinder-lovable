@@ -172,12 +172,13 @@ User query: "${query}"`;
         function: {
           name: "extract_search_params",
           description: "Extract structured restaurant search parameters",
-          parameters: {
+           parameters: {
             type: "object",
             properties: {
               cuisine: { type: "string" }, date: { type: "string" },
               time: { type: "string" }, partySize: { type: "number" },
               city: { type: "string" }, state: { type: "string" },
+              zipCode: { type: "string" },
             },
             required: ["cuisine", "date", "time", "partySize", "city", "state"],
             additionalProperties: false,
