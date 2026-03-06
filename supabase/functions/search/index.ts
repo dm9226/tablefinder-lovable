@@ -32,7 +32,7 @@ interface Restaurant {
   imageUrl?: string;
   description?: string;
   vibeTags?: string[];
-  platform: "resy" | "opentable" | "yelp";
+  platform: "resy" | "opentable" | "yelp" | "tock";
   platformUrl: string;
   timeSlots: { time: string; type?: string }[];
   distanceMiles?: number | null;
