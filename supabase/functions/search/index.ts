@@ -1264,39 +1264,72 @@ ${list}`,
     const geocodedCoords = new Map<number, { lat: number; lng: number }>();
 
     // Collect items that need geocoding
-    const toGeocode: { index: number; name: string; searchQuery: string }[] = [];
+    const metroCity = getMetroCityName(params.city || "", params.state || "");
+    const toGeocode: { index: number; name: string; queries: string[] }[] = [];
+
     for (const [i, r] of results.entries()) {
       if (r.distanceMiles !== null && r.distanceMiles !== undefined) continue; // already has distance (Yelp)
-      const e = eMap.get(i);
-      const neighborhood = e?.neighborhood || r.neighborhood || "";
-      const searchQuery = `${r.name}, ${neighborhood}, ${params.city}, ${params.state}`;
-      toGeocode.push({ index: i, name: r.name, searchQuery });
+
+      // Build resilient query variants (AI neighborhoods can be wrong, so don't trust them)
+      const rawName = (r.name || "").trim();
+      const cleanedName = rawName
+        .replace(/\s+on\s+OpenTable$/i, "")
+        .replace(/,\s*[A-Za-z\s.'-]+,\s*[A-Z]{2}\s*$/i, "")
+        .trim();
+
+      // If name already contains "City, ST", use it as primary geocoding context
+      const nameCityStateMatch = rawName.match(/,\s*([A-Za-z][A-Za-z\s.'-]+),\s*([A-Z]{2})\s*$/);
+      const explicitCity = nameCityStateMatch?.[1]?.trim() || "";
+      const explicitState = nameCityStateMatch?.[2]?.trim() || params.state;
+      const primaryCity = explicitCity || metroCity || params.city;
+      const nameForSearch = cleanedName || rawName;
+
+      const queries = Array.from(new Set([
+        `${nameForSearch}, ${primaryCity}, ${explicitState}`,
+        `${nameForSearch}, ${params.city}, ${params.state}`,
+        `${nameForSearch}, ${metroCity}, ${params.state}`,
+        `${rawName}, ${primaryCity}, ${explicitState}`,
+        `${nameForSearch}, ${params.state}, USA`,
+      ]));
+
+      toGeocode.push({ index: i, name: rawName, queries });
     }
 
     console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim`);
 
-    // Process sequentially to respect Nominatim's 1 req/sec rate limit
+    // Process sequentially to avoid rate limits
     for (const item of toGeocode) {
       try {
-        const geoResp = await fetch(
-          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(item.searchQuery)}&format=json&limit=1&countrycodes=us`,
-          { headers: { "User-Agent": "TableFinder/1.0" } }
-        );
-        if (geoResp.ok) {
+        let found = false;
+
+        for (const q of item.queries) {
+          const geoResp = await fetch(
+            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=us`,
+            { headers: { "User-Agent": "TableFinder/1.0" } }
+          );
+
+          if (!geoResp.ok) {
+            console.log(`Nominatim ${geoResp.status} for ${item.name}`);
+            continue;
+          }
+
           const geoData = await geoResp.json();
           if (geoData.length > 0) {
             geocodedCoords.set(item.index, {
               lat: parseFloat(geoData[0].lat),
               lng: parseFloat(geoData[0].lon),
             });
-            console.log(`Geocoded ${item.name}: ${geoData[0].lat},${geoData[0].lon}`);
-          } else {
-            console.log(`Nominatim: no results for "${item.searchQuery}"`);
+            console.log(`Geocoded ${item.name} using "${q}" → ${geoData[0].lat},${geoData[0].lon}`);
+            found = true;
+            break;
           }
-        } else {
-          console.log(`Nominatim ${geoResp.status} for ${item.name}`);
         }
-        // Rate limit: wait between requests
+
+        if (!found) {
+          console.log(`Nominatim: no results for ${item.name}`);
+        }
+
+        // Fast-but-safe pacing
         await new Promise(resolve => setTimeout(resolve, 300));
       } catch (err) {
         console.error(`Geocode failed for ${item.name}:`, err);
@@ -1305,26 +1338,24 @@ ${list}`,
 
     const enriched = results.map((r, i) => {
       const e = eMap.get(i);
-      if (!e) return r;
 
       let dist = r.distanceMiles;
-      if (!dist) {
+      if ((dist === null || dist === undefined) && cityLat && cityLng) {
         const geo = geocodedCoords.get(i);
-        if (geo && cityLat && cityLng) {
-          dist = haversine(cityLat, cityLng, geo.lat, geo.lng);
-          console.log(`Geocoded ${r.name}: ${geo.lat},${geo.lng} → ${dist?.toFixed(1)} mi`);
+        if (geo) {
+          dist = +haversine(cityLat, cityLng, geo.lat, geo.lng).toFixed(1);
         }
       }
 
       return {
         ...r,
-        rating: e.rating ?? r.rating,
-        reviewCount: e.reviewCount ?? r.reviewCount,
-        cuisine: e.cuisine || r.cuisine,
-        description: e.description || r.description,
-        vibeTags: e.vibeTags || r.vibeTags,
-        neighborhood: r.platform === "yelp" ? r.neighborhood : (e.neighborhood || r.neighborhood),
-        priceRange: e.priceRange || r.priceRange,
+        rating: e?.rating ?? r.rating,
+        reviewCount: e?.reviewCount ?? r.reviewCount,
+        cuisine: e?.cuisine || r.cuisine,
+        description: e?.description || r.description,
+        vibeTags: e?.vibeTags || r.vibeTags,
+        neighborhood: r.platform === "yelp" ? r.neighborhood : (e?.neighborhood || r.neighborhood),
+        priceRange: e?.priceRange || r.priceRange,
         distanceMiles: dist,
       };
     });
