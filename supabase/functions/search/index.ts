@@ -1304,7 +1304,37 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
             console.log(`  Geocoded ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
           }
         } else {
-          // Nominatim couldn't find it — use address city as neighborhood at least
+          // Try stripping suite/unit numbers and retry
+          const simplified = addr.replace(/\b(suite|ste|unit|apt|#)\s*\S+,?\s*/gi, "").replace(/\s+/g, " ").trim();
+          if (simplified !== addr) {
+            console.log(`  Geocode retry (simplified) for ${r.name}: ${simplified}`);
+            try {
+              await new Promise(r2 => setTimeout(r2, 350));
+              const retryResp = await fetch(
+                `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(simplified)}&format=json&limit=1&addressdetails=1`,
+                { headers: { "User-Agent": "TableFinder/1.0" } }
+              );
+              if (retryResp.ok) {
+                const retryData = await retryResp.json();
+                if (retryData?.[0]) {
+                  const lat2 = parseFloat(retryData[0].lat);
+                  const lng2 = parseFloat(retryData[0].lon);
+                  if (Number.isFinite(lat2) && Number.isFinite(lng2)) {
+                    r.distanceMiles = +haversine(cityLat, cityLng, lat2, lng2).toFixed(1);
+                    const geoAddr2 = retryData[0].address;
+                    const geoNeighborhood2 = geoAddr2?.suburb || geoAddr2?.neighbourhood || geoAddr2?.city_district || "";
+                    if (geoNeighborhood2) r.neighborhood = geoNeighborhood2;
+                    else if (r._addressCity) r.neighborhood = r._addressCity;
+                    console.log(`  Geocoded (simplified) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                    resolve(); return;
+                  }
+                }
+              }
+            } catch (retryErr) {
+              console.log(`  Geocode retry error for ${r.name}:`, retryErr);
+            }
+          }
+          // Still failed
           if (r._addressCity) r.neighborhood = r._addressCity;
           console.log(`  Geocode miss for ${r.name}: ${addr}`);
         }
