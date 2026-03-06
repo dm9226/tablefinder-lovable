@@ -198,6 +198,29 @@ User query: "${query}"`;
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
   parsed.state = INVALID_CITY.has((parsed.state || "").trim().toLowerCase()) ? "" : parsed.state?.trim() || "";
+
+  // Handle zip code: geocode to city/state/coords
+  const zipCode = (parsed as any).zipCode?.trim() || "";
+  if (zipCode && /^\d{5}$/.test(zipCode) && !parsed.city) {
+    try {
+      const zipResp = await fetch(
+        `https://nominatim.openstreetmap.org/search?postalcode=${zipCode}&country=us&format=json&limit=1&addressdetails=1`,
+        { headers: { "User-Agent": "TableFinder/1.0" } }
+      );
+      const zipData = await zipResp.json();
+      if (zipData && zipData.length > 0) {
+        const addr = zipData[0].address;
+        parsed.city = addr?.city || addr?.town || addr?.village || addr?.county || "";
+        parsed.state = extractStateCode(addr) || parsed.state;
+        parsed.lat = parseFloat(zipData[0].lat);
+        parsed.lng = parseFloat(zipData[0].lon);
+        console.log(`Zip ${zipCode} resolved to: ${parsed.city}, ${parsed.state}`);
+      }
+    } catch (e) {
+      console.error("Zip geocoding failed:", e);
+    }
+  }
+
   // If city is still empty, try reverse-geocoding from coords — otherwise ask the user
   if (!parsed.city) {
     if (lat && lng) {
@@ -212,7 +235,7 @@ User query: "${query}"`;
       } catch { /* leave empty */ }
     }
     if (!parsed.city) {
-      throw new Error("Please include a city and state in your search (e.g. 'rooftop dining Friday Decatur GA') so we can find the right location.");
+      throw new Error("Please include a city, state, or zip code in your search (e.g. 'rooftop dining Friday Decatur GA' or 'sushi tonight 30030') so we can find the right location.");
     }
   }
 
