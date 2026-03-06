@@ -1228,11 +1228,11 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
         messages: [{
           role: "user",
           content: `For each restaurant in ${params.city}, ${params.state}, provide:
-- index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, neighborhood, priceRange ($-$$$$), lat, lng
+- index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, neighborhood, priceRange ($-$$$$)
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
 - vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")
 
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "lat": number, "lng": number, "description": string, "vibeTags": string[] }] }
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[] }] }
 
 Return an entry for EVERY restaurant:
 
@@ -1256,18 +1256,62 @@ ${list}`,
     }
 
     // Use the SEARCHED city's coordinates for distance calculation, not the user's browser location.
-    // This ensures that when a user in south GA searches "Decatur" (near Atlanta), distances are
-    // measured from Decatur, not from the user's home 200 miles away.
     const cityLat = params.lat || 0;
     const cityLng = params.lng || 0;
+
+    // Geocode restaurants that lack coordinates (OpenTable, Resy) using Nominatim
+    // Yelp already provides accurate distance from the Fusion API, so skip those.
+    const geocodePromises: Promise<void>[] = [];
+    const geocodedCoords = new Map<number, { lat: number; lng: number }>();
+
+    for (const [i, r] of results.entries()) {
+      if (r.distanceMiles !== null && r.distanceMiles !== undefined) continue; // already has distance (Yelp)
+      const e = eMap.get(i);
+      const neighborhood = e?.neighborhood || r.neighborhood || "";
+      const searchName = `${r.name}, ${neighborhood}, ${params.city}, ${params.state}`;
+      geocodePromises.push(
+        (async () => {
+          try {
+            const geoResp = await fetch(
+              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(searchName)}&format=json&limit=1&countrycodes=us`,
+              { headers: { "User-Agent": "TableFinder/1.0" } }
+            );
+            if (geoResp.ok) {
+              const geoData = await geoResp.json();
+              if (geoData.length > 0) {
+                geocodedCoords.set(i, {
+                  lat: parseFloat(geoData[0].lat),
+                  lng: parseFloat(geoData[0].lon),
+                });
+              }
+            }
+          } catch (err) {
+            console.error(`Geocode failed for ${r.name}:`, err);
+          }
+        })()
+      );
+    }
+
+    // Run geocoding in parallel (with small batches to respect Nominatim rate limits)
+    const BATCH_SIZE = 5;
+    for (let b = 0; b < geocodePromises.length; b += BATCH_SIZE) {
+      await Promise.all(geocodePromises.slice(b, b + BATCH_SIZE));
+      if (b + BATCH_SIZE < geocodePromises.length) {
+        await new Promise(resolve => setTimeout(resolve, 1100)); // Nominatim 1 req/sec policy
+      }
+    }
 
     const enriched = results.map((r, i) => {
       const e = eMap.get(i);
       if (!e) return r;
 
       let dist = r.distanceMiles;
-      if (!dist && e.lat && e.lng && cityLat && cityLng) {
-        dist = haversine(cityLat, cityLng, e.lat, e.lng);
+      if (!dist) {
+        const geo = geocodedCoords.get(i);
+        if (geo && cityLat && cityLng) {
+          dist = haversine(cityLat, cityLng, geo.lat, geo.lng);
+          console.log(`Geocoded ${r.name}: ${geo.lat},${geo.lng} → ${dist?.toFixed(1)} mi`);
+        }
       }
 
       return {
@@ -1277,7 +1321,6 @@ ${list}`,
         cuisine: e.cuisine || r.cuisine,
         description: e.description || r.description,
         vibeTags: e.vibeTags || r.vibeTags,
-        // Yelp provides accurate location from Fusion API — don't let AI overwrite it
         neighborhood: r.platform === "yelp" ? r.neighborhood : (e.neighborhood || r.neighborhood),
         priceRange: e.priceRange || r.priceRange,
         distanceMiles: dist,
@@ -1285,12 +1328,11 @@ ${list}`,
     });
 
     // Filter out restaurants beyond distance cap
-    // When search was metro-normalized (suburb → metro), use wider radius since discovery covers the whole metro
     const wasMetroNormalized = getMetroCityName(params.city || "", params.state || "") !== (params.city || "");
     const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
     const nearby = enriched.filter((r) => {
       const d = r.distanceMiles;
-      if (d === null || d === undefined) return true; // keep verified results even without distance
+      if (d === null || d === undefined) return true;
       return d <= MAX_DISTANCE_MILES;
     });
 
