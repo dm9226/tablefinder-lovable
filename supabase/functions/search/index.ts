@@ -572,7 +572,8 @@ ${list}`,
         ...r,
         rating: e.rating ?? r.rating,
         cuisine: e.cuisine || r.cuisine,
-        neighborhood: e.neighborhood || r.neighborhood,
+        // Yelp provides accurate location from Fusion API — don't let AI overwrite it
+        neighborhood: r.platform === "yelp" ? r.neighborhood : (e.neighborhood || r.neighborhood),
         priceRange: e.priceRange || r.priceRange,
         distanceMiles: dist,
       };
