@@ -32,7 +32,7 @@ interface Restaurant {
   imageUrl?: string;
   description?: string;
   vibeTags?: string[];
-  platform: "resy" | "opentable" | "yelp";
+  platform: "resy" | "opentable" | "yelp" | "tock";
   platformUrl: string;
   timeSlots: { time: string; type?: string }[];
   distanceMiles?: number | null;
@@ -61,20 +61,22 @@ serve(async (req) => {
       console.warn("YELP_API_KEY missing — skipping Yelp");
     }
 
-    const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
+    const [resyCandidates, otCandidates, yelpCandidates, tockCandidates] = await Promise.all([
       searchFirecrawl(params, FIRECRAWL_API_KEY, "resy"),
       searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable"),
       YELP_API_KEY
         ? fetchYelpCandidates(params, YELP_API_KEY)
         : Promise.resolve([] as Restaurant[]),
+      searchFirecrawl(params, FIRECRAWL_API_KEY, "tock"),
     ]);
 
     // Normalize Firecrawl results into Restaurant objects
     const resyRaw = normalizeCandidates("resy", resyCandidates, params);
     const otRaw = normalizeCandidates("opentable", otCandidates, params);
+    const tockRaw = normalizeCandidates("tock", tockCandidates, params);
 
-    const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates]);
-    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, deduped: ${allCandidates.length}`);
+    const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates, ...tockRaw]);
+    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, Tock: ${tockRaw.length}, deduped: ${allCandidates.length}`);
 
     // Detect amenity/experience keywords that require relevance filtering
     const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
@@ -427,7 +429,7 @@ interface FirecrawlResult {
 }
 
 async function searchFirecrawl(
-  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable" | "yelp"
+  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable" | "yelp" | "tock"
 ): Promise<FirecrawlResult[]> {
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const city = params.city;
@@ -442,6 +444,11 @@ async function searchFirecrawl(
     ? [
         `site:opentable.com/r ${city}${cuisine} restaurant reserve`,
         `site:opentable.com ${city}${cuisine} opentable reservation`,
+      ]
+    : platform === "tock"
+    ? [
+        `site:exploretock.com ${city}${cuisine} restaurant reservation`,
+        `site:exploretock.com ${city}${cuisine} book table`,
       ]
     : [
         `site:yelp.com/reservations ${city}${cuisine}`,
@@ -497,7 +504,7 @@ function getResyCitySlug(params: SearchParams): string {
 }
 
 function isPlatformCandidateUrlValid(
-  platform: "resy" | "opentable" | "yelp",
+  platform: "resy" | "opentable" | "yelp" | "tock",
   rawUrl: string,
   params: SearchParams
 ): boolean {
@@ -516,6 +523,13 @@ function isPlatformCandidateUrlValid(
       return /^\/r\/[^/?#]+/i.test(p);
     }
 
+    if (platform === "tock") {
+      // Tock URLs: exploretock.com/{restaurant-slug} — exclude known non-restaurant paths
+      const TOCK_EXCLUDED = new Set(["join", "about", "careers", "blog", "press", "help", "login", "signup", "search", "privacy", "terms"]);
+      const slug = p.replace(/^\//, "").split("/")[0];
+      return !!slug && !TOCK_EXCLUDED.has(slug) && u.hostname.includes("exploretock.com");
+    }
+
     // Yelp candidates from web search are low-confidence by default, keep only reservation pages.
     return /^\/reservations\/[^/?#]+/i.test(p);
   } catch {
@@ -526,7 +540,7 @@ function isPlatformCandidateUrlValid(
 // ─── Normalize Firecrawl results → Restaurant objects ───
 
 function normalizeCandidates(
-  platform: "resy" | "opentable" | "yelp", candidates: FirecrawlResult[], params: SearchParams
+  platform: "resy" | "opentable" | "yelp" | "tock", candidates: FirecrawlResult[], params: SearchParams
 ): Restaurant[] {
   return candidates
     .map((c) => {
@@ -538,6 +552,8 @@ function normalizeCandidates(
         ? addResyParams(canonUrl, params)
         : platform === "opentable"
         ? addOTParams(canonUrl, params)
+        : platform === "tock"
+        ? addTockParams(canonUrl, params)
         : canonUrl;
 
       return {
@@ -563,12 +579,11 @@ const RESY_EXCLUDED_SLUGS = new Set([
   "events", "blog", "careers", "press", "terms", "privacy",
 ]);
 
-function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp", raw: string): string | null {
+function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp" | "tock", raw: string): string | null {
   try {
     const u = new URL(raw);
     const p = u.pathname;
     if (platform === "resy") {
-      // Strictly require restaurant pages: /cities/{city}/venues/{venue-slug}
       const venueMatch = p.match(/^\/cities\/([^/]+)\/venues\/([^/?#]+)/i);
       if (!venueMatch) return null;
       const citySlug = venueMatch[1];
@@ -579,6 +594,12 @@ function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp", raw: strin
     if (platform === "opentable") {
       const m = p.match(/^\/r\/[^/?#]+/i);
       return m ? `https://www.opentable.com${m[0]}` : null;
+    }
+    if (platform === "tock") {
+      // Tock: exploretock.com/{slug} — get just the top-level slug
+      const slug = p.replace(/^\//, "").split("/")[0];
+      if (!slug) return null;
+      return `https://www.exploretock.com/${slug}`;
     }
     // Yelp: only reservation pages count as valid booking URLs
     const resMatch = p.match(/^\/reservations\/[^/?#]+/i);
@@ -607,11 +628,17 @@ function addOTParams(base: string, p: SearchParams): string {
   } catch { return base; }
 }
 
+function addTockParams(base: string, p: SearchParams): string {
+  // Tock doesn't use URL params for date/time/party in the same way,
+  // but we link to the restaurant's main page which shows availability
+  return base;
+}
+
 function cleanName(title: string | undefined, url: string, platform: string): string {
   if (title) {
     const cleaned = title
       .replace(/\s*\|.*$/i, "")
-      .replace(/\s*-\s*(resy|opentable|yelp).*$/i, "")
+      .replace(/\s*-\s*(resy|opentable|yelp|tock).*$/i, "")
       .replace(/^book\s+(your\s+)?/i, "")
       .replace(/\s+reservation(s)?.*$/i, "")
       .replace(/\s*-\s*\w+,?\s*\w{2}$/i, "") // trailing "- Atlanta, GA"
@@ -834,20 +861,23 @@ const NO_AVAILABILITY_SIGNALS = [
   // Yelp
   "not currently accepting reservations", "this business is not currently accepting reservations",
   "temporarily unavailable",
+  // Tock
+  "no upcoming availability", "currently not accepting", "check back soon",
 ];
 
 function selectCandidatesForVerification(
   candidates: Restaurant[],
   maxCandidates: number
 ): Restaurant[] {
-  const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp"];
+  const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp", "tock"];
   const buckets = {
     resy: candidates.filter((c) => c.platform === "resy"),
     opentable: candidates.filter((c) => c.platform === "opentable"),
     yelp: candidates.filter((c) => c.platform === "yelp"),
+    tock: candidates.filter((c) => c.platform === "tock"),
   };
 
-  const cursors = { resy: 0, opentable: 0, yelp: 0 };
+  const cursors = { resy: 0, opentable: 0, yelp: 0, tock: 0 };
   const selected: Restaurant[] = [];
 
   while (selected.length < maxCandidates) {
@@ -880,13 +910,13 @@ async function verifyAvailability(
   const limited = selectCandidatesForVerification(candidates, 24);
   const limitedCounts = limited.reduce(
     (acc, r) => {
-      acc[r.platform] += 1;
+      acc[r.platform] = (acc[r.platform] || 0) + 1;
       return acc;
     },
-    { resy: 0, opentable: 0, yelp: 0 }
+    { resy: 0, opentable: 0, yelp: 0, tock: 0 } as Record<string, number>
   );
   console.log(
-    `Verifying (capped): total=${limited.length}, resy=${limitedCounts.resy}, ot=${limitedCounts.opentable}, yelp=${limitedCounts.yelp}`
+    `Verifying (capped): total=${limited.length}, resy=${limitedCounts.resy}, ot=${limitedCounts.opentable}, yelp=${limitedCounts.yelp}, tock=${limitedCounts.tock}`
   );
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency)
@@ -954,6 +984,8 @@ async function verifyAvailability(
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(markdown);
       const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
+      const isTock = r.platform === "tock";
+      const hasTockAvailabilityMarker = isTock && /\b(book\s+now|prepaid\s+reservation|per\s+person|reservation|experience)\b/i.test(markdown);
 
       // Determine meal window from requested time
       const [reqH] = params.time.split(":").map(Number);
@@ -1039,6 +1071,12 @@ async function verifyAvailability(
       // If we DID find times but none are in the meal window, that's a real rejection.
       if (foundTimes.length === 0 && hasYelpAvailabilityMarker) {
         console.log(`✓ Verified ${r.name} [yelp] — reservation markers present but no extractable times (trusting marker for ${mealLabel})`);
+        return r;
+      }
+
+      // Tock: experience-based pages may not show traditional time slots
+      if (foundTimes.length === 0 && hasTockAvailabilityMarker) {
+        console.log(`✓ Verified ${r.name} [tock] — booking markers present (trusting marker for ${mealLabel})`);
         return r;
       }
 
