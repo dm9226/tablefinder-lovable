@@ -1219,7 +1219,8 @@ async function verifyAvailability(
       });
 
       if (!resp.ok) {
-        console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]`);
+        const errBody = await resp.text().catch(() => "(no body)");
+        console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
         return null;
       }
 
