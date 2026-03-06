@@ -1490,6 +1490,11 @@ async function verifyAvailability(
         formats: scrapeFormats,
         onlyMainContent: true,
       };
+      if (!isYelp) {
+        scrapePayload.extract = {
+          prompt: "Extract the restaurant's full street address including street number, street name, city, state, and zip code. Return as { \"address\": \"full street address\" } or { \"address\": null } if not found.",
+        };
+      }
       if (isYelp) {
         // Yelp reservation widgets are more JS-heavy; short wait improves extraction without large latency hit.
         scrapePayload.waitFor = 2000;
