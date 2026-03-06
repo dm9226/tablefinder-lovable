@@ -38,13 +38,76 @@ interface Restaurant {
   distanceMiles?: number | null;
 }
 
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+function buildCacheKey(params: SearchParams): string {
+  const parts = [
+    (params.city || "").toLowerCase().trim(),
+    (params.state || "").toLowerCase().trim(),
+    (params.cuisine || "").toLowerCase().trim(),
+    params.date,
+    params.time,
+    String(params.partySize),
+  ];
+  return parts.join("|");
+}
+
+async function getCachedResults(cacheKey: string): Promise<{ results: Restaurant[]; age: number } | null> {
+  try {
+    const resp = await fetch(
+      `${SUPABASE_URL}/rest/v1/search_cache?cache_key=eq.${encodeURIComponent(cacheKey)}&select=results,updated_at&limit=1`,
+      {
+        headers: {
+          apikey: SUPABASE_SERVICE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        },
+      }
+    );
+    if (!resp.ok) return null;
+    const rows = await resp.json();
+    if (!rows || rows.length === 0) return null;
+    const row = rows[0];
+    const age = Date.now() - new Date(row.updated_at).getTime();
+    if (age > CACHE_TTL_MS) return null; // stale beyond TTL
+    return { results: row.results || [], age };
+  } catch (e) {
+    console.error("Cache read error:", e);
+    return null;
+  }
+}
+
+async function setCachedResults(cacheKey: string, queryText: string, params: SearchParams, results: Restaurant[]): Promise<void> {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/search_cache`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates",
+      },
+      body: JSON.stringify({
+        cache_key: cacheKey,
+        query_text: queryText,
+        parsed_params: params,
+        results,
+        updated_at: new Date().toISOString(),
+      }),
+    });
+  } catch (e) {
+    console.error("Cache write error:", e);
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { query, lat, lng, location } = await req.json();
+    const { query, lat, lng, location, cacheOnly } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
     const YELP_API_KEY = Deno.env.get("YELP_API_KEY");
@@ -55,6 +118,26 @@ serve(async (req) => {
     // Step 1: Parse user query
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
     console.log("Parsed params:", JSON.stringify(params));
+
+    // Build cache key from normalized params
+    const cacheKey = buildCacheKey(params);
+
+    // Cache-only mode: return cached results immediately (for stale-while-revalidate)
+    if (cacheOnly) {
+      const cached = await getCachedResults(cacheKey);
+      if (cached && cached.results.length > 0) {
+        console.log(`Cache hit (age: ${Math.round(cached.age / 1000)}s, ${cached.results.length} results)`);
+        return new Response(
+          JSON.stringify({ results: cached.results, params, cached: true, cacheAgeMs: cached.age }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      // No cache — return empty so frontend knows to wait for fresh results
+      return new Response(
+        JSON.stringify({ results: [], params, cached: false }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     // Step 2: Discover candidates from all platforms in parallel
     if (!YELP_API_KEY) {
@@ -83,15 +166,18 @@ serve(async (req) => {
     }
 
     // Step 3: UNIFIED VERIFICATION GATE
-    // Every candidate must pass a Firecrawl scrape check confirming real availability
     const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY, amenityTerms);
     console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
 
     // Step 4: Enrich with AI (ratings, cuisine, neighborhood, coords)
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
 
+    // Step 5: Update cache
+    await setCachedResults(cacheKey, query, params, enriched);
+    console.log(`Cache updated (key: ${cacheKey}, ${enriched.length} results)`);
+
     return new Response(
-      JSON.stringify({ results: enriched, params }),
+      JSON.stringify({ results: enriched, params, cached: false }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (e) {
