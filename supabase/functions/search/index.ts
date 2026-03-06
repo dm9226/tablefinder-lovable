@@ -1261,43 +1261,45 @@ ${list}`,
 
     // Geocode restaurants that lack coordinates (OpenTable, Resy) using Nominatim
     // Yelp already provides accurate distance from the Fusion API, so skip those.
-    const geocodePromises: Promise<void>[] = [];
     const geocodedCoords = new Map<number, { lat: number; lng: number }>();
 
+    // Collect items that need geocoding
+    const toGeocode: { index: number; name: string; searchQuery: string }[] = [];
     for (const [i, r] of results.entries()) {
       if (r.distanceMiles !== null && r.distanceMiles !== undefined) continue; // already has distance (Yelp)
       const e = eMap.get(i);
       const neighborhood = e?.neighborhood || r.neighborhood || "";
-      const searchName = `${r.name}, ${neighborhood}, ${params.city}, ${params.state}`;
-      geocodePromises.push(
-        (async () => {
-          try {
-            const geoResp = await fetch(
-              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(searchName)}&format=json&limit=1&countrycodes=us`,
-              { headers: { "User-Agent": "TableFinder/1.0" } }
-            );
-            if (geoResp.ok) {
-              const geoData = await geoResp.json();
-              if (geoData.length > 0) {
-                geocodedCoords.set(i, {
-                  lat: parseFloat(geoData[0].lat),
-                  lng: parseFloat(geoData[0].lon),
-                });
-              }
-            }
-          } catch (err) {
-            console.error(`Geocode failed for ${r.name}:`, err);
-          }
-        })()
-      );
+      const searchQuery = `${r.name}, ${neighborhood}, ${params.city}, ${params.state}`;
+      toGeocode.push({ index: i, name: r.name, searchQuery });
     }
 
-    // Run geocoding in parallel (with small batches to respect Nominatim rate limits)
-    const BATCH_SIZE = 5;
-    for (let b = 0; b < geocodePromises.length; b += BATCH_SIZE) {
-      await Promise.all(geocodePromises.slice(b, b + BATCH_SIZE));
-      if (b + BATCH_SIZE < geocodePromises.length) {
-        await new Promise(resolve => setTimeout(resolve, 1100)); // Nominatim 1 req/sec policy
+    console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim`);
+
+    // Process sequentially to respect Nominatim's 1 req/sec rate limit
+    for (const item of toGeocode) {
+      try {
+        const geoResp = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(item.searchQuery)}&format=json&limit=1&countrycodes=us`,
+          { headers: { "User-Agent": "TableFinder/1.0" } }
+        );
+        if (geoResp.ok) {
+          const geoData = await geoResp.json();
+          if (geoData.length > 0) {
+            geocodedCoords.set(item.index, {
+              lat: parseFloat(geoData[0].lat),
+              lng: parseFloat(geoData[0].lon),
+            });
+            console.log(`Geocoded ${item.name}: ${geoData[0].lat},${geoData[0].lon}`);
+          } else {
+            console.log(`Nominatim: no results for "${item.searchQuery}"`);
+          }
+        } else {
+          console.log(`Nominatim ${geoResp.status} for ${item.name}`);
+        }
+        // Rate limit: wait between requests
+        await new Promise(resolve => setTimeout(resolve, 1100));
+      } catch (err) {
+        console.error(`Geocode failed for ${item.name}:`, err);
       }
     }
 
