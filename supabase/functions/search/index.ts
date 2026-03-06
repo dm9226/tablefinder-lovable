@@ -239,18 +239,23 @@ User query: "${query}"`;
     }
   }
 
+  // Skip city geocoding if zip code already resolved coordinates
+  const resolvedViaZip = zipCode && /^\d{5}$/.test(zipCode) && parsed.lat && parsed.lng;
+
   const hasExplicitState = hasExplicitStateInQuery(query);
 
   // Geocode city name (without trusting AI-guessed state) for disambiguation and coordinates.
   let cityGeoResults: any[] = [];
-  try {
-    const geoCheck = await fetch(
-      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=12&addressdetails=1&countrycodes=us`,
-      { headers: { "User-Agent": "TableFinder/1.0" } }
-    );
-    cityGeoResults = await geoCheck.json();
-  } catch {
-    cityGeoResults = [];
+  if (!resolvedViaZip) {
+    try {
+      const geoCheck = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=12&addressdetails=1&countrycodes=us`,
+        { headers: { "User-Agent": "TableFinder/1.0" } }
+      );
+      cityGeoResults = await geoCheck.json();
+    } catch {
+      cityGeoResults = [];
+    }
   }
 
   const cityNorm = normalizePlaceToken(parsed.city);
