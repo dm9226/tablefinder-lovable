@@ -1284,9 +1284,10 @@ ${list}`,
       };
     });
 
-    // Filter out restaurants beyond 12 miles
-    // Keep restaurants with unknown distance — they passed verification so they're likely valid
-    const MAX_DISTANCE_MILES = 12;
+    // Filter out restaurants beyond distance cap
+    // When search was metro-normalized (suburb → metro), use wider radius since discovery covers the whole metro
+    const wasMetroNormalized = getMetroCityName(params.city || "", params.state || "") !== (params.city || "");
+    const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
     const nearby = enriched.filter((r) => {
       const d = r.distanceMiles;
       if (d === null || d === undefined) return true; // keep verified results even without distance
