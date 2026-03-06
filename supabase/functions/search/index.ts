@@ -1099,15 +1099,12 @@ function checkRelevanceInMarkdown(markdown: string, amenities: string[]): boolea
 // ─── Utilities ───
 
 function dedupeByName(results: Restaurant[]): Restaurant[] {
-  // Dedupe by name+platform so the same restaurant on different platforms survives.
-  // This ensures Tock entries aren't eliminated just because the same restaurant
-  // was already found on Resy/OpenTable/Yelp.
   const seen = new Map<string, Restaurant>();
   for (const r of results) {
-    const key = `${r.platform}::${r.name.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
+    const key = r.name.toLowerCase().replace(/[^a-z0-9]/g, "");
     if (!seen.has(key)) seen.set(key, r);
   }
-  return Array.from(seen.values()).slice(0, 80);
+  return Array.from(seen.values()).slice(0, 60);
 }
 
 function hashKey(v: string): string {

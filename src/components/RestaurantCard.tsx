@@ -5,7 +5,6 @@ const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
   opentable: "bg-emerald-500/15 text-emerald-400",
   yelp: "bg-orange-500/15 text-orange-400",
-  tock: "bg-blue-500/15 text-blue-400",
 };
 
 interface RestaurantCardProps {

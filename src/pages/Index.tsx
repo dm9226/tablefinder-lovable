@@ -140,7 +140,7 @@ const Index = () => {
       {/* Footer */}
       <footer className="py-6 text-center border-t border-border">
         <p className="text-xs text-muted-foreground font-body">
-          TableFinder aggregates availability from Resy, OpenTable, Yelp & Tock
+          TableFinder aggregates availability from Resy, OpenTable & Yelp
         </p>
       </footer>
     </div>
