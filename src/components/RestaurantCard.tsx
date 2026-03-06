@@ -19,12 +19,8 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
   const slots = restaurant.timeSlots || [];
 
   const handleClick = () => {
-    const params = new URLSearchParams({
-      url: restaurant.platformUrl,
-      platform: restaurant.platform,
-      name: restaurant.name,
-    });
-    navigate(`/book?${params.toString()}`);
+    // Navigate in the same tab — results are in sessionStorage
+    window.location.href = restaurant.platformUrl;
   };
 
   return (

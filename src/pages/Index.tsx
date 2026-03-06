@@ -19,6 +19,7 @@ const Index = () => {
   const [hasSearched, setHasSearched] = useState(() => {
     try { return !!sessionStorage.getItem(SESSION_KEY); } catch { return false; }
   });
+  const [showWelcomeBack, setShowWelcomeBack] = useState(false);
   const [location, setLocation] = useState<string | null>(null);
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
