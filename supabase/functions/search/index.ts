@@ -148,14 +148,16 @@ Rules:
 - If no meal or time is mentioned, default to "19:00"
 - IMPORTANT: "brunch" is BOTH a meal time AND a cuisine/experience. When the user says "brunch", set time to "10:30" AND set cuisine to "brunch" (so results include brunch-specific restaurants and menus). Same for "breakfast" — set cuisine to "breakfast" in addition to the time.
 - If the user says something like "brunch Italian", set cuisine to "brunch italian" to capture both the meal style and food preference.
+- If the user provides a US zip code (5-digit number), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
 
 Return JSON:
 - cuisine: string ("" if unspecified — but include meal type like "brunch" or "breakfast" when mentioned)
 - date: YYYY-MM-DD
 - time: HH:MM (24h)
 - partySize: number (default 2)
-- city: major city string
-- state: 2-letter state code
+- city: major city string (empty if zip code provided instead)
+- state: 2-letter state code (empty if zip code provided instead)
+- zipCode: string (5-digit US zip code if provided, "" otherwise)
 
 User query: "${query}"`;
 
@@ -170,12 +172,13 @@ User query: "${query}"`;
         function: {
           name: "extract_search_params",
           description: "Extract structured restaurant search parameters",
-          parameters: {
+           parameters: {
             type: "object",
             properties: {
               cuisine: { type: "string" }, date: { type: "string" },
               time: { type: "string" }, partySize: { type: "number" },
               city: { type: "string" }, state: { type: "string" },
+              zipCode: { type: "string" },
             },
             required: ["cuisine", "date", "time", "partySize", "city", "state"],
             additionalProperties: false,
@@ -195,6 +198,29 @@ User query: "${query}"`;
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
   parsed.state = INVALID_CITY.has((parsed.state || "").trim().toLowerCase()) ? "" : parsed.state?.trim() || "";
+
+  // Handle zip code: geocode to city/state/coords
+  const zipCode = (parsed as any).zipCode?.trim() || "";
+  if (zipCode && /^\d{5}$/.test(zipCode) && !parsed.city) {
+    try {
+      const zipResp = await fetch(
+        `https://nominatim.openstreetmap.org/search?postalcode=${zipCode}&country=us&format=json&limit=1&addressdetails=1`,
+        { headers: { "User-Agent": "TableFinder/1.0" } }
+      );
+      const zipData = await zipResp.json();
+      if (zipData && zipData.length > 0) {
+        const addr = zipData[0].address;
+        parsed.city = addr?.city || addr?.town || addr?.village || addr?.county || "";
+        parsed.state = extractStateCode(addr) || parsed.state;
+        parsed.lat = parseFloat(zipData[0].lat);
+        parsed.lng = parseFloat(zipData[0].lon);
+        console.log(`Zip ${zipCode} resolved to: ${parsed.city}, ${parsed.state}`);
+      }
+    } catch (e) {
+      console.error("Zip geocoding failed:", e);
+    }
+  }
+
   // If city is still empty, try reverse-geocoding from coords — otherwise ask the user
   if (!parsed.city) {
     if (lat && lng) {
@@ -209,22 +235,27 @@ User query: "${query}"`;
       } catch { /* leave empty */ }
     }
     if (!parsed.city) {
-      throw new Error("Please include a city and state in your search (e.g. 'rooftop dining Friday Decatur GA') so we can find the right location.");
+      throw new Error("Please include a city, state, or zip code in your search (e.g. 'rooftop dining Friday Decatur GA' or 'sushi tonight 30030') so we can find the right location.");
     }
   }
+
+  // Skip city geocoding if zip code already resolved coordinates
+  const resolvedViaZip = zipCode && /^\d{5}$/.test(zipCode) && parsed.lat && parsed.lng;
 
   const hasExplicitState = hasExplicitStateInQuery(query);
 
   // Geocode city name (without trusting AI-guessed state) for disambiguation and coordinates.
   let cityGeoResults: any[] = [];
-  try {
-    const geoCheck = await fetch(
-      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=12&addressdetails=1&countrycodes=us`,
-      { headers: { "User-Agent": "TableFinder/1.0" } }
-    );
-    cityGeoResults = await geoCheck.json();
-  } catch {
-    cityGeoResults = [];
+  if (!resolvedViaZip) {
+    try {
+      const geoCheck = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=12&addressdetails=1&countrycodes=us`,
+        { headers: { "User-Agent": "TableFinder/1.0" } }
+      );
+      cityGeoResults = await geoCheck.json();
+    } catch {
+      cityGeoResults = [];
+    }
   }
 
   const cityNorm = normalizePlaceToken(parsed.city);
