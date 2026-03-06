@@ -148,14 +148,16 @@ Rules:
 - If no meal or time is mentioned, default to "19:00"
 - IMPORTANT: "brunch" is BOTH a meal time AND a cuisine/experience. When the user says "brunch", set time to "10:30" AND set cuisine to "brunch" (so results include brunch-specific restaurants and menus). Same for "breakfast" — set cuisine to "breakfast" in addition to the time.
 - If the user says something like "brunch Italian", set cuisine to "brunch italian" to capture both the meal style and food preference.
+- If the user provides a US zip code (5-digit number), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
 
 Return JSON:
 - cuisine: string ("" if unspecified — but include meal type like "brunch" or "breakfast" when mentioned)
 - date: YYYY-MM-DD
 - time: HH:MM (24h)
 - partySize: number (default 2)
-- city: major city string
-- state: 2-letter state code
+- city: major city string (empty if zip code provided instead)
+- state: 2-letter state code (empty if zip code provided instead)
+- zipCode: string (5-digit US zip code if provided, "" otherwise)
 
 User query: "${query}"`;
 
