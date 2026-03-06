@@ -691,7 +691,9 @@ async function searchFirecrawl(
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const city = params.city;
   const state = params.state || "";
-  const cityState = state ? `${city} ${state}` : city;
+  // Use metro city name for OT/Yelp Firecrawl queries — tiny CDPs return no results
+  const metroCityName = getMetroCityName(city, state);
+  const cityState = state ? `${metroCityName} ${state}` : metroCityName;
   const resyCitySlug = getResyCitySlug(params);
 
   // Build amenity search suffix for dedicated discovery queries
@@ -792,6 +794,11 @@ const RESY_METRO_MAP: Record<string, string> = {
   // Atlanta metro
   "dekalb county|ga": "atlanta",
   "decatur|ga": "atlanta",
+  "scottdale|ga": "atlanta",
+  "avondale estates|ga": "atlanta",
+  "clarkston|ga": "atlanta",
+  "north druid hills|ga": "atlanta",
+  "druid hills|ga": "atlanta",
   "dunwoody|ga": "atlanta",
   "sandy springs|ga": "atlanta",
   "roswell|ga": "atlanta",
@@ -815,6 +822,18 @@ const RESY_METRO_MAP: Record<string, string> = {
   "fulton county|ga": "atlanta",
   "cobb county|ga": "atlanta",
   "gwinnett county|ga": "atlanta",
+  "lithonia|ga": "atlanta",
+  "conyers|ga": "atlanta",
+  "covington|ga": "atlanta",
+  "norcross|ga": "atlanta",
+  "lilburn|ga": "atlanta",
+  "snellville|ga": "atlanta",
+  "woodstock|ga": "atlanta",
+  "canton|ga": "atlanta",
+  "acworth|ga": "atlanta",
+  "powder springs|ga": "atlanta",
+  "mableton|ga": "atlanta",
+  "vinings|ga": "atlanta",
   // NYC metro
   "brooklyn|ny": "new-york",
   "queens|ny": "new-york",
@@ -895,6 +914,19 @@ function getResyMetroCityName(params: SearchParams): string {
     return metroSlug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
   }
   return params.city || "";
+}
+
+// Generic helper: returns the metro city name for ANY platform search.
+// Used by Yelp and Firecrawl to search the broader metro area instead of tiny CDPs.
+function getMetroCityName(city: string, state: string): string {
+  const c = (city || "").trim().toLowerCase();
+  const s = (state || "").trim().toLowerCase();
+  const key = s ? `${c}|${s}` : c;
+  const metroSlug = RESY_METRO_MAP[key];
+  if (metroSlug) {
+    return metroSlug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  }
+  return city;
 }
 
 
@@ -1047,9 +1079,14 @@ async function fetchYelpCandidates(
     // Strip generic meal terms from Yelp search — "dinner restaurants" → "restaurants"
     const YELP_MEAL_STRIP = /\b(dinner|lunch|breakfast|supper|brunch|meal|dining)\b/gi;
     const yelpCuisine = (params.cuisine || "").replace(YELP_MEAL_STRIP, "").trim();
+    
+    // Use metro city name for Yelp search — tiny CDPs like "Scottdale" return no results
+    const yelpCity = getMetroCityName(params.city, params.state);
+    const yelpState = params.state;
+    
     const sp = new URLSearchParams({
       term: `${yelpCuisine}${amenitySuffix} restaurants`.trim(),
-      location: `${params.city}, ${params.state}`,
+      location: `${yelpCity}, ${yelpState}`,
       limit: "20",
       sort_by: "best_match",
       attributes: "reservation",
@@ -1059,7 +1096,7 @@ async function fetchYelpCandidates(
       sp.set("longitude", String(params.lng));
     }
 
-    console.log("Yelp search (reservation):", sp.toString());
+    console.log(`Yelp search (reservation, city="${yelpCity}"):`, sp.toString());
     let resp = await fetch(`${YELP_API}/businesses/search?${sp}`, {
       headers: { Authorization: `Bearer ${yelpKey}` },
     });
