@@ -297,26 +297,15 @@ User query: "${query}"`;
 
   const distinctStates = [...new Set(usableCandidates.map((c: any) => c.stateCode))];
 
-  // If user did NOT explicitly include a state, never trust AI's guessed state for ambiguous cities.
+  // If user did NOT explicitly include a state, do NOT guess for ambiguous cities.
   if (!hasExplicitState) {
-    if (distinctStates.length > 1 && !(lat && lng)) {
+    if (distinctStates.length > 1) {
       const options = [...new Set(usableCandidates.map((c: any) => `${parsed.city}, ${c.stateCode}`))].slice(0, 4);
-      throw new Error(`Multiple locations found for "${parsed.city}". Please include the state — e.g. ${options.join(" or ")}.`);
+      throw new Error(`Multiple locations found for "${parsed.city}". Please include the state or zip code — e.g. ${options.join(" or ")}.`);
     }
 
     if (distinctStates.length === 1) {
       parsed.state = distinctStates[0];
-    } else if (distinctStates.length > 1 && lat && lng) {
-      let closest = usableCandidates[0];
-      let closestDist = Infinity;
-      for (const c of usableCandidates) {
-        const d = haversine(lat, lng, c.lat, c.lng);
-        if (d < closestDist) {
-          closestDist = d;
-          closest = c;
-        }
-      }
-      parsed.state = closest?.stateCode || parsed.state;
     }
   } else if (!parsed.state && distinctStates.length === 1) {
     parsed.state = distinctStates[0];
@@ -339,20 +328,8 @@ User query: "${query}"`;
     return 5;
   };
 
-  let selectedCandidate = (stateFiltered.sort((a: any, b: any) => cityTypeRank(a.type) - cityTypeRank(b.type))[0]) || null;
-
-  if (!selectedCandidate && lat && lng && usableCandidates.length > 0) {
-    let closest = usableCandidates[0];
-    let closestDist = Infinity;
-    for (const c of usableCandidates) {
-      const d = haversine(lat, lng, c.lat, c.lng);
-      if (d < closestDist) {
-        closestDist = d;
-        closest = c;
-      }
-    }
-    selectedCandidate = closest;
-  }
+  const candidatePool = stateFiltered.length > 0 ? stateFiltered : usableCandidates;
+  let selectedCandidate = (candidatePool.sort((a: any, b: any) => cityTypeRank(a.type) - cityTypeRank(b.type))[0]) || null;
 
   if (selectedCandidate) {
     parsed.lat = selectedCandidate.lat;
