@@ -748,8 +748,9 @@ function isPlatformCandidateUrlValid(
     if (platform === "resy") {
       const m = p.match(/^\/cities\/([^/]+)\/venues\/([^/?#]+)/i);
       if (!m) return false;
-      const citySlug = m[1];
-      return citySlug === getResyCitySlug(params).toLowerCase();
+      const citySlug = m[1].toLowerCase();
+      const expectedSlug = getResyCitySlug(params).toLowerCase();
+      return citySlug === expectedSlug;
     }
 
     if (platform === "opentable") {
