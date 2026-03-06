@@ -1,0 +1,1 @@
+TRUNCATE TABLE public.search_cache, public.parse_cache;
