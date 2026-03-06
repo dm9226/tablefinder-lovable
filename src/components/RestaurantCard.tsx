@@ -13,24 +13,23 @@ interface RestaurantCardProps {
 }
 
 export function RestaurantCard({ restaurant }: RestaurantCardProps) {
+  const navigate = useNavigate();
   const dist = restaurant.distanceMiles;
   const distLabel = dist != null ? (dist < 0.1 ? "< 0.1 mi" : `${dist.toFixed(1)} mi`) : null;
   const slots = restaurant.timeSlots || [];
 
   const handleClick = () => {
-    toast("Your results are still here — just switch back to this tab", {
-      duration: 4000,
-      icon: "↩️",
+    const params = new URLSearchParams({
+      url: restaurant.platformUrl,
+      platform: restaurant.platform,
     });
+    navigate(`/book?${params.toString()}`);
   };
 
   return (
-    <a
-      href={restaurant.platformUrl}
-      target="_blank"
-      rel="noopener noreferrer"
+    <button
       onClick={handleClick}
-      className="flex flex-col gap-2 px-4 py-3 border-b border-border hover:bg-muted/50 transition-colors group"
+      className="flex flex-col gap-2 px-4 py-3 border-b border-border hover:bg-muted/50 transition-colors group w-full text-left"
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
