@@ -318,7 +318,7 @@ Rules:
 - If the user provides a US zip code (5-digit number), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
 
 Return JSON:
-- cuisine: string ("" if unspecified — but include meal type like "brunch" or "breakfast" when mentioned)
+- cuisine: string ("" if unspecified — but include meal type like "brunch" or "breakfast" when mentioned. Also include specific dish/ingredient names like "oysters", "sushi", "steak", "tacos", etc.)
 - date: YYYY-MM-DD
 - time: HH:MM (24h)
 - partySize: number (default 2)
@@ -975,10 +975,19 @@ async function fetchYelpCandidates(
     const filtered = businesses.filter((b: any) => {
       if (!b.alias) return false;
       if (cuisineTokens.length === 0) return true; // no cuisine filter
-      // Check if any Yelp category matches any cuisine token
+      // Check if any Yelp category or business name matches any cuisine/dish token
       const cats = (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`.toLowerCase()).join(" ");
       const bizName = (b.name || "").toLowerCase();
-      return cuisineTokens.some((token: string) => cats.includes(token) || bizName.includes(token));
+      const searchText = `${cats} ${bizName}`;
+      return cuisineTokens.some((token: string) => {
+        if (searchText.includes(token)) return true;
+        // Singular/plural flexibility for dish names
+        const singular = token.endsWith("s") ? token.slice(0, -1) : null;
+        const plural = !token.endsWith("s") ? token + "s" : null;
+        if (singular && searchText.includes(singular)) return true;
+        if (plural && searchText.includes(plural)) return true;
+        return false;
+      });
     });
 
     console.log(`Yelp after cuisine filter: ${filtered.length}/${businesses.length} (cuisine: "${cuisineFilter}")`);
@@ -1248,15 +1257,25 @@ async function verifyAvailability(
         return null;
       }
 
-      // CUISINE RELEVANCE CHECK: If user searched for a specific cuisine,
+      // CUISINE RELEVANCE CHECK: If user searched for a specific cuisine or dish,
       // verify the scraped page actually mentions it (applies to ALL platforms).
       const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
-      const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean);
+      const MEAL_TERMS_SET = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
+      const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS_SET.has(t));
       if (cuisineTokens.length > 0) {
         const pageText = `${lower} ${(r.name || "").toLowerCase()}`;
-        const hasCuisineMatch = cuisineTokens.some((token) => pageText.includes(token));
+        // Check each token with singular/plural flexibility
+        const hasCuisineMatch = cuisineTokens.some((token) => {
+          if (pageText.includes(token)) return true;
+          // Try singular/plural variants (oysters↔oyster, tacos↔taco, steaks↔steak)
+          const singular = token.endsWith("s") ? token.slice(0, -1) : null;
+          const plural = !token.endsWith("s") ? token + "s" : null;
+          if (singular && pageText.includes(singular)) return true;
+          if (plural && pageText.includes(plural)) return true;
+          return false;
+        });
         if (!hasCuisineMatch) {
-          console.log(`✗ ${r.name} [${r.platform}] — failed cuisine relevance check for: ${cuisineTokens.join(", ")}`);
+          console.log(`✗ ${r.name} [${r.platform}] — failed cuisine/dish relevance check for: ${cuisineTokens.join(", ")}`);
           return null;
         }
       }
