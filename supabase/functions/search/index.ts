@@ -1297,7 +1297,7 @@ ${list}`,
           console.log(`Nominatim ${geoResp.status} for ${item.name}`);
         }
         // Rate limit: wait between requests
-        await new Promise(resolve => setTimeout(resolve, 1100));
+        await new Promise(resolve => setTimeout(resolve, 300));
       } catch (err) {
         console.error(`Geocode failed for ${item.name}:`, err);
       }
