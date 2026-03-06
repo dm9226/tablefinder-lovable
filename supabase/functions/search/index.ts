@@ -377,8 +377,27 @@ Rules:
 - If the user says something like "brunch Italian", set cuisine to "brunch italian" to capture both the meal style and food preference.
 - If the user provides a US zip code (5-digit number), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
 
+IMPORTANT — Cuisine type vs. dish keyword classification:
+You MUST distinguish between a CUISINE TYPE (broad restaurant category) and a DISH KEYWORD (specific menu item or ingredient).
+- cuisineType: The broad restaurant category that would serve this food. Examples: "seafood", "italian", "japanese", "steakhouse", "mexican", "thai", "indian", "southern", "french". Leave empty if no cuisine is implied.
+- dishKeyword: A specific dish, preparation, or ingredient the user is searching for. Examples: "oysters", "lobster roll", "birria tacos", "sushi", "ramen", "steak", "fried chicken". Leave empty if the user is searching by cuisine category, not a specific dish.
+
+Classification examples:
+- "seafood near Decatur" → cuisineType: "seafood", dishKeyword: ""
+- "oysters tonight Atlanta" → cuisineType: "seafood", dishKeyword: "oysters"
+- "Italian for 2" → cuisineType: "italian", dishKeyword: ""
+- "birria tacos Friday" → cuisineType: "mexican", dishKeyword: "birria tacos"
+- "steak dinner" → cuisineType: "steakhouse", dishKeyword: "steak"
+- "sushi tonight" → cuisineType: "japanese", dishKeyword: "sushi"
+- "ramen near me" → cuisineType: "japanese", dishKeyword: "ramen"
+- "Thai food Saturday" → cuisineType: "thai", dishKeyword: ""
+- "fried chicken Atlanta" → cuisineType: "southern", dishKeyword: "fried chicken"
+- "dinner for 4" → cuisineType: "", dishKeyword: ""
+
 Return JSON:
 - cuisine: string ("" if unspecified — but include meal type like "brunch" or "breakfast" when mentioned. Also include specific dish/ingredient names like "oysters", "sushi", "steak", "tacos", etc.)
+- cuisineType: string (broad restaurant category, "" if none)
+- dishKeyword: string (specific dish/ingredient, "" if none)
 - date: YYYY-MM-DD
 - time: HH:MM (24h)
 - partySize: number (default 2)
@@ -402,12 +421,15 @@ User query: "${query}"`;
            parameters: {
             type: "object",
             properties: {
-              cuisine: { type: "string" }, date: { type: "string" },
+              cuisine: { type: "string" }, 
+              cuisineType: { type: "string", description: "Broad restaurant category (e.g. seafood, italian, japanese). Empty if none." },
+              dishKeyword: { type: "string", description: "Specific dish or ingredient (e.g. oysters, sushi, steak). Empty if none." },
+              date: { type: "string" },
               time: { type: "string" }, partySize: { type: "number" },
               city: { type: "string" }, state: { type: "string" },
               zipCode: { type: "string" },
             },
-            required: ["cuisine", "date", "time", "partySize", "city", "state"],
+            required: ["cuisine", "cuisineType", "dishKeyword", "date", "time", "partySize", "city", "state"],
             additionalProperties: false,
           },
         },
@@ -422,6 +444,21 @@ User query: "${query}"`;
   if (!toolCall) throw new Error("Failed to parse search query");
 
   const parsed = JSON.parse(toolCall.function.arguments) as SearchParams;
+  
+  // Normalize cuisineType and dishKeyword
+  parsed.cuisineType = (parsed.cuisineType || "").trim().toLowerCase();
+  parsed.dishKeyword = (parsed.dishKeyword || "").trim().toLowerCase();
+  
+  // If AI didn't classify but we can infer from DISH_TO_CUISINE_MAP
+  if (!parsed.cuisineType && parsed.dishKeyword) {
+    const mapped = DISH_TO_CUISINE_MAP[parsed.dishKeyword];
+    if (mapped && mapped.length > 0) {
+      parsed.cuisineType = mapped[0]; // Use first (most likely) parent cuisine
+      console.log(`Inferred cuisineType "${parsed.cuisineType}" from dishKeyword "${parsed.dishKeyword}"`);
+    }
+  }
+  
+  console.log(`Intent classification — cuisineType: "${parsed.cuisineType}", dishKeyword: "${parsed.dishKeyword}"`);
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
   parsed.state = INVALID_CITY.has((parsed.state || "").trim().toLowerCase()) ? "" : parsed.state?.trim() || "";
