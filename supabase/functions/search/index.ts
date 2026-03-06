@@ -935,7 +935,7 @@ async function verifyAvailability(
         mealLabel = "lunch";
       } else {
         // Dinner window
-        windowStart = 960;  // 4:00 PM
+        windowStart = 1080; // 6:00 PM
         windowEnd = 1439;   // 11:59 PM
         mealLabel = "dinner";
       }
@@ -946,13 +946,16 @@ async function verifyAvailability(
       // 12-hour format matches
       let match12;
       while ((match12 = timeSlotRegex12.exec(markdown)) !== null) {
-        let h = parseInt(match12[1]);
+        const rawH = parseInt(match12[1]);
         const m = parseInt(match12[2]);
         const ampm = match12[3].toLowerCase();
-        if (ampm === "pm" && h !== 12) h += 12;
-        if (ampm === "am" && h === 12) h = 0;
-        const totalMin = h * 60 + m;
-        const formatted = `${h}:${m.toString().padStart(2, "0")} ${ampm.toUpperCase()}`;
+        let h24 = rawH;
+        if (ampm === "pm" && rawH !== 12) h24 += 12;
+        if (ampm === "am" && rawH === 12) h24 = 0;
+        const totalMin = h24 * 60 + m;
+        const displayH = h24 % 12 || 12;
+        const displayAmpm = h24 >= 12 ? "PM" : "AM";
+        const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${displayAmpm}`;
         foundTimes.push({ time: formatted, minutes: totalMin });
       }
 
@@ -964,7 +967,9 @@ async function verifyAvailability(
           const totalMin = parseInt(hStr) * 60 + parseInt(mStr);
           // Skip common non-time numbers (years, prices, etc.)
           if (totalMin >= 360 && totalMin <= 1380) { // 6:00 AM to 11:00 PM
-            foundTimes.push({ time: match24[1], minutes: totalMin });
+            const displayH = parseInt(hStr) % 12 || 12;
+            const displayAmpm = parseInt(hStr) >= 12 ? "PM" : "AM";
+            foundTimes.push({ time: `${displayH}:${mStr} ${displayAmpm}`, minutes: totalMin });
           }
         }
       }
