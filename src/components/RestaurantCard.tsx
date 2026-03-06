@@ -85,6 +85,6 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
           )}
         </div>
       )}
-    </a>
+    </button>
   );
 }
