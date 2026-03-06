@@ -76,7 +76,11 @@ serve(async (req) => {
     const tockRaw = normalizeCandidates("tock", tockCandidates, params);
 
     const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates, ...tockRaw]);
-    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, Tock: ${tockRaw.length}, deduped: ${allCandidates.length}`);
+    const dedupedCounts = allCandidates.reduce(
+      (acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; },
+      { resy: 0, opentable: 0, yelp: 0, tock: 0 } as Record<string, number>
+    );
+    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, Tock: ${tockRaw.length}, deduped: ${allCandidates.length} (resy=${dedupedCounts.resy}, ot=${dedupedCounts.opentable}, yelp=${dedupedCounts.yelp}, tock=${dedupedCounts.tock})`);
 
     // Detect amenity/experience keywords that require relevance filtering
     const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
@@ -90,7 +94,9 @@ serve(async (req) => {
     console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
 
     // Step 4: Enrich with AI (ratings, cuisine, neighborhood, coords)
+    const enrichStart = Date.now();
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
+    console.log(`AI enrichment: ${enriched.length} results in ${Date.now() - enrichStart}ms`);
 
     return new Response(
       JSON.stringify({ results: enriched, params }),
@@ -877,9 +883,22 @@ function selectCandidatesForVerification(
     tock: candidates.filter((c) => c.platform === "tock"),
   };
 
+  // Guarantee each platform with candidates gets at least MIN_PER_PLATFORM slots
+  const MIN_PER_PLATFORM = 4;
   const cursors = { resy: 0, opentable: 0, yelp: 0, tock: 0 };
   const selected: Restaurant[] = [];
 
+  // Phase 1: Guarantee minimum slots per platform
+  for (const platform of platformOrder) {
+    const bucket = buckets[platform];
+    const take = Math.min(MIN_PER_PLATFORM, bucket.length);
+    for (let i = 0; i < take && selected.length < maxCandidates; i++) {
+      selected.push(bucket[i]);
+      cursors[platform] = i + 1;
+    }
+  }
+
+  // Phase 2: Fill remaining slots with round-robin
   while (selected.length < maxCandidates) {
     let pushedInRound = false;
 
