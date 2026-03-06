@@ -1284,13 +1284,26 @@ ${list}`,
       const primaryCity = explicitCity || metroCity || params.city;
       const nameForSearch = cleanedName || rawName;
 
+      // URL slug hint is often cleaner than title text for OpenTable/Resy
+      let venueHint = "";
+      try {
+        const u = new URL(r.platformUrl);
+        if (r.platform === "resy") {
+          const m = u.pathname.match(/\/venues\/([^/?#]+)/i);
+          if (m?.[1]) venueHint = decodeURIComponent(m[1]).replace(/-/g, " ");
+        } else if (r.platform === "opentable") {
+          const m = u.pathname.match(/^\/r\/([^/?#]+)/i);
+          if (m?.[1]) venueHint = decodeURIComponent(m[1]).replace(/-/g, " ");
+        }
+      } catch {
+        // Ignore URL parse failures
+      }
+
       const queries = Array.from(new Set([
         `${nameForSearch}, ${primaryCity}, ${explicitState}`,
-        `${nameForSearch}, ${params.city}, ${params.state}`,
-        `${nameForSearch}, ${metroCity}, ${params.state}`,
-        `${rawName}, ${primaryCity}, ${explicitState}`,
+        venueHint ? `${venueHint}, ${primaryCity}, ${explicitState}` : "",
         `${nameForSearch}, ${params.state}, USA`,
-      ]));
+      ].filter(Boolean)));
 
       toGeocode.push({ index: i, name: rawName, queries });
     }
@@ -1303,12 +1316,22 @@ ${list}`,
         let found = false;
 
         for (const q of item.queries) {
-          const geoResp = await fetch(
+          let geoResp = await fetch(
             `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=us`,
             { headers: { "User-Agent": "TableFinder/1.0" } }
           );
 
+          // Lightweight backoff if we hit Nominatim rate limits
+          if (geoResp.status === 429) {
+            await new Promise(resolve => setTimeout(resolve, 900));
+            geoResp = await fetch(
+              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=us`,
+              { headers: { "User-Agent": "TableFinder/1.0" } }
+            );
+          }
+
           if (!geoResp.ok) {
+            await geoResp.text();
             console.log(`Nominatim ${geoResp.status} for ${item.name}`);
             continue;
           }
@@ -1329,7 +1352,7 @@ ${list}`,
           console.log(`Nominatim: no results for ${item.name}`);
         }
 
-        // Fast-but-safe pacing
+        // Fast baseline pacing (with 429 backoff above)
         await new Promise(resolve => setTimeout(resolve, 300));
       } catch (err) {
         console.error(`Geocode failed for ${item.name}:`, err);
