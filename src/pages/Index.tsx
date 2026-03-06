@@ -111,7 +111,7 @@ const Index = () => {
           Table<span className="text-primary">Finder</span>
         </h1>
         <p className="text-muted-foreground font-body text-base md:text-lg max-w-md mx-auto">
-          Multiple Reservation Platforms, One Search
+          Find Restaurant Reservations Across Multiple Platforms
         </p>
       </header>
 
