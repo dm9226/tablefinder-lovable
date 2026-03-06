@@ -120,6 +120,8 @@ interface Restaurant {
   platformUrl: string;
   timeSlots: { time: string; type?: string }[];
   distanceMiles?: number | null;
+  _address?: string; // transient: extracted from scraped page for geocoding
+  _addressCity?: string; // transient: city from extracted address
 }
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
