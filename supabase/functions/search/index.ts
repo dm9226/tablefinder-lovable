@@ -86,9 +86,23 @@ serve(async (req) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (e) {
+    const message = e instanceof Error ? e.message : "Search failed";
+    const isInputError =
+      message.includes("Please include a city and state") ||
+      message.includes("Multiple locations found");
+
     console.error("Search error:", e);
+
+    // Input/clarification errors should not surface as 500 runtime failures.
+    if (isInputError) {
+      return new Response(
+        JSON.stringify({ error: message, needsClarification: true }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Search failed" }),
+      JSON.stringify({ error: message }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
