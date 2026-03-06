@@ -566,7 +566,8 @@ interface FirecrawlResult {
 }
 
 async function searchFirecrawl(
-  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable" | "yelp"
+  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable" | "yelp",
+  amenityTerms: string[] = []
 ): Promise<FirecrawlResult[]> {
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const city = params.city;
@@ -574,19 +575,26 @@ async function searchFirecrawl(
   const cityState = state ? `${city} ${state}` : city;
   const resyCitySlug = getResyCitySlug(params);
 
+  // Build amenity search suffix for dedicated discovery queries
+  const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
+
   const queries = platform === "resy"
     ? [
         `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} reservation`,
         `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} book table`,
+        // Add amenity-specific query if searching for rooftop/patio/outdoor
+        ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${city}${amenitySuffix} restaurant`] : []),
       ]
     : platform === "opentable"
     ? [
         `site:opentable.com/r ${cityState}${cuisine} restaurant reserve`,
         `site:opentable.com ${cityState}${cuisine} opentable reservation`,
+        ...(amenitySuffix ? [`site:opentable.com/r ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ]
     : [
         `site:yelp.com/reservations ${cityState}${cuisine}`,
         `site:yelp.com/biz ${cityState}${cuisine} reservation`,
+        ...(amenitySuffix ? [`site:yelp.com/biz ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ];
 
   console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
