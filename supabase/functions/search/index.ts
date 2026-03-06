@@ -1076,12 +1076,21 @@ function checkRelevanceInMarkdown(markdown: string, amenities: string[]): boolea
 // ─── Utilities ───
 
 function dedupeByName(results: Restaurant[]): Restaurant[] {
-  const seen = new Map<string, Restaurant>();
+  const kept: Restaurant[] = [];
+  const keys: string[] = [];
+
   for (const r of results) {
     const key = r.name.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (!seen.has(key)) seen.set(key, r);
+    // Check exact match OR substring containment (e.g. "thechophouse" vs "thechophouseaugustarestaurant")
+    const isDupe = keys.some((existing) =>
+      existing === key || existing.startsWith(key) || key.startsWith(existing)
+    );
+    if (!isDupe) {
+      kept.push(r);
+      keys.push(key);
+    }
   }
-  return Array.from(seen.values()).slice(0, 60);
+  return kept.slice(0, 60);
 }
 
 function hashKey(v: string): string {
