@@ -7,6 +7,12 @@ const PLATFORM_STYLES: Record<string, string> = {
   yelp: "bg-orange-500/15 text-orange-400",
 };
 
+const PLATFORM_LOGOS: Record<string, string> = {
+  resy: "https://logo.clearbit.com/resy.com",
+  opentable: "https://logo.clearbit.com/opentable.com",
+  yelp: "https://logo.clearbit.com/yelp.com",
+};
+
 interface RestaurantCardProps {
   restaurant: Restaurant;
 }
