@@ -504,7 +504,7 @@ function getResyCitySlug(params: SearchParams): string {
 }
 
 function isPlatformCandidateUrlValid(
-  platform: "resy" | "opentable" | "yelp",
+  platform: "resy" | "opentable" | "yelp" | "tock",
   rawUrl: string,
   params: SearchParams
 ): boolean {
@@ -521,6 +521,13 @@ function isPlatformCandidateUrlValid(
 
     if (platform === "opentable") {
       return /^\/r\/[^/?#]+/i.test(p);
+    }
+
+    if (platform === "tock") {
+      // Tock URLs: exploretock.com/{restaurant-slug} — exclude known non-restaurant paths
+      const TOCK_EXCLUDED = new Set(["join", "about", "careers", "blog", "press", "help", "login", "signup", "search", "privacy", "terms"]);
+      const slug = p.replace(/^\//, "").split("/")[0];
+      return !!slug && !TOCK_EXCLUDED.has(slug) && u.hostname.includes("exploretock.com");
     }
 
     // Yelp candidates from web search are low-confidence by default, keep only reservation pages.
