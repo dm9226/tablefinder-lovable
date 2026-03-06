@@ -429,7 +429,7 @@ interface FirecrawlResult {
 }
 
 async function searchFirecrawl(
-  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable" | "yelp" | "tock"
+  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable" | "yelp"
 ): Promise<FirecrawlResult[]> {
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const city = params.city;
@@ -444,11 +444,6 @@ async function searchFirecrawl(
     ? [
         `site:opentable.com/r ${city}${cuisine} restaurant reserve`,
         `site:opentable.com ${city}${cuisine} opentable reservation`,
-      ]
-    : platform === "tock"
-    ? [
-        `site:exploretock.com ${city}${cuisine} restaurant reservation`,
-        `site:exploretock.com ${city}${cuisine} book table`,
       ]
     : [
         `site:yelp.com/reservations ${city}${cuisine}`,
