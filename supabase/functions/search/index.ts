@@ -1219,40 +1219,7 @@ function toTwelveHourLabel(time24: string): string {
   return `${hour12}:${minutes} ${ampm}`;
 }
 
-// ─── Address extraction from scraped markdown ───
-
-/**
- * Extract a US street address from scraped page markdown.
- * Looks for patterns like "123 Main St, Atlanta, GA 30309" or "1065 Huff Rd NW Atlanta GA".
- * Returns { full, city } or null.
- */
-function extractAddressFromMarkdown(markdown: string): { full: string; city: string } | null {
-  // Process line by line to avoid matching across unrelated text blocks
-  const lines = markdown.split(/\n/);
-  
-  // Tight pattern: requires a street suffix word near the street number
-  // "3312 Piedmont Rd NE, Atlanta, GA 30305" or "1551 Piedmont Ave NE, Atlanta, GA"
-  const STREET_SUFFIXES = "St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Rd|Road|Ln|Lane|Way|Ct|Court|Pl(?:ace)?|Pkwy|Parkway|Cir(?:cle)?|Hwy|Highway|Trail|Pike|Loop|Terr?(?:ace)?|Square|Sq|Center|Centre";
-  const pat = new RegExp(
-    `(\\d{1,5}\\s+[A-Za-z0-9 .]{1,40}(?:${STREET_SUFFIXES})\\.?\\s*(?:NW|NE|SW|SE|N|S|E|W)?)\\s*,\\s*([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)\\s*,\\s*(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\\s*(\\d{5})?`,
-    "i"
-  );
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.length < 10 || trimmed.length > 200) continue;
-    const m = trimmed.match(pat);
-    if (m) {
-      const street = m[1].trim();
-      const city = m[2].trim();
-      const state = m[3].toUpperCase();
-      const zip = m[4] || "";
-      const full = zip ? `${street}, ${city}, ${state} ${zip}` : `${street}, ${city}, ${state}`;
-      return { full, city };
-    }
-  }
-  return null;
-}
+// Address extraction now handled by Firecrawl JSON extraction format during verification scrape
 
 // ─── Batch geocode verified results ───
 
@@ -1516,9 +1483,18 @@ async function verifyAvailability(
     try {
       const isYelp = r.platform === "yelp";
 
+      const scrapeFormats: unknown[] = ["markdown"];
+      // For Resy/OT: piggyback JSON extraction to get the restaurant's street address
+      if (!isYelp) {
+        scrapeFormats.push({
+          type: "json",
+          prompt: "Extract the restaurant's full street address including street number, street name, city, state, and zip code. Return as { \"address\": \"full street address\" } or { \"address\": null } if not found.",
+        });
+      }
+
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
-        formats: ["markdown"],
+        formats: scrapeFormats,
         onlyMainContent: true,
       };
       if (isYelp) {
@@ -1548,13 +1524,18 @@ async function verifyAvailability(
         return null;
       }
 
-      // Extract street address from scraped content (for geocoding later)
+      // Extract street address from Firecrawl JSON extraction (for geocoding later)
       if (r.platform !== "yelp" && !r._address) {
-        const addr = extractAddressFromMarkdown(markdown);
-        if (addr) {
-          r._address = addr.full;
-          r._addressCity = addr.city;
-          console.log(`  Address extracted for ${r.name}: ${addr.full}`);
+        const jsonData = data?.data?.json || data?.json;
+        const extractedAddr = jsonData?.address;
+        if (extractedAddr && typeof extractedAddr === "string" && extractedAddr.length > 5) {
+          r._address = extractedAddr;
+          // Try to parse city from address (e.g. "123 Main St, Atlanta, GA 30309" → "Atlanta")
+          const cityMatch = extractedAddr.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+          r._addressCity = cityMatch ? cityMatch[1].trim() : undefined;
+          console.log(`  Address extracted (JSON) for ${r.name}: ${extractedAddr}`);
+        } else {
+          console.log(`  No address extracted for ${r.name} [${r.platform}]`);
         }
       }
 
