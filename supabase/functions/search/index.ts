@@ -1241,11 +1241,13 @@ async function verifyAvailability(
 // ─── Amenity / experience keywords ───
 // These are NOT standard cuisines — they describe an experience or venue feature.
 // When a user searches for these, we must verify the restaurant actually offers it.
+// "rooftop" is STRICT — must specifically mention rooftop, not just generic outdoor.
+// "patio" and "outdoor" are merged — either term matches the combined synonym set.
 const AMENITY_KEYWORDS: Record<string, string[]> = {
-  rooftop: ["rooftop", "roof top", "roof deck", "rooftop bar", "rooftop dining", "sky bar", "terrace"],
+  rooftop: ["rooftop", "roof top", "roof deck", "rooftop bar", "rooftop dining", "rooftop patio", "rooftop terrace", "rooftop lounge", "rooftop restaurant", "sky bar", "sky deck", "sky lounge"],
   waterfront: ["waterfront", "water front", "lakefront", "riverside", "oceanfront", "harborside", "dockside", "bayfront"],
-  patio: ["patio", "outdoor dining", "outdoor seating", "al fresco", "garden dining", "sidewalk cafe"],
-  outdoor: ["outdoor", "outside", "open air", "open-air", "courtyard", "terrace", "beer garden", "biergarten"],
+  patio: ["patio", "outdoor dining", "outdoor seating", "al fresco", "garden dining", "sidewalk cafe", "sidewalk café", "outdoor", "outside dining", "outside seating", "open air", "open-air", "courtyard", "terrace", "beer garden", "biergarten", "covered patio", "heated patio", "dog-friendly patio"],
+  outdoor: ["patio", "outdoor dining", "outdoor seating", "al fresco", "garden dining", "sidewalk cafe", "sidewalk café", "outdoor", "outside dining", "outside seating", "open air", "open-air", "courtyard", "terrace", "beer garden", "biergarten", "covered patio", "heated patio"],
   brunch: ["brunch", "brunch menu", "bottomless brunch", "weekend brunch"],
   breakfast: ["breakfast", "morning menu", "breakfast menu"],
   "live music": ["live music", "live band", "live jazz", "live entertainment", "live performance"],
