@@ -12,6 +12,8 @@ const YELP_API = "https://api.yelp.com/v3";
 
 interface SearchParams {
   cuisine: string;
+  cuisineType: string;   // broad category: "seafood", "italian", "japanese", ""
+  dishKeyword: string;   // specific dish/ingredient: "oysters", "lobster roll", ""
   date: string;
   time: string;
   partySize: number;
@@ -20,6 +22,88 @@ interface SearchParams {
   lat?: number;
   lng?: number;
 }
+
+// ─── Dish-to-cuisine synonym map ───
+// Maps specific dishes/ingredients to their parent cuisine categories.
+// Used for discovery (adding parallel cuisine queries) and verification (two-tier relevance).
+const DISH_TO_CUISINE_MAP: Record<string, string[]> = {
+  // Seafood dishes
+  oysters: ["seafood", "raw bar", "cajun", "southern", "french"],
+  oyster: ["seafood", "raw bar", "cajun", "southern", "french"],
+  shrimp: ["seafood", "cajun", "southern", "asian"],
+  crab: ["seafood", "cajun", "southern", "maryland"],
+  lobster: ["seafood", "new england", "american"],
+  "lobster roll": ["seafood", "new england", "american"],
+  clams: ["seafood", "new england", "italian"],
+  mussels: ["seafood", "french", "belgian", "italian"],
+  scallops: ["seafood", "french", "american"],
+  calamari: ["seafood", "italian", "mediterranean"],
+  "fish tacos": ["seafood", "mexican", "tex-mex"],
+  poke: ["seafood", "hawaiian", "japanese"],
+  ceviche: ["seafood", "peruvian", "latin", "mexican"],
+  crawfish: ["seafood", "cajun", "southern"],
+  // Japanese dishes
+  sushi: ["japanese", "sushi bar", "asian"],
+  sashimi: ["japanese", "sushi bar", "asian"],
+  ramen: ["japanese", "asian", "noodle"],
+  udon: ["japanese", "asian", "noodle"],
+  tempura: ["japanese", "asian"],
+  omakase: ["japanese", "sushi bar"],
+  // Mexican/Latin dishes
+  tacos: ["mexican", "tex-mex", "latin"],
+  taco: ["mexican", "tex-mex", "latin"],
+  "birria tacos": ["mexican", "tex-mex"],
+  birria: ["mexican"],
+  burrito: ["mexican", "tex-mex"],
+  enchiladas: ["mexican", "tex-mex"],
+  guacamole: ["mexican", "tex-mex", "latin"],
+  quesadilla: ["mexican", "tex-mex"],
+  // Italian dishes
+  pasta: ["italian", "mediterranean"],
+  pizza: ["italian", "pizzeria"],
+  risotto: ["italian", "mediterranean"],
+  lasagna: ["italian"],
+  gnocchi: ["italian"],
+  carbonara: ["italian"],
+  tiramisu: ["italian"],
+  // American/Steakhouse
+  steak: ["steakhouse", "american", "chophouse"],
+  "prime rib": ["steakhouse", "american"],
+  burger: ["american", "burgers", "gastropub"],
+  burgers: ["american", "burgers", "gastropub"],
+  ribs: ["bbq", "barbecue", "american", "southern"],
+  brisket: ["bbq", "barbecue", "texas", "southern"],
+  wings: ["american", "bar food", "sports bar"],
+  // Asian dishes
+  "pad thai": ["thai", "asian"],
+  curry: ["indian", "thai", "asian"],
+  "dim sum": ["chinese", "cantonese", "asian"],
+  dumplings: ["chinese", "asian", "japanese"],
+  "pho": ["vietnamese", "asian"],
+  "banh mi": ["vietnamese", "asian"],
+  "bibimbap": ["korean", "asian"],
+  "korean bbq": ["korean", "asian", "barbecue"],
+  // Mediterranean/Middle Eastern
+  falafel: ["mediterranean", "middle eastern", "israeli"],
+  hummus: ["mediterranean", "middle eastern"],
+  shawarma: ["mediterranean", "middle eastern"],
+  kebab: ["mediterranean", "middle eastern", "turkish"],
+  // Southern/Soul
+  "fried chicken": ["southern", "soul food", "american"],
+  "chicken and waffles": ["southern", "soul food", "brunch"],
+  grits: ["southern", "soul food", "american"],
+  gumbo: ["cajun", "creole", "southern"],
+  jambalaya: ["cajun", "creole", "southern"],
+  // French
+  "foie gras": ["french", "fine dining"],
+  "crème brûlée": ["french", "fine dining"],
+  escargot: ["french", "fine dining"],
+  crepes: ["french", "brunch"],
+  // Other
+  tapas: ["spanish", "mediterranean"],
+  paella: ["spanish", "mediterranean"],
+  "poke bowl": ["hawaiian", "japanese", "asian"],
+};
 
 interface Restaurant {
   id: string;
