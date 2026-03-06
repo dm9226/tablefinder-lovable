@@ -760,7 +760,22 @@ function getResyCitySlug(params: SearchParams): string {
   return slugState ? `${slugCity}-${slugState}` : slugCity;
 }
 
-function isPlatformCandidateUrlValid(
+// Returns the human-readable metro city name for use in search text
+// e.g. "DeKalb County" + "GA" → "Atlanta"
+function getResyMetroCityName(params: SearchParams): string {
+  const city = (params.city || "").trim().toLowerCase();
+  const state = (params.state || "").trim().toLowerCase();
+  const key = state ? `${city}|${state}` : city;
+
+  const metroSlug = RESY_METRO_MAP[key];
+  if (metroSlug) {
+    // Convert slug back to display name (e.g. "new-york" → "New York")
+    return metroSlug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  }
+  return params.city || "";
+}
+
+
   platform: "resy" | "opentable" | "yelp",
   rawUrl: string,
   params: SearchParams
