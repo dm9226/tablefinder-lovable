@@ -1334,10 +1334,13 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 }
 
 // ─── AI enrichment ───
+// AI provides: rating, reviewCount, cuisine, priceRange, description, vibeTags
+// Coordinates and neighborhoods come from geocoding extracted addresses (not AI)
 
 async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams): Promise<Restaurant[]> {
   if (results.length === 0) return [];
 
+  const metroCity = getMetroCityName(params.city || "", params.state || "");
   const list = results.map((r, i) => `${i}. ${r.name} (${r.platform})`).join("\n");
 
   try {
@@ -1350,12 +1353,11 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
           role: "user",
           content: `For each restaurant in the ${metroCity || params.city}, ${params.state} metro area, provide:
 - index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, priceRange ($-$$$$)
-- neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. "Buckhead", "Midtown", "Vinings", "Sandy Springs") — NOT the search city
-- lat, lng: the restaurant's ACTUAL geographic coordinates (be as precise as possible — do NOT use the search city's coordinates)
+- neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. "Buckhead", "Midtown", "Vinings", "Sandy Springs") — NOT the search city "${params.city}"
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
 - vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")
 
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "lat": number, "lng": number, "description": string, "vibeTags": string[] }] }
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[] }] }
 
 Return an entry for EVERY restaurant:
 
@@ -1378,29 +1380,15 @@ ${list}`,
       if (typeof e.index === "number") eMap.set(e.index, e);
     }
 
-    // Use the SEARCHED city's coordinates for distance calculation, not the user's browser location.
-    const cityLat = params.lat || 0;
-    const cityLng = params.lng || 0;
-    const metroCity = getMetroCityName(params.city || "", params.state || "");
-
-    // Validate AI-provided coordinates: reject if suspiciously close to search origin (< 0.3 mi)
-    // which indicates the AI just echoed back the search coordinates instead of the restaurant's actual location
-    const MIN_DISTANCE_FROM_ORIGIN = 0.3; // miles
-
     const enriched = results.map((r, i) => {
       const e = eMap.get(i);
 
-      let dist = r.distanceMiles; // Yelp already has accurate distance
-      let neighborhood = r.platform === "yelp" ? r.neighborhood : (e?.neighborhood || r.neighborhood);
-
-      if ((dist === null || dist === undefined) && e?.lat && e?.lng && cityLat && cityLng) {
-        const aiDist = haversine(cityLat, cityLng, e.lat, e.lng);
-        // Accept AI coordinates only if they're not suspiciously close to search origin
-        if (aiDist >= MIN_DISTANCE_FROM_ORIGIN) {
-          dist = +aiDist.toFixed(1);
-        } else {
-          console.log(`Rejected AI coords for ${r.name}: ${e.lat},${e.lng} (only ${aiDist.toFixed(2)} mi from search origin — likely hallucinated)`);
-        }
+      // Neighborhood priority: geocoded address > AI neighborhood > existing
+      // Only use AI neighborhood if we don't already have one from geocoding
+      let neighborhood = r.neighborhood;
+      if (e?.neighborhood && neighborhood === params.city) {
+        // Current neighborhood is just the search city (default) — use AI's instead
+        neighborhood = e.neighborhood;
       }
 
       return {
@@ -1412,12 +1400,12 @@ ${list}`,
         vibeTags: e?.vibeTags || r.vibeTags,
         neighborhood,
         priceRange: e?.priceRange || r.priceRange,
-        distanceMiles: dist,
+        // distanceMiles already set by geocodeVerifiedResults or Yelp API — don't touch
       };
     });
 
     // Filter out restaurants beyond distance cap
-    const wasMetroNormalized = getMetroCityName(params.city || "", params.state || "") !== (params.city || "");
+    const wasMetroNormalized = metroCity !== (params.city || "");
     const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
     const nearby = enriched.filter((r) => {
       const d = r.distanceMiles;
@@ -1435,6 +1423,14 @@ ${list}`,
     console.error("AI enrich error:", err);
     return results;
   }
+}
+
+// Clean transient fields before returning results
+function cleanTransientFields(results: Restaurant[]): Restaurant[] {
+  return results.map(r => {
+    const { _address, _addressCity, ...clean } = r as any;
+    return clean;
+  });
 }
 
 // ─── UNIFIED VERIFICATION GATE ───
