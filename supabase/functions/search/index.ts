@@ -225,9 +225,9 @@ serve(async (req) => {
     // Step 4: Enrich with AI (ratings, cuisine, neighborhood, coords)
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
 
-    // Step 5: Update cache
-    await setCachedResults(cacheKey, query, params, enriched);
-    console.log(`Cache updated (key: ${cacheKey}, ${enriched.length} results)`);
+    // Step 5: Cache write DISABLED for testing
+    // await setCachedResults(cacheKey, query, params, enriched);
+    console.log(`Cache write SKIPPED (testing mode) — ${enriched.length} results`);
 
     return new Response(
       JSON.stringify({ results: enriched, params, cached: false }),
