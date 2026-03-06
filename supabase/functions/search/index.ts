@@ -935,7 +935,7 @@ async function verifyAvailability(
         mealLabel = "lunch";
       } else {
         // Dinner window
-        windowStart = 960;  // 4:00 PM
+        windowStart = 1080; // 6:00 PM
         windowEnd = 1439;   // 11:59 PM
         mealLabel = "dinner";
       }
