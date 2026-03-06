@@ -40,7 +40,7 @@ interface Restaurant {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const PARSE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function buildCacheKey(params: SearchParams): string {
   const parts = [
