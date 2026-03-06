@@ -220,11 +220,17 @@ serve(async (req) => {
       console.warn("YELP_API_KEY missing — skipping Yelp");
     }
 
+    // Detect amenity/experience keywords BEFORE discovery so we can add them to search queries
+    const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
+    if (amenityTerms.length > 0) {
+      console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
+    }
+
     const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
-      searchFirecrawl(params, FIRECRAWL_API_KEY, "resy"),
-      searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable"),
+      searchFirecrawl(params, FIRECRAWL_API_KEY, "resy", amenityTerms),
+      searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable", amenityTerms),
       YELP_API_KEY
-        ? fetchYelpCandidates(params, YELP_API_KEY)
+        ? fetchYelpCandidates(params, YELP_API_KEY, amenityTerms)
         : Promise.resolve([] as Restaurant[]),
     ]);
 
@@ -235,11 +241,6 @@ serve(async (req) => {
     const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates]);
     console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, deduped: ${allCandidates.length}`);
 
-    // Detect amenity/experience keywords that require relevance filtering
-    const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
-    if (amenityTerms.length > 0) {
-      console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
-    }
 
     // Step 3: UNIFIED VERIFICATION GATE
     const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY, amenityTerms);
@@ -566,7 +567,8 @@ interface FirecrawlResult {
 }
 
 async function searchFirecrawl(
-  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable" | "yelp"
+  params: SearchParams, firecrawlKey: string, platform: "resy" | "opentable" | "yelp",
+  amenityTerms: string[] = []
 ): Promise<FirecrawlResult[]> {
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const city = params.city;
@@ -574,19 +576,26 @@ async function searchFirecrawl(
   const cityState = state ? `${city} ${state}` : city;
   const resyCitySlug = getResyCitySlug(params);
 
+  // Build amenity search suffix for dedicated discovery queries
+  const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
+
   const queries = platform === "resy"
     ? [
         `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} reservation`,
         `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} book table`,
+        // Add amenity-specific query if searching for rooftop/patio/outdoor
+        ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${city}${amenitySuffix} restaurant`] : []),
       ]
     : platform === "opentable"
     ? [
         `site:opentable.com/r ${cityState}${cuisine} restaurant reserve`,
         `site:opentable.com ${cityState}${cuisine} opentable reservation`,
+        ...(amenitySuffix ? [`site:opentable.com/r ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ]
     : [
         `site:yelp.com/reservations ${cityState}${cuisine}`,
         `site:yelp.com/biz ${cityState}${cuisine} reservation`,
+        ...(amenitySuffix ? [`site:yelp.com/biz ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ];
 
   console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
@@ -777,11 +786,13 @@ function extractNeighborhoodFromTitle(title: string | undefined, description: st
 
 
 async function fetchYelpCandidates(
-  params: SearchParams, yelpKey: string
+  params: SearchParams, yelpKey: string, amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   try {
+    // Include amenity terms in Yelp search to discover rooftop/patio restaurants
+    const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
     const sp = new URLSearchParams({
-      term: `${params.cuisine || ""} restaurants`.trim(),
+      term: `${params.cuisine || ""}${amenitySuffix} restaurants`.trim(),
       location: `${params.city}, ${params.state}`,
       limit: "20",
       sort_by: "best_match",
@@ -1230,11 +1241,13 @@ async function verifyAvailability(
 // ─── Amenity / experience keywords ───
 // These are NOT standard cuisines — they describe an experience or venue feature.
 // When a user searches for these, we must verify the restaurant actually offers it.
+// "rooftop" is STRICT — must specifically mention rooftop, not just generic outdoor.
+// "patio" and "outdoor" are merged — either term matches the combined synonym set.
 const AMENITY_KEYWORDS: Record<string, string[]> = {
-  rooftop: ["rooftop", "roof top", "roof deck", "rooftop bar", "rooftop dining", "sky bar", "terrace"],
+  rooftop: ["rooftop", "roof top", "roof deck", "rooftop bar", "rooftop dining", "rooftop patio", "rooftop terrace", "rooftop lounge", "rooftop restaurant", "sky bar", "sky deck", "sky lounge"],
   waterfront: ["waterfront", "water front", "lakefront", "riverside", "oceanfront", "harborside", "dockside", "bayfront"],
-  patio: ["patio", "outdoor dining", "outdoor seating", "al fresco", "garden dining", "sidewalk cafe"],
-  outdoor: ["outdoor", "outside", "open air", "open-air", "courtyard", "terrace", "beer garden", "biergarten"],
+  patio: ["patio", "outdoor dining", "outdoor seating", "al fresco", "garden dining", "sidewalk cafe", "sidewalk café", "outdoor", "outside dining", "outside seating", "open air", "open-air", "courtyard", "terrace", "beer garden", "biergarten", "covered patio", "heated patio", "dog-friendly patio"],
+  outdoor: ["patio", "outdoor dining", "outdoor seating", "al fresco", "garden dining", "sidewalk cafe", "sidewalk café", "outdoor", "outside dining", "outside seating", "open air", "open-air", "courtyard", "terrace", "beer garden", "biergarten", "covered patio", "heated patio"],
   brunch: ["brunch", "brunch menu", "bottomless brunch", "weekend brunch"],
   breakfast: ["breakfast", "morning menu", "breakfast menu"],
   "live music": ["live music", "live band", "live jazz", "live entertainment", "live performance"],
@@ -1247,7 +1260,14 @@ function extractAmenityTerms(cuisine: string, query: string): string[] {
   const matched: string[] = [];
   for (const [keyword] of Object.entries(AMENITY_KEYWORDS)) {
     if (combined.includes(keyword)) {
-      matched.push(keyword);
+      // "outdoor" and "patio" share synonyms — normalize to "patio" to avoid double-filtering
+      if (keyword === "outdoor") {
+        if (!matched.includes("patio")) matched.push("patio");
+      } else if (keyword === "patio") {
+        if (!matched.includes("patio")) matched.push("patio");
+      } else {
+        matched.push(keyword);
+      }
     }
   }
   return matched;
