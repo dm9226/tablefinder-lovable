@@ -698,29 +698,53 @@ async function searchFirecrawl(
   const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
 
   // For Resy, use the metro city name in the search text (not suburb/county)
-  // so Google finds results under the correct Resy city page
   const resyMetroName = getResyMetroCityName(params);
+
+  // DISH-AWARE DISCOVERY: When the user searched for a specific dish (e.g. "oysters"),
+  // add parallel queries using the parent cuisine type (e.g. "seafood") to improve recall.
+  // This is critical for platforms like Resy where venue pages may not mention specific dishes
+  // but DO mention their cuisine category.
+  const hasDishKeyword = !!params.dishKeyword;
+  const parentCuisineType = params.cuisineType || "";
+  const cuisineTypeSuffix = parentCuisineType ? ` ${parentCuisineType}` : "";
+  // Only add cuisine-type queries if it differs from what's already in the cuisine field
+  const needsCuisineTypeQuery = hasDishKeyword && parentCuisineType && 
+    !cuisine.toLowerCase().includes(parentCuisineType);
 
   const queries = platform === "resy"
     ? [
         `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} reservation`,
         `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} book table`,
-        // Add amenity-specific query if searching for rooftop/patio/outdoor
+        // Dish-aware: add parent cuisine type query for better Resy recall
+        ...(needsCuisineTypeQuery ? [
+          `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisineTypeSuffix} restaurant reservation`,
+        ] : []),
         ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${amenitySuffix} restaurant`] : []),
       ]
     : platform === "opentable"
     ? [
         `site:opentable.com/r ${cityState}${cuisine} restaurant reserve`,
         `site:opentable.com ${cityState}${cuisine} opentable reservation`,
+        // Dish-aware: add parent cuisine type query for better OT recall
+        ...(needsCuisineTypeQuery ? [
+          `site:opentable.com/r ${cityState}${cuisineTypeSuffix} restaurant reservation`,
+        ] : []),
         ...(amenitySuffix ? [`site:opentable.com/r ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ]
     : [
         `site:yelp.com/reservations ${cityState}${cuisine}`,
         `site:yelp.com/biz ${cityState}${cuisine} reservation`,
+        ...(needsCuisineTypeQuery ? [
+          `site:yelp.com/biz ${cityState}${cuisineTypeSuffix} restaurant reservation`,
+        ] : []),
         ...(amenitySuffix ? [`site:yelp.com/biz ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ];
 
-  console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
+  if (hasDishKeyword) {
+    console.log(`Firecrawl ${platform} queries (dish-aware, dish="${params.dishKeyword}", cuisineType="${parentCuisineType}"):`, JSON.stringify(queries));
+  } else {
+    console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
+  }
 
   const results = await Promise.all(
     queries.map(async (query) => {
