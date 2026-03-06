@@ -957,8 +957,6 @@ async function verifyAvailability(
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(markdown);
       const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
-      const isTock = r.platform === "tock";
-      const hasTockAvailabilityMarker = isTock && /\b(book\s+now|prepaid\s+reservation|per\s+person|reservation|experience)\b/i.test(markdown);
 
       // Determine meal window from requested time
       const [reqH] = params.time.split(":").map(Number);
