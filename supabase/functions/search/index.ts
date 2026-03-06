@@ -776,6 +776,7 @@ function getResyMetroCityName(params: SearchParams): string {
 }
 
 
+function isPlatformCandidateUrlValid(
   platform: "resy" | "opentable" | "yelp",
   rawUrl: string,
   params: SearchParams
