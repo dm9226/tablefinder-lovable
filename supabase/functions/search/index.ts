@@ -308,7 +308,10 @@ serve(async (req) => {
     const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY, amenityTerms);
     console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
 
-    // Step 4: Enrich with AI (ratings, cuisine, neighborhood, coords)
+    // Step 3.5: Batch geocode non-Yelp results using extracted addresses
+    await geocodeVerifiedResults(verified, params);
+
+    // Step 4: Enrich with AI (ratings, cuisine, neighborhood, description, vibeTags)
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
 
     // Step 5: Cache write DISABLED for testing
