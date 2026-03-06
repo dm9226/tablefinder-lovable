@@ -175,40 +175,16 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
-    // Step 1: Parse user query (with 7-day cache)
-    const parseCacheKey = normalizeQueryForParseCacheKey(query, location);
-    const parseHash = simpleHash(parseCacheKey);
-    let params: SearchParams;
-    
-    const cachedParse = await getCachedParse(parseHash);
-    if (cachedParse) {
-      console.log(`Parse cache HIT (hash: ${parseHash})`);
-      params = cachedParse;
-      // Still need to update coords from browser if not in cached params
-      if (!params.lat && lat) params.lat = lat;
-      if (!params.lng && lng) params.lng = lng;
-    } else {
-      console.log(`Parse cache MISS (hash: ${parseHash})`);
-      params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
-      // Cache the parsed result (fire-and-forget)
-      setCachedParse(parseHash, query, location, params);
-    }
+    // Step 1: Parse user query (caching DISABLED for testing)
+    // TODO: Re-enable parse cache and search cache when testing is complete
+    const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
     console.log("Parsed params:", JSON.stringify(params));
 
     // Build cache key from normalized params
     const cacheKey = buildCacheKey(params);
 
-    // Cache-only mode: return cached results immediately (for stale-while-revalidate)
+    // Cache-only mode: DISABLED for testing — always return empty so frontend does fresh search
     if (cacheOnly) {
-      const cached = await getCachedResults(cacheKey);
-      if (cached && cached.results.length > 0) {
-        console.log(`Cache hit (age: ${Math.round(cached.age / 1000)}s, ${cached.results.length} results)`);
-        return new Response(
-          JSON.stringify({ results: cached.results, params, cached: true, cacheAgeMs: cached.age }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-      // No cache — return empty so frontend knows to wait for fresh results
       return new Response(
         JSON.stringify({ results: [], params, cached: false }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
