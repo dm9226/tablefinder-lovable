@@ -220,11 +220,17 @@ serve(async (req) => {
       console.warn("YELP_API_KEY missing — skipping Yelp");
     }
 
+    // Detect amenity/experience keywords BEFORE discovery so we can add them to search queries
+    const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
+    if (amenityTerms.length > 0) {
+      console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
+    }
+
     const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
-      searchFirecrawl(params, FIRECRAWL_API_KEY, "resy"),
-      searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable"),
+      searchFirecrawl(params, FIRECRAWL_API_KEY, "resy", amenityTerms),
+      searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable", amenityTerms),
       YELP_API_KEY
-        ? fetchYelpCandidates(params, YELP_API_KEY)
+        ? fetchYelpCandidates(params, YELP_API_KEY, amenityTerms)
         : Promise.resolve([] as Restaurant[]),
     ]);
 
