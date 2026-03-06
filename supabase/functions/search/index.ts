@@ -120,6 +120,8 @@ interface Restaurant {
   platformUrl: string;
   timeSlots: { time: string; type?: string }[];
   distanceMiles?: number | null;
+  _address?: string; // transient: extracted from scraped page for geocoding
+  _addressCity?: string; // transient: city from extracted address
 }
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -306,15 +308,20 @@ serve(async (req) => {
     const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY, amenityTerms);
     console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
 
-    // Step 4: Enrich with AI (ratings, cuisine, neighborhood, coords)
+    // Step 3.5: Batch geocode non-Yelp results using extracted addresses
+    await geocodeVerifiedResults(verified, params);
+
+    // Step 4: Enrich with AI (ratings, cuisine, neighborhood, description, vibeTags)
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
 
     // Step 5: Cache write DISABLED for testing
     // await setCachedResults(cacheKey, query, params, enriched);
     console.log(`Cache write SKIPPED (testing mode) — ${enriched.length} results`);
+    // Clean transient fields before returning
+    const finalResults = cleanTransientFields(enriched);
 
     return new Response(
-      JSON.stringify({ results: enriched, params, cached: false }),
+      JSON.stringify({ results: finalResults, params, cached: false }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (e) {
@@ -1212,11 +1219,134 @@ function toTwelveHourLabel(time24: string): string {
   return `${hour12}:${minutes} ${ampm}`;
 }
 
+// ─── Address extraction from scraped markdown ───
+
+/**
+ * Extract a US street address from scraped page markdown.
+ * Looks for patterns like "123 Main St, Atlanta, GA 30309" or "1065 Huff Rd NW Atlanta GA".
+ * Returns { full, city } or null.
+ */
+function extractAddressFromMarkdown(markdown: string): { full: string; city: string } | null {
+  // Process line by line to avoid matching across unrelated text blocks
+  const lines = markdown.split(/\n/);
+  
+  // Tight pattern: requires a street suffix word near the street number
+  // "3312 Piedmont Rd NE, Atlanta, GA 30305" or "1551 Piedmont Ave NE, Atlanta, GA"
+  const STREET_SUFFIXES = "St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Rd|Road|Ln|Lane|Way|Ct|Court|Pl(?:ace)?|Pkwy|Parkway|Cir(?:cle)?|Hwy|Highway|Trail|Pike|Loop|Terr?(?:ace)?|Square|Sq|Center|Centre";
+  const pat = new RegExp(
+    `(\\d{1,5}\\s+[A-Za-z0-9 .]{1,40}(?:${STREET_SUFFIXES})\\.?\\s*(?:NW|NE|SW|SE|N|S|E|W)?)\\s*,\\s*([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)\\s*,\\s*(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\\s*(\\d{5})?`,
+    "i"
+  );
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length < 10 || trimmed.length > 200) continue;
+    const m = trimmed.match(pat);
+    if (m) {
+      const street = m[1].trim();
+      const city = m[2].trim();
+      const state = m[3].toUpperCase();
+      const zip = m[4] || "";
+      const full = zip ? `${street}, ${city}, ${state} ${zip}` : `${street}, ${city}, ${state}`;
+      return { full, city };
+    }
+  }
+  return null;
+}
+
+// ─── Batch geocode verified results ───
+
+async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams): Promise<void> {
+  const toGeocode = results.filter(r => r.platform !== "yelp" && r._address && !r.distanceMiles);
+  if (toGeocode.length === 0) return;
+
+  const cityLat = params.lat || 0;
+  const cityLng = params.lng || 0;
+  if (!cityLat || !cityLng) {
+    console.log("No search coordinates for distance calculation, skipping geocode");
+    return;
+  }
+
+  console.log(`Geocoding ${toGeocode.length} addresses via Nominatim...`);
+
+  // Fire requests in parallel with 300ms stagger to avoid rate limiting
+  const geocodePromises = toGeocode.map((r, i) => {
+    return new Promise<void>(async (resolve) => {
+      // Stagger starts by 300ms
+      await new Promise(wait => setTimeout(wait, i * 300));
+      try {
+        const addr = r._address!;
+        const resp = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1&addressdetails=1`,
+          { headers: { "User-Agent": "TableFinder/1.0" } }
+        );
+
+        if (resp.status === 429) {
+          // Rate limited — wait and retry once
+          await new Promise(wait => setTimeout(wait, 1000));
+          const retry = await fetch(
+            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1&addressdetails=1`,
+            { headers: { "User-Agent": "TableFinder/1.0" } }
+          );
+          if (!retry.ok) { resolve(); return; }
+          const retryData = await retry.json();
+          if (retryData?.[0]) {
+            const lat = parseFloat(retryData[0].lat);
+            const lng = parseFloat(retryData[0].lon);
+            if (Number.isFinite(lat) && Number.isFinite(lng)) {
+              r.distanceMiles = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
+              // Extract neighborhood from geocoded address
+              const geoAddr = retryData[0].address;
+              const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+              if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+              else if (r._addressCity) r.neighborhood = r._addressCity;
+              console.log(`  Geocoded (retry) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+            }
+          }
+          resolve();
+          return;
+        }
+
+        if (!resp.ok) { resolve(); return; }
+        const data = await resp.json();
+        if (data?.[0]) {
+          const lat = parseFloat(data[0].lat);
+          const lng = parseFloat(data[0].lon);
+          if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            r.distanceMiles = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
+            // Extract neighborhood from geocoded address
+            const geoAddr = data[0].address;
+            const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+            if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+            else if (r._addressCity) r.neighborhood = r._addressCity;
+            console.log(`  Geocoded ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+          }
+        } else {
+          // Nominatim couldn't find it — use address city as neighborhood at least
+          if (r._addressCity) r.neighborhood = r._addressCity;
+          console.log(`  Geocode miss for ${r.name}: ${addr}`);
+        }
+      } catch (err) {
+        console.log(`  Geocode error for ${r.name}:`, err);
+        if (r._addressCity) r.neighborhood = r._addressCity;
+      }
+      resolve();
+    });
+  });
+
+  await Promise.all(geocodePromises);
+  const geocoded = toGeocode.filter(r => r.distanceMiles != null).length;
+  console.log(`Geocoded ${geocoded}/${toGeocode.length} restaurants`);
+}
+
 // ─── AI enrichment ───
+// AI provides: rating, reviewCount, cuisine, priceRange, description, vibeTags
+// Coordinates and neighborhoods come from geocoding extracted addresses (not AI)
 
 async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams): Promise<Restaurant[]> {
   if (results.length === 0) return [];
 
+  const metroCity = getMetroCityName(params.city || "", params.state || "");
   const list = results.map((r, i) => `${i}. ${r.name} (${r.platform})`).join("\n");
 
   try {
@@ -1229,12 +1359,11 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
           role: "user",
           content: `For each restaurant in the ${metroCity || params.city}, ${params.state} metro area, provide:
 - index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, priceRange ($-$$$$)
-- neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. "Buckhead", "Midtown", "Vinings", "Sandy Springs") — NOT the search city
-- lat, lng: the restaurant's ACTUAL geographic coordinates (be as precise as possible — do NOT use the search city's coordinates)
+- neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. "Buckhead", "Midtown", "Vinings", "Sandy Springs") — NOT the search city "${params.city}"
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
 - vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")
 
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "lat": number, "lng": number, "description": string, "vibeTags": string[] }] }
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[] }] }
 
 Return an entry for EVERY restaurant:
 
@@ -1257,29 +1386,15 @@ ${list}`,
       if (typeof e.index === "number") eMap.set(e.index, e);
     }
 
-    // Use the SEARCHED city's coordinates for distance calculation, not the user's browser location.
-    const cityLat = params.lat || 0;
-    const cityLng = params.lng || 0;
-    const metroCity = getMetroCityName(params.city || "", params.state || "");
-
-    // Validate AI-provided coordinates: reject if suspiciously close to search origin (< 0.3 mi)
-    // which indicates the AI just echoed back the search coordinates instead of the restaurant's actual location
-    const MIN_DISTANCE_FROM_ORIGIN = 0.3; // miles
-
     const enriched = results.map((r, i) => {
       const e = eMap.get(i);
 
-      let dist = r.distanceMiles; // Yelp already has accurate distance
-      let neighborhood = r.platform === "yelp" ? r.neighborhood : (e?.neighborhood || r.neighborhood);
-
-      if ((dist === null || dist === undefined) && e?.lat && e?.lng && cityLat && cityLng) {
-        const aiDist = haversine(cityLat, cityLng, e.lat, e.lng);
-        // Accept AI coordinates only if they're not suspiciously close to search origin
-        if (aiDist >= MIN_DISTANCE_FROM_ORIGIN) {
-          dist = +aiDist.toFixed(1);
-        } else {
-          console.log(`Rejected AI coords for ${r.name}: ${e.lat},${e.lng} (only ${aiDist.toFixed(2)} mi from search origin — likely hallucinated)`);
-        }
+      // Neighborhood priority: geocoded address > AI neighborhood > existing
+      // Only use AI neighborhood if we don't already have one from geocoding
+      let neighborhood = r.neighborhood;
+      if (e?.neighborhood && neighborhood === params.city) {
+        // Current neighborhood is just the search city (default) — use AI's instead
+        neighborhood = e.neighborhood;
       }
 
       return {
@@ -1291,12 +1406,12 @@ ${list}`,
         vibeTags: e?.vibeTags || r.vibeTags,
         neighborhood,
         priceRange: e?.priceRange || r.priceRange,
-        distanceMiles: dist,
+        // distanceMiles already set by geocodeVerifiedResults or Yelp API — don't touch
       };
     });
 
     // Filter out restaurants beyond distance cap
-    const wasMetroNormalized = getMetroCityName(params.city || "", params.state || "") !== (params.city || "");
+    const wasMetroNormalized = metroCity !== (params.city || "");
     const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
     const nearby = enriched.filter((r) => {
       const d = r.distanceMiles;
@@ -1314,6 +1429,14 @@ ${list}`,
     console.error("AI enrich error:", err);
     return results;
   }
+}
+
+// Clean transient fields before returning results
+function cleanTransientFields(results: Restaurant[]): Restaurant[] {
+  return results.map(r => {
+    const { _address, _addressCity, ...clean } = r as any;
+    return clean;
+  });
 }
 
 // ─── UNIFIED VERIFICATION GATE ───
@@ -1423,6 +1546,16 @@ async function verifyAvailability(
       if (!markdown) {
         console.log(`No content for ${r.name} [${r.platform}]`);
         return null;
+      }
+
+      // Extract street address from scraped content (for geocoding later)
+      if (r.platform !== "yelp" && !r._address) {
+        const addr = extractAddressFromMarkdown(markdown);
+        if (addr) {
+          r._address = addr.full;
+          r._addressCity = addr.city;
+          console.log(`  Address extracted for ${r.name}: ${addr.full}`);
+        }
       }
 
       // Extract image from scrape metadata if not already set
