@@ -19,10 +19,23 @@ const Index = () => {
   const [hasSearched, setHasSearched] = useState(() => {
     try { return !!sessionStorage.getItem(SESSION_KEY); } catch { return false; }
   });
+  const [showWelcomeBack, setShowWelcomeBack] = useState(false);
   const [location, setLocation] = useState<string | null>(null);
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Detect returning user via Page Visibility API
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && results.length > 0) {
+        setShowWelcomeBack(true);
+        setTimeout(() => setShowWelcomeBack(false), 4000);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [results.length]);
 
   // Auto-detect location on mount
   useEffect(() => {
@@ -124,6 +137,15 @@ const Index = () => {
           locationLoading={locationLoading}
         />
       </section>
+
+      {/* Welcome back banner */}
+      {showWelcomeBack && (
+        <div className="mx-4 mb-2 px-4 py-2.5 rounded-lg bg-primary/10 border border-primary/20 text-center animate-in fade-in slide-in-from-top-2 duration-300">
+          <p className="text-sm font-body font-medium text-primary">
+            Welcome back! Your results are right here 👇
+          </p>
+        </div>
+      )}
 
       {/* Results */}
       <section className="flex-1 overflow-y-auto pb-4">

@@ -1,6 +1,5 @@
 import { Restaurant } from "@/types/restaurant";
 import { Star, MapPin, ChevronRight, Clock } from "lucide-react";
-import { useNavigate } from "react-router-dom";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
@@ -13,18 +12,13 @@ interface RestaurantCardProps {
 }
 
 export function RestaurantCard({ restaurant }: RestaurantCardProps) {
-  const navigate = useNavigate();
   const dist = restaurant.distanceMiles;
   const distLabel = dist != null ? (dist < 0.1 ? "< 0.1 mi" : `${dist.toFixed(1)} mi`) : null;
   const slots = restaurant.timeSlots || [];
 
   const handleClick = () => {
-    const params = new URLSearchParams({
-      url: restaurant.platformUrl,
-      platform: restaurant.platform,
-      name: restaurant.name,
-    });
-    navigate(`/book?${params.toString()}`);
+    // Navigate in the same tab — results are in sessionStorage
+    window.location.href = restaurant.platformUrl;
   };
 
   return (
