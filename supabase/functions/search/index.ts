@@ -786,11 +786,13 @@ function extractNeighborhoodFromTitle(title: string | undefined, description: st
 
 
 async function fetchYelpCandidates(
-  params: SearchParams, yelpKey: string
+  params: SearchParams, yelpKey: string, amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   try {
+    // Include amenity terms in Yelp search to discover rooftop/patio restaurants
+    const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
     const sp = new URLSearchParams({
-      term: `${params.cuisine || ""} restaurants`.trim(),
+      term: `${params.cuisine || ""}${amenitySuffix} restaurants`.trim(),
       location: `${params.city}, ${params.state}`,
       limit: "20",
       sort_by: "best_match",
