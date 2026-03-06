@@ -376,10 +376,30 @@ User query: "${query}"`;
       const zipData = await zipResp.json();
       if (zipData && zipData.length > 0) {
         const addr = zipData[0].address;
-        parsed.city = addr?.city || addr?.town || addr?.village || addr?.county || "";
+        // Prefer city/town/village over county — county names like "DeKalb County"
+        // don't work well with platform searches (Resy, OpenTable, Yelp)
+        let resolvedCity = addr?.city || addr?.town || addr?.village || "";
         parsed.state = extractStateCode(addr) || parsed.state;
         parsed.lat = parseFloat(zipData[0].lat);
         parsed.lng = parseFloat(zipData[0].lon);
+
+        // If only county was found, reverse-geocode the coordinates to get the nearest city
+        if (!resolvedCity && (addr?.county || "")) {
+          try {
+            const revResp = await fetch(
+              `https://nominatim.openstreetmap.org/reverse?lat=${parsed.lat}&lon=${parsed.lng}&format=json&zoom=16&addressdetails=1`,
+              { headers: { "User-Agent": "TableFinder/1.0" } }
+            );
+            const revData = await revResp.json();
+            resolvedCity = revData.address?.city || revData.address?.town || revData.address?.village || revData.address?.suburb || "";
+            console.log(`Zip ${zipCode} county "${addr.county}" reverse-geocoded to city: ${resolvedCity}`);
+          } catch {
+            // Fall back to county name if reverse geocode fails
+            resolvedCity = addr.county || "";
+          }
+        }
+
+        parsed.city = resolvedCity || addr?.county || "";
         console.log(`Zip ${zipCode} resolved to: ${parsed.city}, ${parsed.state}`);
       }
     } catch (e) {
