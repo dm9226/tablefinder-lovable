@@ -599,12 +599,16 @@ async function searchFirecrawl(
   // Build amenity search suffix for dedicated discovery queries
   const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
 
+  // For Resy, use the metro city name in the search text (not suburb/county)
+  // so Google finds results under the correct Resy city page
+  const resyMetroName = getResyMetroCityName(params);
+
   const queries = platform === "resy"
     ? [
-        `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} reservation`,
-        `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} book table`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} reservation`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} book table`,
         // Add amenity-specific query if searching for rooftop/patio/outdoor
-        ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${city}${amenitySuffix} restaurant`] : []),
+        ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${amenitySuffix} restaurant`] : []),
       ]
     : platform === "opentable"
     ? [
