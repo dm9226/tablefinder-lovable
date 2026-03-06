@@ -22,6 +22,7 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
     const params = new URLSearchParams({
       url: restaurant.platformUrl,
       platform: restaurant.platform,
+      name: restaurant.name,
     });
     navigate(`/book?${params.toString()}`);
   };

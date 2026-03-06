@@ -5,11 +5,20 @@ import { Restaurant } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
+const SESSION_KEY = "tablefinder_results";
+
 const Index = () => {
-  const [results, setResults] = useState<Restaurant[]>([]);
+  const [results, setResults] = useState<Restaurant[]>(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hasSearched, setHasSearched] = useState(false);
+  const [hasSearched, setHasSearched] = useState(() => {
+    try { return !!sessionStorage.getItem(SESSION_KEY); } catch { return false; }
+  });
   const [location, setLocation] = useState<string | null>(null);
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -78,7 +87,9 @@ const Index = () => {
         if (fnError) throw new Error(fnError.message);
         if (data?.error) throw new Error(data.error);
 
-        setResults(data?.results || []);
+        const newResults = data?.results || [];
+        setResults(newResults);
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(newResults));
       } catch (err: any) {
         if (controller.signal.aborted) return;
         console.error("Search error:", err);
