@@ -1080,11 +1080,11 @@ ${list}`,
     });
 
     // Filter out restaurants beyond 12 miles
-    // Also exclude restaurants with unknown distances — they're likely out of area
+    // Keep restaurants with unknown distance — they passed verification so they're likely valid
     const MAX_DISTANCE_MILES = 12;
     const nearby = enriched.filter((r) => {
       const d = r.distanceMiles;
-      if (d === null || d === undefined) return false; // drop if distance unknown — likely out of area
+      if (d === null || d === undefined) return true; // keep verified results even without distance
       return d <= MAX_DISTANCE_MILES;
     });
 
