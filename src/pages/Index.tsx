@@ -93,7 +93,7 @@ const Index = () => {
   );
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="h-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <header className="pt-16 pb-10 px-4 text-center">
         <h1 className="font-heading text-4xl md:text-5xl font-bold text-foreground mb-2 tracking-tight">
@@ -115,7 +115,7 @@ const Index = () => {
       </section>
 
       {/* Results */}
-      <section className="flex-1 pb-16">
+      <section className="flex-1 overflow-y-auto pb-4">
         <ResultsGrid
           results={results}
           isLoading={isLoading}
