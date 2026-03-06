@@ -317,9 +317,11 @@ serve(async (req) => {
     // Step 5: Cache write DISABLED for testing
     // await setCachedResults(cacheKey, query, params, enriched);
     console.log(`Cache write SKIPPED (testing mode) — ${enriched.length} results`);
+    // Clean transient fields before returning
+    const finalResults = cleanTransientFields(enriched);
 
     return new Response(
-      JSON.stringify({ results: enriched, params, cached: false }),
+      JSON.stringify({ results: finalResults, params, cached: false }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (e) {
