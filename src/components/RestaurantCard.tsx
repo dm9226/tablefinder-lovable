@@ -38,16 +38,23 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
       className="flex gap-3 px-4 py-3 border-b border-border hover:bg-muted/50 transition-colors group w-full text-left"
     >
       {/* Thumbnail */}
-      {restaurant.imageUrl && (
-        <div className="shrink-0 w-16 h-16 rounded-lg overflow-hidden bg-muted">
+      <div className="shrink-0 w-16 h-16 rounded-lg overflow-hidden bg-muted flex items-center justify-center">
+        {restaurant.imageUrl ? (
           <img
             src={restaurant.imageUrl}
             alt={restaurant.name}
             className="w-full h-full object-cover"
             loading="lazy"
           />
-        </div>
-      )}
+        ) : (
+          <img
+            src={PLATFORM_LOGOS[restaurant.platform] || ""}
+            alt={restaurant.platform}
+            className="w-8 h-8 object-contain opacity-60"
+            loading="lazy"
+          />
+        )}
+      </div>
 
       {/* Content */}
       <div className="flex-1 min-w-0 flex flex-col gap-1.5">
