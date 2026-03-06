@@ -175,8 +175,24 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
-    // Step 1: Parse user query
-    const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+    // Step 1: Parse user query (with 7-day cache)
+    const parseCacheKey = normalizeQueryForParseCacheKey(query, location);
+    const parseHash = simpleHash(parseCacheKey);
+    let params: SearchParams;
+    
+    const cachedParse = await getCachedParse(parseHash);
+    if (cachedParse) {
+      console.log(`Parse cache HIT (hash: ${parseHash})`);
+      params = cachedParse;
+      // Still need to update coords from browser if not in cached params
+      if (!params.lat && lat) params.lat = lat;
+      if (!params.lng && lng) params.lng = lng;
+    } else {
+      console.log(`Parse cache MISS (hash: ${parseHash})`);
+      params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+      // Cache the parsed result (fire-and-forget)
+      setCachedParse(parseHash, query, location, params);
+    }
     console.log("Parsed params:", JSON.stringify(params));
 
     // Build cache key from normalized params
