@@ -7,10 +7,16 @@ const PLATFORM_STYLES: Record<string, string> = {
   yelp: "bg-orange-500/15 text-orange-400",
 };
 
-const PLATFORM_LOGOS: Record<string, string> = {
-  resy: "https://logo.clearbit.com/resy.com",
-  opentable: "https://logo.clearbit.com/opentable.com",
-  yelp: "https://logo.clearbit.com/yelp.com",
+const PLATFORM_LABELS: Record<string, string> = {
+  resy: "R",
+  opentable: "OT",
+  yelp: "Y",
+};
+
+const PLATFORM_LABEL_COLORS: Record<string, string> = {
+  resy: "text-red-400",
+  opentable: "text-emerald-400",
+  yelp: "text-orange-400",
 };
 
 interface RestaurantCardProps {
@@ -46,19 +52,20 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
             className="w-full h-full object-cover"
             loading="lazy"
             onError={(e) => {
-              // Fallback to platform logo if restaurant image fails
+              // Replace broken image with platform text logo
               const img = e.currentTarget;
-              img.className = "w-8 h-8 object-contain opacity-60";
-              img.src = PLATFORM_LOGOS[restaurant.platform] || "";
+              const parent = img.parentElement;
+              if (parent) {
+                const label = PLATFORM_LABELS[restaurant.platform] || "?";
+                const color = PLATFORM_LABEL_COLORS[restaurant.platform] || "text-muted-foreground";
+                parent.innerHTML = `<span class="font-heading font-bold text-xl ${color} opacity-60">${label}</span>`;
+              }
             }}
           />
         ) : (
-          <img
-            src={PLATFORM_LOGOS[restaurant.platform] || ""}
-            alt={restaurant.platform}
-            className="w-8 h-8 object-contain opacity-60"
-            loading="lazy"
-          />
+          <span className={`font-heading font-bold text-xl opacity-60 ${PLATFORM_LABEL_COLORS[restaurant.platform] || "text-muted-foreground"}`}>
+            {PLATFORM_LABELS[restaurant.platform] || "?"}
+          </span>
         )}
       </div>
 
