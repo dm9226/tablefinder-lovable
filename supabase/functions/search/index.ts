@@ -1557,13 +1557,18 @@ async function verifyAvailability(
         return null;
       }
 
-      // Extract street address from scraped content (for geocoding later)
+      // Extract street address from Firecrawl JSON extraction (for geocoding later)
       if (r.platform !== "yelp" && !r._address) {
-        const addr = extractAddressFromMarkdown(markdown);
-        if (addr) {
-          r._address = addr.full;
-          r._addressCity = addr.city;
-          console.log(`  Address extracted for ${r.name}: ${addr.full}`);
+        const jsonData = data?.data?.json || data?.json;
+        const extractedAddr = jsonData?.address;
+        if (extractedAddr && typeof extractedAddr === "string" && extractedAddr.length > 5) {
+          r._address = extractedAddr;
+          // Try to parse city from address (e.g. "123 Main St, Atlanta, GA 30309" → "Atlanta")
+          const cityMatch = extractedAddr.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+          r._addressCity = cityMatch ? cityMatch[1].trim() : undefined;
+          console.log(`  Address extracted (JSON) for ${r.name}: ${extractedAddr}`);
+        } else {
+          console.log(`  No address extracted for ${r.name} [${r.platform}]`);
         }
       }
 
