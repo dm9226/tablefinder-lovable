@@ -925,6 +925,15 @@ async function verifyAvailability(
         return null;
       }
 
+      // Extract image from scrape metadata if not already set
+      if (!r.imageUrl) {
+        const meta = data?.data?.metadata || data?.metadata;
+        const ogImg = meta?.ogImage || meta?.image || meta?.["og:image"] || null;
+        if (ogImg && typeof ogImg === "string" && ogImg.startsWith("http")) {
+          r.imageUrl = ogImg;
+        }
+      }
+
       const lower = markdown.toLowerCase();
 
       // Check for "no availability" signals
