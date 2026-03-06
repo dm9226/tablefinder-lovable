@@ -13,7 +13,6 @@ interface RestaurantCardProps {
 
 export function RestaurantCard({ restaurant }: RestaurantCardProps) {
   const dist = restaurant.distanceMiles;
-  const dist = restaurant.distanceMiles;
   const distLabel = dist != null ? (dist < 0.1 ? "< 0.1 mi" : `${dist.toFixed(1)} mi`) : null;
   const slots = restaurant.timeSlots || [];
 
