@@ -1260,7 +1260,14 @@ function extractAmenityTerms(cuisine: string, query: string): string[] {
   const matched: string[] = [];
   for (const [keyword] of Object.entries(AMENITY_KEYWORDS)) {
     if (combined.includes(keyword)) {
-      matched.push(keyword);
+      // "outdoor" and "patio" share synonyms — normalize to "patio" to avoid double-filtering
+      if (keyword === "outdoor") {
+        if (!matched.includes("patio")) matched.push("patio");
+      } else if (keyword === "patio") {
+        if (!matched.includes("patio")) matched.push("patio");
+      } else {
+        matched.push(keyword);
+      }
     }
   }
   return matched;
