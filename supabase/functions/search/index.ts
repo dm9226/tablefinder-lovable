@@ -27,8 +27,11 @@ interface Restaurant {
   cuisine: string;
   neighborhood: string;
   rating?: number;
+  reviewCount?: number;
   priceRange?: string;
   imageUrl?: string;
+  description?: string;
+  vibeTags?: string[];
   platform: "resy" | "opentable" | "yelp";
   platformUrl: string;
   timeSlots: { time: string; type?: string }[];
@@ -738,9 +741,11 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
         messages: [{
           role: "user",
           content: `For each restaurant in ${params.city}, ${params.state}, provide:
-- index, rating (Google Maps /5), cuisine type, neighborhood, priceRange ($-$$$$), lat, lng
+- index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, neighborhood, priceRange ($-$$$$), lat, lng
+- description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
+- vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")
 
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "cuisine": string, "neighborhood": string, "priceRange": string, "lat": number, "lng": number }] }
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "lat": number, "lng": number, "description": string, "vibeTags": string[] }] }
 
 Return an entry for EVERY restaurant:
 
@@ -781,7 +786,10 @@ ${list}`,
       return {
         ...r,
         rating: e.rating ?? r.rating,
+        reviewCount: e.reviewCount ?? r.reviewCount,
         cuisine: e.cuisine || r.cuisine,
+        description: e.description || r.description,
+        vibeTags: e.vibeTags || r.vibeTags,
         // Yelp provides accurate location from Fusion API — don't let AI overwrite it
         neighborhood: r.platform === "yelp" ? r.neighborhood : (e.neighborhood || r.neighborhood),
         priceRange: e.priceRange || r.priceRange,

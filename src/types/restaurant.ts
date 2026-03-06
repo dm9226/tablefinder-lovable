@@ -10,8 +10,11 @@ export interface Restaurant {
   cuisine: string;
   neighborhood: string;
   rating?: number;
+  reviewCount?: number;
   priceRange?: string;
   imageUrl?: string;
+  description?: string;
+  vibeTags?: string[];
   platform: "resy" | "opentable" | "yelp";
   platformUrl: string;
   timeSlots: TimeSlot[];
