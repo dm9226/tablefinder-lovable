@@ -18,11 +18,10 @@ export function RestaurantCard({ restaurant, onSelect }: RestaurantCardProps) {
   const slots = restaurant.timeSlots || [];
 
   return (
-    <a
-      href={restaurant.platformUrl}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="flex flex-col gap-2 px-4 py-3 border-b border-border hover:bg-muted/50 transition-colors group"
+    <button
+      type="button"
+      onClick={() => onSelect?.(restaurant)}
+      className="flex flex-col gap-2 px-4 py-3 border-b border-border hover:bg-muted/50 transition-colors group w-full text-left"
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
@@ -78,6 +77,6 @@ export function RestaurantCard({ restaurant, onSelect }: RestaurantCardProps) {
           )}
         </div>
       )}
-    </a>
+    </button>
   );
 }
