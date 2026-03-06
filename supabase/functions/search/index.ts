@@ -1086,23 +1086,37 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp candidates: ${businesses.length}`);
 
-    // Filter by cuisine relevance: if user searched for a specific cuisine,
-    // exclude businesses whose Yelp categories don't match at all.
-    // Skip filtering for generic meal terms — they're meal times, not cuisines.
+    // TWO-TIER CUISINE/DISH RELEVANCE FILTER for Yelp candidates.
+    // If user searched for a dish (e.g. "oysters"), accept businesses matching:
+    //   1) The dish keyword itself, OR
+    //   2) The parent cuisine type (e.g. "seafood") from DISH_TO_CUISINE_MAP
+    // If user searched for a cuisine type (e.g. "seafood"), use standard matching.
     const MEAL_TERMS = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
     const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
     const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t));
 
+    // Build expanded token set for dish searches: include parent cuisine types
+    const expandedTokens = [...cuisineTokens];
+    if (params.dishKeyword) {
+      const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
+      for (const pc of parentCuisines) {
+        if (!expandedTokens.includes(pc)) expandedTokens.push(pc);
+      }
+      // Also add the explicit cuisineType if set
+      if (params.cuisineType && !expandedTokens.includes(params.cuisineType)) {
+        expandedTokens.push(params.cuisineType);
+      }
+    }
+
     const filtered = businesses.filter((b: any) => {
       if (!b.alias) return false;
-      if (cuisineTokens.length === 0) return true; // no cuisine filter
-      // Check if any Yelp category or business name matches any cuisine/dish token
+      if (expandedTokens.length === 0) return true; // no cuisine filter
+      // Check if any Yelp category or business name matches any token (dish OR parent cuisine)
       const cats = (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`.toLowerCase()).join(" ");
       const bizName = (b.name || "").toLowerCase();
       const searchText = `${cats} ${bizName}`;
-      return cuisineTokens.some((token: string) => {
+      return expandedTokens.some((token: string) => {
         if (searchText.includes(token)) return true;
-        // Singular/plural flexibility for dish names
         const singular = token.endsWith("s") ? token.slice(0, -1) : null;
         const plural = !token.endsWith("s") ? token + "s" : null;
         if (singular && searchText.includes(singular)) return true;
@@ -1111,7 +1125,7 @@ async function fetchYelpCandidates(
       });
     });
 
-    console.log(`Yelp after cuisine filter: ${filtered.length}/${businesses.length} (cuisine: "${cuisineFilter}")`);
+    console.log(`Yelp after cuisine filter: ${filtered.length}/${businesses.length} (tokens: "${expandedTokens.join(", ")}", dish: "${params.dishKeyword}", cuisineType: "${params.cuisineType}")`);
 
     return filtered
       .map((b: any): Restaurant => ({
