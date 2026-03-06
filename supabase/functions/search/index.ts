@@ -394,6 +394,7 @@ Classification examples:
 - "oysters tonight Atlanta" → cuisineType: "seafood", dishKeyword: "oysters"
 - "Italian for 2" → cuisineType: "italian", dishKeyword: ""
 - "birria tacos Friday" → cuisineType: "mexican", dishKeyword: "birria tacos"
+- "steakhouse near Decatur" → cuisineType: "steakhouse", dishKeyword: ""
 - "steak dinner" → cuisineType: "steakhouse", dishKeyword: "steak"
 - "sushi tonight" → cuisineType: "japanese", dishKeyword: "sushi"
 - "ramen near me" → cuisineType: "japanese", dishKeyword: "ramen"
