@@ -1,6 +1,5 @@
 import { Restaurant } from "@/types/restaurant";
 import { Star, MapPin, ChevronRight, Clock } from "lucide-react";
-import { useNavigate } from "react-router-dom";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
