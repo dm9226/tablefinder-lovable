@@ -19,23 +19,7 @@ const Index = () => {
   const [hasSearched, setHasSearched] = useState(() => {
     try { return !!sessionStorage.getItem(SESSION_KEY); } catch { return false; }
   });
-  const [showWelcomeBack, setShowWelcomeBack] = useState(false);
   const [location, setLocation] = useState<string | null>(null);
-  const [locationLoading, setLocationLoading] = useState(true);
-  const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-
-  // Detect returning user via Page Visibility API
-  useEffect(() => {
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible" && results.length > 0) {
-        setShowWelcomeBack(true);
-        setTimeout(() => setShowWelcomeBack(false), 4000);
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, [results.length]);
 
   // Auto-detect location on mount
   useEffect(() => {
