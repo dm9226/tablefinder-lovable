@@ -1227,17 +1227,21 @@ function toTwelveHourLabel(time24: string): string {
  * Returns { full, city } or null.
  */
 function extractAddressFromMarkdown(markdown: string): { full: string; city: string } | null {
-  // Pattern: street number + street name + optional directional + city + state (+ optional zip)
-  // Handles common formats from Resy/OpenTable/Yelp pages
-  const patterns = [
-    // "123 Main St, Atlanta, GA 30309" or "123 Main St, Atlanta, GA"
-    /(\d{1,5}\s+[A-Za-z0-9\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Rd|Road|Ln|Lane|Way|Ct|Court|Pl(?:ace)?|Pkwy|Parkway|Cir(?:cle)?|Hwy|Highway|Trail|Tr|Pike|Pass|Run|Crossing|Xing|Loop|Terr?(?:ace)?|Walk|Row|Path|Square|Sq|Commons|Center|Centre)\.?\s*(?:NW|NE|SW|SE|N|S|E|W)?)\s*,?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,?\s+(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\s*(\d{5})?/i,
-    // Simpler: "123 Any Street City, ST"
-    /(\d{1,5}\s+[\w\s.]+)\s*,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/i,
-  ];
+  // Process line by line to avoid matching across unrelated text blocks
+  const lines = markdown.split(/\n/);
+  
+  // Tight pattern: requires a street suffix word near the street number
+  // "3312 Piedmont Rd NE, Atlanta, GA 30305" or "1551 Piedmont Ave NE, Atlanta, GA"
+  const STREET_SUFFIXES = "St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Rd|Road|Ln|Lane|Way|Ct|Court|Pl(?:ace)?|Pkwy|Parkway|Cir(?:cle)?|Hwy|Highway|Trail|Pike|Loop|Terr?(?:ace)?|Square|Sq|Center|Centre";
+  const pat = new RegExp(
+    `(\\d{1,5}\\s+[A-Za-z0-9 .]{1,40}(?:${STREET_SUFFIXES})\\.?\\s*(?:NW|NE|SW|SE|N|S|E|W)?)\\s*,\\s*([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)\\s*,\\s*(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\\s*(\\d{5})?`,
+    "i"
+  );
 
-  for (const pat of patterns) {
-    const m = markdown.match(pat);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length < 10 || trimmed.length > 200) continue;
+    const m = trimmed.match(pat);
     if (m) {
       const street = m[1].trim();
       const city = m[2].trim();
