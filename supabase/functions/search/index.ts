@@ -640,10 +640,100 @@ function slugify(v: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+// Map suburbs, counties, and neighborhoods to their Resy metro city slug.
+// Resy organizes restaurants by major metro, not by suburb/county.
+const RESY_METRO_MAP: Record<string, string> = {
+  // Atlanta metro
+  "dekalb county|ga": "atlanta",
+  "decatur|ga": "atlanta",
+  "dunwoody|ga": "atlanta",
+  "sandy springs|ga": "atlanta",
+  "roswell|ga": "atlanta",
+  "alpharetta|ga": "atlanta",
+  "marietta|ga": "atlanta",
+  "smyrna|ga": "atlanta",
+  "brookhaven|ga": "atlanta",
+  "buckhead|ga": "atlanta",
+  "midtown|ga": "atlanta",
+  "east point|ga": "atlanta",
+  "college park|ga": "atlanta",
+  "stone mountain|ga": "atlanta",
+  "tucker|ga": "atlanta",
+  "chamblee|ga": "atlanta",
+  "doraville|ga": "atlanta",
+  "kennesaw|ga": "atlanta",
+  "lawrenceville|ga": "atlanta",
+  "duluth|ga": "atlanta",
+  "johns creek|ga": "atlanta",
+  "peachtree city|ga": "atlanta",
+  "fulton county|ga": "atlanta",
+  "cobb county|ga": "atlanta",
+  "gwinnett county|ga": "atlanta",
+  // NYC metro
+  "brooklyn|ny": "new-york",
+  "queens|ny": "new-york",
+  "bronx|ny": "new-york",
+  "staten island|ny": "new-york",
+  "manhattan|ny": "new-york",
+  "hoboken|nj": "new-york",
+  "jersey city|nj": "new-york",
+  // LA metro
+  "santa monica|ca": "los-angeles",
+  "beverly hills|ca": "los-angeles",
+  "west hollywood|ca": "los-angeles",
+  "pasadena|ca": "los-angeles",
+  "burbank|ca": "los-angeles",
+  "culver city|ca": "los-angeles",
+  "malibu|ca": "los-angeles",
+  // Chicago metro
+  "evanston|il": "chicago",
+  "oak park|il": "chicago",
+  // SF metro
+  "oakland|ca": "san-francisco",
+  "berkeley|ca": "san-francisco",
+  // DC metro
+  "arlington|va": "washington-d-c",
+  "alexandria|va": "washington-d-c",
+  "bethesda|md": "washington-d-c",
+  // Miami metro
+  "miami beach|fl": "miami",
+  "coral gables|fl": "miami",
+  "wynwood|fl": "miami",
+  // Dallas metro
+  "plano|tx": "dallas",
+  "frisco|tx": "dallas",
+  "fort worth|tx": "dallas-fort-worth",
+  // Houston metro
+  "sugar land|tx": "houston",
+  "the woodlands|tx": "houston",
+  // Denver metro
+  "boulder|co": "denver",
+  "aurora|co": "denver",
+  // Seattle metro
+  "bellevue|wa": "seattle",
+  "kirkland|wa": "seattle",
+  // Boston metro
+  "cambridge|ma": "boston",
+  "somerville|ma": "boston",
+  // Nashville metro
+  "franklin|tn": "nashville",
+  // Austin metro
+  "round rock|tx": "austin",
+};
+
 function getResyCitySlug(params: SearchParams): string {
-  const city = slugify(params.city || "");
-  const state = slugify(params.state || "");
-  return state ? `${city}-${state}` : city;
+  const city = (params.city || "").trim().toLowerCase();
+  const state = (params.state || "").trim().toLowerCase();
+  const key = state ? `${city}|${state}` : city;
+
+  // Check metro mapping first
+  const metroSlug = RESY_METRO_MAP[key];
+  if (metroSlug) return metroSlug;
+
+  // Fallback: slugify city-state
+  const slugCity = slugify(params.city || "");
+  const slugState = slugify(params.state || "");
+  return slugState ? `${slugCity}-${slugState}` : slugCity;
 }
 
 function isPlatformCandidateUrlValid(
@@ -658,8 +748,9 @@ function isPlatformCandidateUrlValid(
     if (platform === "resy") {
       const m = p.match(/^\/cities\/([^/]+)\/venues\/([^/?#]+)/i);
       if (!m) return false;
-      const citySlug = m[1];
-      return citySlug === getResyCitySlug(params).toLowerCase();
+      const citySlug = m[1].toLowerCase();
+      const expectedSlug = getResyCitySlug(params).toLowerCase();
+      return citySlug === expectedSlug;
     }
 
     if (platform === "opentable") {
