@@ -239,10 +239,10 @@ User query: "${query}"`;
   parsed.cuisine = parsed.cuisine?.trim() || "";
   parsed.time = /^\d{2}:\d{2}$/.test(parsed.time) ? parsed.time : "19:00";
   parsed.partySize = Number(parsed.partySize) > 0 ? Number(parsed.partySize) : 2;
-  if (lat) parsed.lat = lat;
-  if (lng) parsed.lng = lng;
 
-  if (!parsed.lat && parsed.city) {
+  // Always geocode the SEARCHED city for distance calculations.
+  // Browser coords are only used as a fallback if no city was specified, or for Yelp proximity boost.
+  if (parsed.city) {
     try {
       const geoResp = await fetch(
         `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city + ", " + parsed.state)}&format=json&limit=1`,
@@ -255,6 +255,9 @@ User query: "${query}"`;
       }
     } catch { /* ignore */ }
   }
+  // Fallback to browser coords if geocoding failed
+  if (!parsed.lat && lat) { parsed.lat = lat; }
+  if (!parsed.lng && lng) { parsed.lng = lng; }
 
   return parsed;
 }
@@ -606,16 +609,19 @@ ${list}`,
       if (typeof e.index === "number") eMap.set(e.index, e);
     }
 
-    const userLat = params.lat || 0;
-    const userLng = params.lng || 0;
+    // Use the SEARCHED city's coordinates for distance calculation, not the user's browser location.
+    // This ensures that when a user in south GA searches "Decatur" (near Atlanta), distances are
+    // measured from Decatur, not from the user's home 200 miles away.
+    const cityLat = params.lat || 0;
+    const cityLng = params.lng || 0;
 
     const enriched = results.map((r, i) => {
       const e = eMap.get(i);
       if (!e) return r;
 
       let dist = r.distanceMiles;
-      if (!dist && e.lat && e.lng && userLat && userLng) {
-        dist = haversine(userLat, userLng, e.lat, e.lng);
+      if (!dist && e.lat && e.lng && cityLat && cityLng) {
+        dist = haversine(cityLat, cityLng, e.lat, e.lng);
       }
 
       return {
