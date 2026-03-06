@@ -241,11 +241,6 @@ serve(async (req) => {
     const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates]);
     console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, deduped: ${allCandidates.length}`);
 
-    // Detect amenity/experience keywords that require relevance filtering
-    const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
-    if (amenityTerms.length > 0) {
-      console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
-    }
 
     // Step 3: UNIFIED VERIFICATION GATE
     const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY, amenityTerms);
