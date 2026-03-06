@@ -879,7 +879,7 @@ async function verifyAvailability(
   amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   // Keep latency bounded, but ensure platform diversity in the verification set.
-  const limited = selectCandidatesForVerification(candidates, 24);
+  const limited = selectCandidatesForVerification(candidates, 36);
   console.log(`Verifying ${limited.length} candidates`);
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency)
