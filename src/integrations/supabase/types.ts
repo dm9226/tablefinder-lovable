@@ -14,6 +14,33 @@ export type Database = {
   }
   public: {
     Tables: {
+      parse_cache: {
+        Row: {
+          created_at: string
+          id: string
+          location_hint: string | null
+          parsed_params: Json
+          query_hash: string
+          query_text: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          location_hint?: string | null
+          parsed_params: Json
+          query_hash: string
+          query_text: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          location_hint?: string | null
+          parsed_params?: Json
+          query_hash?: string
+          query_text?: string
+        }
+        Relationships: []
+      }
       search_cache: {
         Row: {
           cache_key: string
