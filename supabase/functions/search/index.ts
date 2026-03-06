@@ -881,9 +881,22 @@ function selectCandidatesForVerification(
     tock: candidates.filter((c) => c.platform === "tock"),
   };
 
+  // Guarantee each platform with candidates gets at least MIN_PER_PLATFORM slots
+  const MIN_PER_PLATFORM = 4;
   const cursors = { resy: 0, opentable: 0, yelp: 0, tock: 0 };
   const selected: Restaurant[] = [];
 
+  // Phase 1: Guarantee minimum slots per platform
+  for (const platform of platformOrder) {
+    const bucket = buckets[platform];
+    const take = Math.min(MIN_PER_PLATFORM, bucket.length);
+    for (let i = 0; i < take && selected.length < maxCandidates; i++) {
+      selected.push(bucket[i]);
+      cursors[platform] = i + 1;
+    }
+  }
+
+  // Phase 2: Fill remaining slots with round-robin
   while (selected.length < maxCandidates) {
     let pushedInRound = false;
 
