@@ -908,6 +908,7 @@ async function verifyAvailability(
   const limited = selectCandidatesForVerification(candidates, 24);
   const limitedCounts = limited.reduce(
     (acc, r) => {
+      acc[r.platform] = (acc[r.platform] || 0) + 1;
       acc[r.platform] += 1;
       return acc;
     },
