@@ -565,7 +565,7 @@ const RESY_EXCLUDED_SLUGS = new Set([
   "events", "blog", "careers", "press", "terms", "privacy",
 ]);
 
-function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp" | "tock", raw: string): string | null {
+function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp", raw: string): string | null {
   try {
     const u = new URL(raw);
     const p = u.pathname;
@@ -580,12 +580,6 @@ function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp" | "tock", r
     if (platform === "opentable") {
       const m = p.match(/^\/r\/[^/?#]+/i);
       return m ? `https://www.opentable.com${m[0]}` : null;
-    }
-    if (platform === "tock") {
-      // Tock: exploretock.com/{slug} — get just the top-level slug
-      const slug = p.replace(/^\//, "").split("/")[0];
-      if (!slug) return null;
-      return `https://www.exploretock.com/${slug}`;
     }
     // Yelp: only reservation pages count as valid booking URLs
     const resMatch = p.match(/^\/reservations\/[^/?#]+/i);
