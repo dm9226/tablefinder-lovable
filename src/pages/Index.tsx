@@ -122,14 +122,6 @@ const Index = () => {
         />
       </section>
 
-      {/* Welcome back banner */}
-      {showWelcomeBack && (
-        <div className="mx-4 mb-2 px-4 py-2.5 rounded-lg bg-primary/10 border border-primary/20 text-center animate-in fade-in slide-in-from-top-2 duration-300">
-          <p className="text-sm font-body font-medium text-primary">
-            Welcome back! Your results are right here 👇
-          </p>
-        </div>
-      )}
 
       {/* Results */}
       <section className="flex-1 overflow-y-auto pb-4">
