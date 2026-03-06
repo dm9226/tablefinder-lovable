@@ -891,9 +891,11 @@ function getResyCitySlug(params: SearchParams): string {
   const state = (params.state || "").trim().toLowerCase();
   const key = state ? `${city}|${state}` : city;
 
-  // Check metro mapping first
+  // Check metro mapping first — append state suffix to match Resy's URL format (e.g. "atlanta" → "atlanta-ga")
   const metroSlug = RESY_METRO_MAP[key];
-  if (metroSlug) return metroSlug;
+  if (metroSlug) {
+    return state ? `${metroSlug}-${state}` : metroSlug;
+  }
 
   // Fallback: slugify city-state
   const slugCity = slugify(params.city || "");
