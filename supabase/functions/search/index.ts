@@ -1227,12 +1227,14 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
         model: "google/gemini-2.5-flash",
         messages: [{
           role: "user",
-          content: `For each restaurant in ${params.city}, ${params.state}, provide:
-- index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, neighborhood, priceRange ($-$$$$)
+          content: `For each restaurant in the ${metroCity || params.city}, ${params.state} metro area, provide:
+- index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, priceRange ($-$$$$)
+- neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. "Buckhead", "Midtown", "Vinings", "Sandy Springs") — NOT the search city
+- lat, lng: the restaurant's ACTUAL geographic coordinates (be as precise as possible — do NOT use the search city's coordinates)
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
 - vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")
 
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[] }] }
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "lat": number, "lng": number, "description": string, "vibeTags": string[] }] }
 
 Return an entry for EVERY restaurant:
 
@@ -1258,115 +1260,25 @@ ${list}`,
     // Use the SEARCHED city's coordinates for distance calculation, not the user's browser location.
     const cityLat = params.lat || 0;
     const cityLng = params.lng || 0;
-
-    // Geocode restaurants that lack coordinates (OpenTable, Resy) using Nominatim
-    // Yelp already provides accurate distance from the Fusion API, so skip those.
-    const geocodedCoords = new Map<number, { lat: number; lng: number }>();
-
-    // Collect items that need geocoding
     const metroCity = getMetroCityName(params.city || "", params.state || "");
-    const toGeocode: { index: number; name: string; queries: string[] }[] = [];
 
-    for (const [i, r] of results.entries()) {
-      if (r.distanceMiles !== null && r.distanceMiles !== undefined) continue; // already has distance (Yelp)
-
-      // Build resilient query variants (AI neighborhoods can be wrong, so don't trust them)
-      const rawName = (r.name || "").trim();
-      const cleanedName = rawName
-        .replace(/\s+on\s+OpenTable$/i, "")
-        .replace(/,\s*[A-Za-z\s.'-]+,\s*[A-Z]{2}\s*$/i, "")
-        .trim();
-
-      // If name already contains "City, ST", use it as primary geocoding context
-      const nameCityStateMatch = rawName.match(/,\s*([A-Za-z][A-Za-z\s.'-]+),\s*([A-Z]{2})\s*$/);
-      const explicitCity = nameCityStateMatch?.[1]?.trim() || "";
-      const explicitState = nameCityStateMatch?.[2]?.trim() || params.state;
-      const primaryCity = explicitCity || metroCity || params.city;
-      const nameForSearch = cleanedName || rawName;
-
-      // URL slug hint is often cleaner than title text for OpenTable/Resy
-      let venueHint = "";
-      try {
-        const u = new URL(r.platformUrl);
-        if (r.platform === "resy") {
-          const m = u.pathname.match(/\/venues\/([^/?#]+)/i);
-          if (m?.[1]) venueHint = decodeURIComponent(m[1]).replace(/-/g, " ");
-        } else if (r.platform === "opentable") {
-          const m = u.pathname.match(/^\/r\/([^/?#]+)/i);
-          if (m?.[1]) venueHint = decodeURIComponent(m[1]).replace(/-/g, " ");
-        }
-      } catch {
-        // Ignore URL parse failures
-      }
-
-      const queries = Array.from(new Set([
-        `${nameForSearch}, ${primaryCity}, ${explicitState}`,
-        venueHint ? `${venueHint}, ${primaryCity}, ${explicitState}` : "",
-        `${nameForSearch}, ${params.state}, USA`,
-      ].filter(Boolean)));
-
-      toGeocode.push({ index: i, name: rawName, queries });
-    }
-
-    console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim`);
-
-    // Process sequentially to avoid rate limits
-    for (const item of toGeocode) {
-      try {
-        let found = false;
-
-        for (const q of item.queries) {
-          let geoResp = await fetch(
-            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=us`,
-            { headers: { "User-Agent": "TableFinder/1.0" } }
-          );
-
-          // Lightweight backoff if we hit Nominatim rate limits
-          if (geoResp.status === 429) {
-            await new Promise(resolve => setTimeout(resolve, 900));
-            geoResp = await fetch(
-              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=us`,
-              { headers: { "User-Agent": "TableFinder/1.0" } }
-            );
-          }
-
-          if (!geoResp.ok) {
-            await geoResp.text();
-            console.log(`Nominatim ${geoResp.status} for ${item.name}`);
-            continue;
-          }
-
-          const geoData = await geoResp.json();
-          if (geoData.length > 0) {
-            geocodedCoords.set(item.index, {
-              lat: parseFloat(geoData[0].lat),
-              lng: parseFloat(geoData[0].lon),
-            });
-            console.log(`Geocoded ${item.name} using "${q}" → ${geoData[0].lat},${geoData[0].lon}`);
-            found = true;
-            break;
-          }
-        }
-
-        if (!found) {
-          console.log(`Nominatim: no results for ${item.name}`);
-        }
-
-        // Fast baseline pacing (with 429 backoff above)
-        await new Promise(resolve => setTimeout(resolve, 300));
-      } catch (err) {
-        console.error(`Geocode failed for ${item.name}:`, err);
-      }
-    }
+    // Validate AI-provided coordinates: reject if suspiciously close to search origin (< 0.3 mi)
+    // which indicates the AI just echoed back the search coordinates instead of the restaurant's actual location
+    const MIN_DISTANCE_FROM_ORIGIN = 0.3; // miles
 
     const enriched = results.map((r, i) => {
       const e = eMap.get(i);
 
-      let dist = r.distanceMiles;
-      if ((dist === null || dist === undefined) && cityLat && cityLng) {
-        const geo = geocodedCoords.get(i);
-        if (geo) {
-          dist = +haversine(cityLat, cityLng, geo.lat, geo.lng).toFixed(1);
+      let dist = r.distanceMiles; // Yelp already has accurate distance
+      let neighborhood = r.platform === "yelp" ? r.neighborhood : (e?.neighborhood || r.neighborhood);
+
+      if ((dist === null || dist === undefined) && e?.lat && e?.lng && cityLat && cityLng) {
+        const aiDist = haversine(cityLat, cityLng, e.lat, e.lng);
+        // Accept AI coordinates only if they're not suspiciously close to search origin
+        if (aiDist >= MIN_DISTANCE_FROM_ORIGIN) {
+          dist = +aiDist.toFixed(1);
+        } else {
+          console.log(`Rejected AI coords for ${r.name}: ${e.lat},${e.lng} (only ${aiDist.toFixed(2)} mi from search origin — likely hallucinated)`);
         }
       }
 
@@ -1377,7 +1289,7 @@ ${list}`,
         cuisine: e?.cuisine || r.cuisine,
         description: e?.description || r.description,
         vibeTags: e?.vibeTags || r.vibeTags,
-        neighborhood: r.platform === "yelp" ? r.neighborhood : (e?.neighborhood || r.neighborhood),
+        neighborhood,
         priceRange: e?.priceRange || r.priceRange,
         distanceMiles: dist,
       };
