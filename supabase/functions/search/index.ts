@@ -1483,20 +1483,18 @@ async function verifyAvailability(
     try {
       const isYelp = r.platform === "yelp";
 
-      const scrapeFormats: unknown[] = ["markdown"];
-      // For Resy/OT: piggyback JSON extraction to get the restaurant's street address
-      if (!isYelp) {
-        scrapeFormats.push({
-          type: "json",
-          prompt: "Extract the restaurant's full street address including street number, street name, city, state, and zip code. Return as { \"address\": \"full street address\" } or { \"address\": null } if not found.",
-        });
-      }
+      const scrapeFormats: string[] = isYelp ? ["markdown"] : ["markdown", "extract"];
 
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: scrapeFormats,
         onlyMainContent: true,
       };
+      if (!isYelp) {
+        scrapePayload.extract = {
+          prompt: "Extract the restaurant's full street address including street number, street name, city, state, and zip code. Return as { \"address\": \"full street address\" } or { \"address\": null } if not found.",
+        };
+      }
       if (isYelp) {
         // Yelp reservation widgets are more JS-heavy; short wait improves extraction without large latency hit.
         scrapePayload.waitFor = 2000;
@@ -1526,7 +1524,7 @@ async function verifyAvailability(
 
       // Extract street address from Firecrawl JSON extraction (for geocoding later)
       if (r.platform !== "yelp" && !r._address) {
-        const jsonData = data?.data?.json || data?.json;
+        const jsonData = data?.data?.extract || data?.extract;
         const extractedAddr = jsonData?.address;
         if (extractedAddr && typeof extractedAddr === "string" && extractedAddr.length > 5) {
           r._address = extractedAddr;
