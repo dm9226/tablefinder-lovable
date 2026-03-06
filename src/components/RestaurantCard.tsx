@@ -52,19 +52,20 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
             className="w-full h-full object-cover"
             loading="lazy"
             onError={(e) => {
-              // Fallback to platform logo if restaurant image fails
+              // Replace broken image with platform text logo
               const img = e.currentTarget;
-              img.className = "w-8 h-8 object-contain opacity-60";
-              img.src = PLATFORM_LOGOS[restaurant.platform] || "";
+              const parent = img.parentElement;
+              if (parent) {
+                const label = PLATFORM_LABELS[restaurant.platform] || "?";
+                const color = PLATFORM_LABEL_COLORS[restaurant.platform] || "text-muted-foreground";
+                parent.innerHTML = `<span class="font-heading font-bold text-xl ${color} opacity-60">${label}</span>`;
+              }
             }}
           />
         ) : (
-          <img
-            src={PLATFORM_LOGOS[restaurant.platform] || ""}
-            alt={restaurant.platform}
-            className="w-8 h-8 object-contain opacity-60"
-            loading="lazy"
-          />
+          <span className={`font-heading font-bold text-xl opacity-60 ${PLATFORM_LABEL_COLORS[restaurant.platform] || "text-muted-foreground"}`}>
+            {PLATFORM_LABELS[restaurant.platform] || "?"}
+          </span>
         )}
       </div>
 
