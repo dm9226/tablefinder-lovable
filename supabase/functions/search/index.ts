@@ -431,6 +431,8 @@ async function searchFirecrawl(
 ): Promise<FirecrawlResult[]> {
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const city = params.city;
+  const state = params.state || "";
+  const cityState = state ? `${city} ${state}` : city;
   const resyCitySlug = getResyCitySlug(params);
 
   const queries = platform === "resy"
@@ -440,12 +442,12 @@ async function searchFirecrawl(
       ]
     : platform === "opentable"
     ? [
-        `site:opentable.com/r ${city}${cuisine} restaurant reserve`,
-        `site:opentable.com ${city}${cuisine} opentable reservation`,
+        `site:opentable.com/r ${cityState}${cuisine} restaurant reserve`,
+        `site:opentable.com ${cityState}${cuisine} opentable reservation`,
       ]
     : [
-        `site:yelp.com/reservations ${city}${cuisine}`,
-        `site:yelp.com/biz ${city}${cuisine} reservation`,
+        `site:yelp.com/reservations ${cityState}${cuisine}`,
+        `site:yelp.com/biz ${cityState}${cuisine} reservation`,
       ];
 
   console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
