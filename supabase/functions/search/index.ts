@@ -942,7 +942,7 @@ async function verifyAvailability(
       const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
       const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean);
       if (cuisineTokens.length > 0) {
-        const pageText = `${lower} ${(r.name || "").toLowerCase()} ${(r.cuisine || "").toLowerCase()}`;
+        const pageText = `${lower} ${(r.name || "").toLowerCase()}`;
         const hasCuisineMatch = cuisineTokens.some((token) => pageText.includes(token));
         if (!hasCuisineMatch) {
           console.log(`✗ ${r.name} [${r.platform}] — failed cuisine relevance check for: ${cuisineTokens.join(", ")}`);
