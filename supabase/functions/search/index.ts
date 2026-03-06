@@ -376,10 +376,30 @@ User query: "${query}"`;
       const zipData = await zipResp.json();
       if (zipData && zipData.length > 0) {
         const addr = zipData[0].address;
-        parsed.city = addr?.city || addr?.town || addr?.village || addr?.county || "";
+        // Prefer city/town/village over county — county names like "DeKalb County"
+        // don't work well with platform searches (Resy, OpenTable, Yelp)
+        let resolvedCity = addr?.city || addr?.town || addr?.village || "";
         parsed.state = extractStateCode(addr) || parsed.state;
         parsed.lat = parseFloat(zipData[0].lat);
         parsed.lng = parseFloat(zipData[0].lon);
+
+        // If only county was found, reverse-geocode the coordinates to get the nearest city
+        if (!resolvedCity && (addr?.county || "")) {
+          try {
+            const revResp = await fetch(
+              `https://nominatim.openstreetmap.org/reverse?lat=${parsed.lat}&lon=${parsed.lng}&format=json&zoom=16&addressdetails=1`,
+              { headers: { "User-Agent": "TableFinder/1.0" } }
+            );
+            const revData = await revResp.json();
+            resolvedCity = revData.address?.city || revData.address?.town || revData.address?.village || revData.address?.suburb || "";
+            console.log(`Zip ${zipCode} county "${addr.county}" reverse-geocoded to city: ${resolvedCity}`);
+          } catch {
+            // Fall back to county name if reverse geocode fails
+            resolvedCity = addr.county || "";
+          }
+        }
+
+        parsed.city = resolvedCity || addr?.county || "";
         console.log(`Zip ${zipCode} resolved to: ${parsed.city}, ${parsed.state}`);
       }
     } catch (e) {
@@ -579,12 +599,16 @@ async function searchFirecrawl(
   // Build amenity search suffix for dedicated discovery queries
   const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
 
+  // For Resy, use the metro city name in the search text (not suburb/county)
+  // so Google finds results under the correct Resy city page
+  const resyMetroName = getResyMetroCityName(params);
+
   const queries = platform === "resy"
     ? [
-        `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} reservation`,
-        `site:resy.com/cities/${resyCitySlug}/venues/ ${city}${cuisine} book table`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} reservation`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} book table`,
         // Add amenity-specific query if searching for rooftop/patio/outdoor
-        ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${city}${amenitySuffix} restaurant`] : []),
+        ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${amenitySuffix} restaurant`] : []),
       ]
     : platform === "opentable"
     ? [
@@ -736,7 +760,22 @@ function getResyCitySlug(params: SearchParams): string {
   return slugState ? `${slugCity}-${slugState}` : slugCity;
 }
 
-function isPlatformCandidateUrlValid(
+// Returns the human-readable metro city name for use in search text
+// e.g. "DeKalb County" + "GA" → "Atlanta"
+function getResyMetroCityName(params: SearchParams): string {
+  const city = (params.city || "").trim().toLowerCase();
+  const state = (params.state || "").trim().toLowerCase();
+  const key = state ? `${city}|${state}` : city;
+
+  const metroSlug = RESY_METRO_MAP[key];
+  if (metroSlug) {
+    // Convert slug back to display name (e.g. "new-york" → "New York")
+    return metroSlug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  }
+  return params.city || "";
+}
+
+
   platform: "resy" | "opentable" | "yelp",
   rawUrl: string,
   params: SearchParams
@@ -1056,11 +1095,11 @@ ${list}`,
     });
 
     // Filter out restaurants beyond 12 miles
-    // Also exclude restaurants with unknown distances — they're likely out of area
+    // Keep restaurants with unknown distance — they passed verification so they're likely valid
     const MAX_DISTANCE_MILES = 12;
     const nearby = enriched.filter((r) => {
       const d = r.distanceMiles;
-      if (d === null || d === undefined) return false; // drop if distance unknown — likely out of area
+      if (d === null || d === undefined) return true; // keep verified results even without distance
       return d <= MAX_DISTANCE_MILES;
     });
 
