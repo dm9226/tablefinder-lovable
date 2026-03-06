@@ -891,9 +891,11 @@ function getResyCitySlug(params: SearchParams): string {
   const state = (params.state || "").trim().toLowerCase();
   const key = state ? `${city}|${state}` : city;
 
-  // Check metro mapping first
+  // Check metro mapping first — append state suffix to match Resy's URL format (e.g. "atlanta" → "atlanta-ga")
   const metroSlug = RESY_METRO_MAP[key];
-  if (metroSlug) return metroSlug;
+  if (metroSlug) {
+    return state ? `${metroSlug}-${state}` : metroSlug;
+  }
 
   // Fallback: slugify city-state
   const slugCity = slugify(params.city || "");
@@ -1282,9 +1284,10 @@ ${list}`,
       };
     });
 
-    // Filter out restaurants beyond 12 miles
-    // Keep restaurants with unknown distance — they passed verification so they're likely valid
-    const MAX_DISTANCE_MILES = 12;
+    // Filter out restaurants beyond distance cap
+    // When search was metro-normalized (suburb → metro), use wider radius since discovery covers the whole metro
+    const wasMetroNormalized = getMetroCityName(params.city || "", params.state || "") !== (params.city || "");
+    const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
     const nearby = enriched.filter((r) => {
       const d = r.distanceMiles;
       if (d === null || d === undefined) return true; // keep verified results even without distance
