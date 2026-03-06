@@ -867,14 +867,15 @@ function selectCandidatesForVerification(
   candidates: Restaurant[],
   maxCandidates: number
 ): Restaurant[] {
-  const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp"];
+  const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp", "tock"];
   const buckets = {
     resy: candidates.filter((c) => c.platform === "resy"),
     opentable: candidates.filter((c) => c.platform === "opentable"),
     yelp: candidates.filter((c) => c.platform === "yelp"),
+    tock: candidates.filter((c) => c.platform === "tock"),
   };
 
-  const cursors = { resy: 0, opentable: 0, yelp: 0 };
+  const cursors = { resy: 0, opentable: 0, yelp: 0, tock: 0 };
   const selected: Restaurant[] = [];
 
   while (selected.length < maxCandidates) {
