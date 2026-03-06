@@ -38,7 +38,7 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
   return (
     <button
       onClick={handleClick}
-      className="flex gap-3 px-4 py-3 border-b border-border hover:bg-muted/50 transition-colors group w-full text-left"
+      className="flex gap-3 px-4 py-3.5 border-b border-border hover:bg-muted/50 transition-colors group w-full text-left"
     >
       {/* Thumbnail */}
       <div className="shrink-0 w-16 h-16 rounded-lg overflow-hidden bg-muted flex items-center justify-center">
@@ -52,7 +52,7 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
               const img = e.currentTarget;
               img.className = "w-10 h-10 object-contain rounded";
               img.src = PLATFORM_LOGOS[restaurant.platform] || "";
-              img.onerror = null; // prevent loop
+              img.onerror = null;
             }}
           />
         ) : (
@@ -66,42 +66,44 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
 
       {/* Content */}
       <div className="flex-1 min-w-0 flex flex-col gap-1.5">
-        {/* Top row: platform badge + name + rating + chevron */}
+        {/* Row 1: platform badge + name */}
+        <div className="flex items-center gap-2 min-w-0">
+          <span
+            className={`shrink-0 px-1.5 py-0.5 rounded text-xs font-body font-semibold uppercase tracking-wider ${PLATFORM_STYLES[restaurant.platform] || ""}`}
+          >
+            {restaurant.platform === "opentable" ? "OT" : restaurant.platform}
+          </span>
+          <h3 className="font-heading text-base font-semibold text-foreground truncate">
+            {restaurant.name}
+          </h3>
+        </div>
+
+        {/* Row 2: rating + distance + chevron */}
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <span
-              className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-body font-semibold uppercase tracking-wider ${PLATFORM_STYLES[restaurant.platform] || ""}`}
-            >
-              {restaurant.platform === "opentable" ? "OT" : restaurant.platform}
-            </span>
-            <h3 className="font-heading text-sm font-semibold text-foreground truncate">
-              {restaurant.name}
-            </h3>
+          <div className="flex items-center gap-2">
             {restaurant.rating && (
               <span className="flex items-center gap-0.5 text-primary shrink-0">
-                <Star className="h-3 w-3 fill-current" />
-                <span className="text-xs font-body font-medium">{restaurant.rating}</span>
+                <Star className="h-3.5 w-3.5 fill-current" />
+                <span className="text-sm font-body font-medium">{restaurant.rating}</span>
                 {restaurant.reviewCount && (
-                  <span className="text-[10px] text-muted-foreground font-body">
+                  <span className="text-xs text-muted-foreground font-body">
                     ({formatReviewCount(restaurant.reviewCount)})
                   </span>
                 )}
               </span>
             )}
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
             {distLabel && (
-              <span className="flex items-center gap-0.5 text-xs text-muted-foreground font-body">
-                <MapPin className="h-3 w-3" />
+              <span className="flex items-center gap-0.5 text-sm text-muted-foreground font-body">
+                <MapPin className="h-3.5 w-3.5" />
                 {distLabel}
               </span>
             )}
-            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground group-hover:text-primary transition-colors" />
           </div>
+          <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
         </div>
 
         {/* Meta row: cuisine · price · neighborhood */}
-        <p className="text-xs text-muted-foreground font-body truncate">
+        <p className="text-sm text-muted-foreground font-body truncate">
           {restaurant.cuisine}
           {restaurant.priceRange && ` · ${restaurant.priceRange}`}
           {restaurant.neighborhood && ` · ${restaurant.neighborhood}`}
@@ -109,7 +111,7 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
 
         {/* Description */}
         {restaurant.description && (
-          <p className="text-xs text-muted-foreground/80 font-body italic truncate">
+          <p className="text-sm text-muted-foreground/80 font-body italic truncate">
             {restaurant.description}
           </p>
         )}
@@ -120,7 +122,7 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
             {vibeTags.slice(0, 3).map((tag, i) => (
               <span
                 key={i}
-                className="px-1.5 py-0.5 rounded-full text-[10px] font-body font-medium bg-accent text-accent-foreground"
+                className="px-1.5 py-0.5 rounded-full text-xs font-body font-medium bg-accent text-accent-foreground"
               >
                 {tag}
               </span>
@@ -131,17 +133,17 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
         {/* Time slots */}
         {slots.length > 0 && (
           <div className="flex items-center gap-1.5 flex-wrap">
-            <Clock className="h-3 w-3 text-muted-foreground shrink-0" />
+            <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
             {slots.slice(0, 6).map((slot, i) => (
               <span
                 key={i}
-                className="px-1.5 py-0.5 rounded text-[11px] font-body font-medium bg-primary/10 text-primary"
+                className="px-1.5 py-0.5 rounded text-[13px] font-body font-medium bg-primary/10 text-primary"
               >
                 {slot.time}
               </span>
             ))}
             {slots.length > 6 && (
-              <span className="text-[11px] text-muted-foreground font-body">
+              <span className="text-[13px] text-muted-foreground font-body">
                 +{slots.length - 6} more
               </span>
             )}
