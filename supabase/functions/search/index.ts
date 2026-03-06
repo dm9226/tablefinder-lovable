@@ -1064,9 +1064,14 @@ async function fetchYelpCandidates(
     // Strip generic meal terms from Yelp search — "dinner restaurants" → "restaurants"
     const YELP_MEAL_STRIP = /\b(dinner|lunch|breakfast|supper|brunch|meal|dining)\b/gi;
     const yelpCuisine = (params.cuisine || "").replace(YELP_MEAL_STRIP, "").trim();
+    
+    // Use metro city name for Yelp search — tiny CDPs like "Scottdale" return no results
+    const yelpCity = getMetroCityName(params.city, params.state);
+    const yelpState = params.state;
+    
     const sp = new URLSearchParams({
       term: `${yelpCuisine}${amenitySuffix} restaurants`.trim(),
-      location: `${params.city}, ${params.state}`,
+      location: `${yelpCity}, ${yelpState}`,
       limit: "20",
       sort_by: "best_match",
       attributes: "reservation",
@@ -1076,7 +1081,7 @@ async function fetchYelpCandidates(
       sp.set("longitude", String(params.lng));
     }
 
-    console.log("Yelp search (reservation):", sp.toString());
+    console.log(`Yelp search (reservation, city="${yelpCity}"):`, sp.toString());
     let resp = await fetch(`${YELP_API}/businesses/search?${sp}`, {
       headers: { Authorization: `Bearer ${yelpKey}` },
     });
