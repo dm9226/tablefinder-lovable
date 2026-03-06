@@ -299,8 +299,8 @@ async function parseQuery(
   const parsePrompt = `You parse restaurant reservation search queries.
 
 Current date: ${now.toISOString().split("T")[0]} (${dayNames[now.getDay()]})
-User location hint: ${location || "unknown"}
-Coordinates: lat=${lat || "unknown"}, lng=${lng || "unknown"}
+User browser location (FALLBACK ONLY): ${location || "unknown"}
+Browser coordinates (FALLBACK ONLY): lat=${lat || "unknown"}, lng=${lng || "unknown"}
 
 CALENDAR for next 14 days:
 ${dateRef.join("\n")}
@@ -308,7 +308,8 @@ ${dateRef.join("\n")}
 Rules:
 - "today" or "tonight" = ${now.toISOString().split("T")[0]}
 - "tomorrow" = the day AFTER today
-- Convert suburbs to major metro city (e.g. "North Druid Hills" => "Atlanta")
+- **CRITICAL**: If the user explicitly names a city or location in their query (e.g. "Athens, GA", "near Savannah", "in Chicago"), ALWAYS use that city. NEVER override it with the browser location. The browser location is ONLY a fallback when the user does NOT mention any location at all.
+- Only convert small neighborhoods/suburbs to their parent metro city (e.g. "North Druid Hills" => "Atlanta", "Brooklyn" => "New York"). Do NOT convert independent cities to other cities — Athens GA is NOT a suburb of Atlanta, Savannah is NOT Atlanta, etc.
 - dinner/tonight defaults to time "19:00", lunch = "12:00", breakfast = "08:00", brunch = "10:30"
 - If the user mentions a meal type (breakfast, brunch, lunch, dinner), use the corresponding default time above
 - If no meal or time is mentioned, default to "19:00"
