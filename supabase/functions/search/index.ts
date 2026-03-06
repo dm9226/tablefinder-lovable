@@ -1576,20 +1576,55 @@ async function verifyAvailability(
       }
       
       if (verifyTokens.length > 0) {
-        const pageText = `${lower} ${(r.name || "").toLowerCase()}`;
-        const hasMatch = verifyTokens.some((token) => {
-          if (pageText.includes(token)) return true;
+        const restaurantName = (r.name || "").toLowerCase();
+        const pageText = `${lower} ${restaurantName}`;
+        const isDishSearch = !!params.dishKeyword;
+
+        const tokenMatches = (text: string, token: string): boolean => {
+          if (text.includes(token)) return true;
           const singular = token.endsWith("s") ? token.slice(0, -1) : null;
           const plural = !token.endsWith("s") ? token + "s" : null;
-          if (singular && pageText.includes(singular)) return true;
-          if (plural && pageText.includes(plural)) return true;
+          if (singular && text.includes(singular)) return true;
+          if (plural && text.includes(plural)) return true;
           return false;
-        });
+        };
+
+        const countOccurrences = (text: string, token: string): number => {
+          let count = 0;
+          const variants = [token];
+          if (token.endsWith("s")) variants.push(token.slice(0, -1));
+          else variants.push(token + "s");
+          for (const v of variants) {
+            let idx = 0;
+            while ((idx = text.indexOf(v, idx)) !== -1) { count++; idx += v.length; }
+          }
+          return count;
+        };
+
+        let hasMatch: boolean;
+
+        if (isDishSearch) {
+          // Dish search: keep current loose matching — any mention passes
+          hasMatch = verifyTokens.some((token) => tokenMatches(pageText, token));
+        } else {
+          // Cuisine category search: require stronger signal
+          hasMatch = verifyTokens.some((token) => {
+            // Auto-pass if token is in the restaurant name
+            if (tokenMatches(restaurantName, token)) return true;
+            // Auto-pass if token appears in first 500 chars (header/identity area)
+            const headerText = lower.slice(0, 500);
+            if (tokenMatches(headerText, token)) return true;
+            // Frequency threshold: token must appear 3+ times in full text
+            if (countOccurrences(lower, token) >= 3) return true;
+            return false;
+          });
+        }
+
         if (!hasMatch) {
-          const label = params.dishKeyword 
+          const label = isDishSearch
             ? `dish="${params.dishKeyword}" OR cuisineType="${params.cuisineType}"`
             : cuisineTokens.join(", ");
-          console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${label} (checked: ${verifyTokens.join(", ")})`);
+          console.log(`✗ ${r.name} [${r.platform}] — failed cuisine relevance (${isDishSearch ? "dish" : "category"}) for: ${label} (checked: ${verifyTokens.join(", ")})`);
           return null;
         }
       }
