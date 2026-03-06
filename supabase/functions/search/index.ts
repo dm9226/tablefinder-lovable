@@ -372,9 +372,21 @@ Browser coordinates (FALLBACK ONLY): lat=${lat || "unknown"}, lng=${lng || "unkn
 CALENDAR for next 14 days:
 ${dateRef.join("\n")}
 
+DEFAULTS (apply when the user does NOT specify):
+- Date: today (${now.toISOString().split("T")[0]})
+- Time: "19:00" (dinner tonight)
+- Party size: 2
+- Location: use browser coordinates / reverse-geocoded city (see below)
+The user can override ANY default by mentioning it. Examples:
+- "mexican" → date: today, time: 19:00, partySize: 2, city: from browser
+- "mexican for 4" → date: today, time: 19:00, partySize: 4, city: from browser
+- "mexican Saturday" → date: this Saturday, time: 19:00, partySize: 2, city: from browser
+- "mexican in Decatur" → date: today, time: 19:00, partySize: 2, city: "Decatur"
+
 Rules:
 - "today" or "tonight" = ${now.toISOString().split("T")[0]}
 - "tomorrow" = the day AFTER today
+- If no date is mentioned at all, default to today (${now.toISOString().split("T")[0]})
 - **CRITICAL**: If the user explicitly names a city or location in their query (e.g. "Athens, GA", "near Savannah", "in Chicago"), ALWAYS use that city. NEVER override it with the browser location. The browser location is ONLY a fallback when the user does NOT mention any location at all.
 - Only convert small neighborhoods/suburbs to their parent metro city (e.g. "North Druid Hills" => "Atlanta", "Brooklyn" => "New York"). Do NOT convert independent cities to other cities — Athens GA is NOT a suburb of Atlanta, Savannah is NOT Atlanta, etc.
 - dinner/tonight defaults to time "19:00", lunch = "12:00", breakfast = "08:00", brunch = "10:30"
@@ -528,6 +540,7 @@ User query: "${query}"`;
   }
 
   // If city is still empty, try reverse-geocoding from coords — otherwise ask the user
+  let cityFromBrowser = false;
   if (!parsed.city) {
     if (lat && lng) {
       try {
@@ -538,6 +551,13 @@ User query: "${query}"`;
         const revData = await revResp.json();
         parsed.city = revData.address?.city || revData.address?.town || "";
         parsed.state = revData.address?.state_code || revData.address?.state || "";
+        if (parsed.city) {
+          cityFromBrowser = true;
+          // Keep precise browser coords as distance origin
+          parsed.lat = lat;
+          parsed.lng = lng;
+          console.log(`City from browser location: ${parsed.city}, ${parsed.state} (using precise coords ${lat},${lng})`);
+        }
       } catch { /* leave empty */ }
     }
     if (!parsed.city) {
@@ -634,7 +654,7 @@ User query: "${query}"`;
   const candidatePool = stateFiltered.length > 0 ? stateFiltered : usableCandidates;
   let selectedCandidate = (candidatePool.sort((a: any, b: any) => cityTypeRank(a.type) - cityTypeRank(b.type))[0]) || null;
 
-  if (selectedCandidate) {
+  if (selectedCandidate && !cityFromBrowser) {
     parsed.lat = selectedCandidate.lat;
     parsed.lng = selectedCandidate.lng;
   }
