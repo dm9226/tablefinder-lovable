@@ -97,7 +97,7 @@ serve(async (req) => {
   } catch (e) {
     const message = e instanceof Error ? e.message : "Search failed";
     const isInputError =
-      message.includes("Please include a city and state") ||
+      message.includes("Please include") ||
       message.includes("Multiple locations found");
 
     console.error("Search error:", e);
