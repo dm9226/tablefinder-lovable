@@ -12,6 +12,8 @@ const YELP_API = "https://api.yelp.com/v3";
 
 interface SearchParams {
   cuisine: string;
+  cuisineType: string;   // broad category: "seafood", "italian", "japanese", ""
+  dishKeyword: string;   // specific dish/ingredient: "oysters", "lobster roll", ""
   date: string;
   time: string;
   partySize: number;
@@ -20,6 +22,88 @@ interface SearchParams {
   lat?: number;
   lng?: number;
 }
+
+// ─── Dish-to-cuisine synonym map ───
+// Maps specific dishes/ingredients to their parent cuisine categories.
+// Used for discovery (adding parallel cuisine queries) and verification (two-tier relevance).
+const DISH_TO_CUISINE_MAP: Record<string, string[]> = {
+  // Seafood dishes
+  oysters: ["seafood", "raw bar", "cajun", "southern", "french"],
+  oyster: ["seafood", "raw bar", "cajun", "southern", "french"],
+  shrimp: ["seafood", "cajun", "southern", "asian"],
+  crab: ["seafood", "cajun", "southern", "maryland"],
+  lobster: ["seafood", "new england", "american"],
+  "lobster roll": ["seafood", "new england", "american"],
+  clams: ["seafood", "new england", "italian"],
+  mussels: ["seafood", "french", "belgian", "italian"],
+  scallops: ["seafood", "french", "american"],
+  calamari: ["seafood", "italian", "mediterranean"],
+  "fish tacos": ["seafood", "mexican", "tex-mex"],
+  poke: ["seafood", "hawaiian", "japanese"],
+  ceviche: ["seafood", "peruvian", "latin", "mexican"],
+  crawfish: ["seafood", "cajun", "southern"],
+  // Japanese dishes
+  sushi: ["japanese", "sushi bar", "asian"],
+  sashimi: ["japanese", "sushi bar", "asian"],
+  ramen: ["japanese", "asian", "noodle"],
+  udon: ["japanese", "asian", "noodle"],
+  tempura: ["japanese", "asian"],
+  omakase: ["japanese", "sushi bar"],
+  // Mexican/Latin dishes
+  tacos: ["mexican", "tex-mex", "latin"],
+  taco: ["mexican", "tex-mex", "latin"],
+  "birria tacos": ["mexican", "tex-mex"],
+  birria: ["mexican"],
+  burrito: ["mexican", "tex-mex"],
+  enchiladas: ["mexican", "tex-mex"],
+  guacamole: ["mexican", "tex-mex", "latin"],
+  quesadilla: ["mexican", "tex-mex"],
+  // Italian dishes
+  pasta: ["italian", "mediterranean"],
+  pizza: ["italian", "pizzeria"],
+  risotto: ["italian", "mediterranean"],
+  lasagna: ["italian"],
+  gnocchi: ["italian"],
+  carbonara: ["italian"],
+  tiramisu: ["italian"],
+  // American/Steakhouse
+  steak: ["steakhouse", "american", "chophouse"],
+  "prime rib": ["steakhouse", "american"],
+  burger: ["american", "burgers", "gastropub"],
+  burgers: ["american", "burgers", "gastropub"],
+  ribs: ["bbq", "barbecue", "american", "southern"],
+  brisket: ["bbq", "barbecue", "texas", "southern"],
+  wings: ["american", "bar food", "sports bar"],
+  // Asian dishes
+  "pad thai": ["thai", "asian"],
+  curry: ["indian", "thai", "asian"],
+  "dim sum": ["chinese", "cantonese", "asian"],
+  dumplings: ["chinese", "asian", "japanese"],
+  "pho": ["vietnamese", "asian"],
+  "banh mi": ["vietnamese", "asian"],
+  "bibimbap": ["korean", "asian"],
+  "korean bbq": ["korean", "asian", "barbecue"],
+  // Mediterranean/Middle Eastern
+  falafel: ["mediterranean", "middle eastern", "israeli"],
+  hummus: ["mediterranean", "middle eastern"],
+  shawarma: ["mediterranean", "middle eastern"],
+  kebab: ["mediterranean", "middle eastern", "turkish"],
+  // Southern/Soul
+  "fried chicken": ["southern", "soul food", "american"],
+  "chicken and waffles": ["southern", "soul food", "brunch"],
+  grits: ["southern", "soul food", "american"],
+  gumbo: ["cajun", "creole", "southern"],
+  jambalaya: ["cajun", "creole", "southern"],
+  // French
+  "foie gras": ["french", "fine dining"],
+  "crème brûlée": ["french", "fine dining"],
+  escargot: ["french", "fine dining"],
+  crepes: ["french", "brunch"],
+  // Other
+  tapas: ["spanish", "mediterranean"],
+  paella: ["spanish", "mediterranean"],
+  "poke bowl": ["hawaiian", "japanese", "asian"],
+};
 
 interface Restaurant {
   id: string;
@@ -293,8 +377,27 @@ Rules:
 - If the user says something like "brunch Italian", set cuisine to "brunch italian" to capture both the meal style and food preference.
 - If the user provides a US zip code (5-digit number), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
 
+IMPORTANT — Cuisine type vs. dish keyword classification:
+You MUST distinguish between a CUISINE TYPE (broad restaurant category) and a DISH KEYWORD (specific menu item or ingredient).
+- cuisineType: The broad restaurant category that would serve this food. Examples: "seafood", "italian", "japanese", "steakhouse", "mexican", "thai", "indian", "southern", "french". Leave empty if no cuisine is implied.
+- dishKeyword: A specific dish, preparation, or ingredient the user is searching for. Examples: "oysters", "lobster roll", "birria tacos", "sushi", "ramen", "steak", "fried chicken". Leave empty if the user is searching by cuisine category, not a specific dish.
+
+Classification examples:
+- "seafood near Decatur" → cuisineType: "seafood", dishKeyword: ""
+- "oysters tonight Atlanta" → cuisineType: "seafood", dishKeyword: "oysters"
+- "Italian for 2" → cuisineType: "italian", dishKeyword: ""
+- "birria tacos Friday" → cuisineType: "mexican", dishKeyword: "birria tacos"
+- "steak dinner" → cuisineType: "steakhouse", dishKeyword: "steak"
+- "sushi tonight" → cuisineType: "japanese", dishKeyword: "sushi"
+- "ramen near me" → cuisineType: "japanese", dishKeyword: "ramen"
+- "Thai food Saturday" → cuisineType: "thai", dishKeyword: ""
+- "fried chicken Atlanta" → cuisineType: "southern", dishKeyword: "fried chicken"
+- "dinner for 4" → cuisineType: "", dishKeyword: ""
+
 Return JSON:
 - cuisine: string ("" if unspecified — but include meal type like "brunch" or "breakfast" when mentioned. Also include specific dish/ingredient names like "oysters", "sushi", "steak", "tacos", etc.)
+- cuisineType: string (broad restaurant category, "" if none)
+- dishKeyword: string (specific dish/ingredient, "" if none)
 - date: YYYY-MM-DD
 - time: HH:MM (24h)
 - partySize: number (default 2)
@@ -318,12 +421,15 @@ User query: "${query}"`;
            parameters: {
             type: "object",
             properties: {
-              cuisine: { type: "string" }, date: { type: "string" },
+              cuisine: { type: "string" }, 
+              cuisineType: { type: "string", description: "Broad restaurant category (e.g. seafood, italian, japanese). Empty if none." },
+              dishKeyword: { type: "string", description: "Specific dish or ingredient (e.g. oysters, sushi, steak). Empty if none." },
+              date: { type: "string" },
               time: { type: "string" }, partySize: { type: "number" },
               city: { type: "string" }, state: { type: "string" },
               zipCode: { type: "string" },
             },
-            required: ["cuisine", "date", "time", "partySize", "city", "state"],
+            required: ["cuisine", "cuisineType", "dishKeyword", "date", "time", "partySize", "city", "state"],
             additionalProperties: false,
           },
         },
@@ -338,6 +444,21 @@ User query: "${query}"`;
   if (!toolCall) throw new Error("Failed to parse search query");
 
   const parsed = JSON.parse(toolCall.function.arguments) as SearchParams;
+  
+  // Normalize cuisineType and dishKeyword
+  parsed.cuisineType = (parsed.cuisineType || "").trim().toLowerCase();
+  parsed.dishKeyword = (parsed.dishKeyword || "").trim().toLowerCase();
+  
+  // If AI didn't classify but we can infer from DISH_TO_CUISINE_MAP
+  if (!parsed.cuisineType && parsed.dishKeyword) {
+    const mapped = DISH_TO_CUISINE_MAP[parsed.dishKeyword];
+    if (mapped && mapped.length > 0) {
+      parsed.cuisineType = mapped[0]; // Use first (most likely) parent cuisine
+      console.log(`Inferred cuisineType "${parsed.cuisineType}" from dishKeyword "${parsed.dishKeyword}"`);
+    }
+  }
+  
+  console.log(`Intent classification — cuisineType: "${parsed.cuisineType}", dishKeyword: "${parsed.dishKeyword}"`);
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
   parsed.state = INVALID_CITY.has((parsed.state || "").trim().toLowerCase()) ? "" : parsed.state?.trim() || "";
@@ -577,29 +698,53 @@ async function searchFirecrawl(
   const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
 
   // For Resy, use the metro city name in the search text (not suburb/county)
-  // so Google finds results under the correct Resy city page
   const resyMetroName = getResyMetroCityName(params);
+
+  // DISH-AWARE DISCOVERY: When the user searched for a specific dish (e.g. "oysters"),
+  // add parallel queries using the parent cuisine type (e.g. "seafood") to improve recall.
+  // This is critical for platforms like Resy where venue pages may not mention specific dishes
+  // but DO mention their cuisine category.
+  const hasDishKeyword = !!params.dishKeyword;
+  const parentCuisineType = params.cuisineType || "";
+  const cuisineTypeSuffix = parentCuisineType ? ` ${parentCuisineType}` : "";
+  // Only add cuisine-type queries if it differs from what's already in the cuisine field
+  const needsCuisineTypeQuery = hasDishKeyword && parentCuisineType && 
+    !cuisine.toLowerCase().includes(parentCuisineType);
 
   const queries = platform === "resy"
     ? [
         `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} reservation`,
         `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} book table`,
-        // Add amenity-specific query if searching for rooftop/patio/outdoor
+        // Dish-aware: add parent cuisine type query for better Resy recall
+        ...(needsCuisineTypeQuery ? [
+          `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisineTypeSuffix} restaurant reservation`,
+        ] : []),
         ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${amenitySuffix} restaurant`] : []),
       ]
     : platform === "opentable"
     ? [
         `site:opentable.com/r ${cityState}${cuisine} restaurant reserve`,
         `site:opentable.com ${cityState}${cuisine} opentable reservation`,
+        // Dish-aware: add parent cuisine type query for better OT recall
+        ...(needsCuisineTypeQuery ? [
+          `site:opentable.com/r ${cityState}${cuisineTypeSuffix} restaurant reservation`,
+        ] : []),
         ...(amenitySuffix ? [`site:opentable.com/r ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ]
     : [
         `site:yelp.com/reservations ${cityState}${cuisine}`,
         `site:yelp.com/biz ${cityState}${cuisine} reservation`,
+        ...(needsCuisineTypeQuery ? [
+          `site:yelp.com/biz ${cityState}${cuisineTypeSuffix} restaurant reservation`,
+        ] : []),
         ...(amenitySuffix ? [`site:yelp.com/biz ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ];
 
-  console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
+  if (hasDishKeyword) {
+    console.log(`Firecrawl ${platform} queries (dish-aware, dish="${params.dishKeyword}", cuisineType="${parentCuisineType}"):`, JSON.stringify(queries));
+  } else {
+    console.log(`Firecrawl ${platform} queries:`, JSON.stringify(queries));
+  }
 
   const results = await Promise.all(
     queries.map(async (query) => {
@@ -941,23 +1086,37 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp candidates: ${businesses.length}`);
 
-    // Filter by cuisine relevance: if user searched for a specific cuisine,
-    // exclude businesses whose Yelp categories don't match at all.
-    // Skip filtering for generic meal terms — they're meal times, not cuisines.
+    // TWO-TIER CUISINE/DISH RELEVANCE FILTER for Yelp candidates.
+    // If user searched for a dish (e.g. "oysters"), accept businesses matching:
+    //   1) The dish keyword itself, OR
+    //   2) The parent cuisine type (e.g. "seafood") from DISH_TO_CUISINE_MAP
+    // If user searched for a cuisine type (e.g. "seafood"), use standard matching.
     const MEAL_TERMS = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
     const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
     const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t));
 
+    // Build expanded token set for dish searches: include parent cuisine types
+    const expandedTokens = [...cuisineTokens];
+    if (params.dishKeyword) {
+      const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
+      for (const pc of parentCuisines) {
+        if (!expandedTokens.includes(pc)) expandedTokens.push(pc);
+      }
+      // Also add the explicit cuisineType if set
+      if (params.cuisineType && !expandedTokens.includes(params.cuisineType)) {
+        expandedTokens.push(params.cuisineType);
+      }
+    }
+
     const filtered = businesses.filter((b: any) => {
       if (!b.alias) return false;
-      if (cuisineTokens.length === 0) return true; // no cuisine filter
-      // Check if any Yelp category or business name matches any cuisine/dish token
+      if (expandedTokens.length === 0) return true; // no cuisine filter
+      // Check if any Yelp category or business name matches any token (dish OR parent cuisine)
       const cats = (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`.toLowerCase()).join(" ");
       const bizName = (b.name || "").toLowerCase();
       const searchText = `${cats} ${bizName}`;
-      return cuisineTokens.some((token: string) => {
+      return expandedTokens.some((token: string) => {
         if (searchText.includes(token)) return true;
-        // Singular/plural flexibility for dish names
         const singular = token.endsWith("s") ? token.slice(0, -1) : null;
         const plural = !token.endsWith("s") ? token + "s" : null;
         if (singular && searchText.includes(singular)) return true;
@@ -966,7 +1125,7 @@ async function fetchYelpCandidates(
       });
     });
 
-    console.log(`Yelp after cuisine filter: ${filtered.length}/${businesses.length} (cuisine: "${cuisineFilter}")`);
+    console.log(`Yelp after cuisine filter: ${filtered.length}/${businesses.length} (tokens: "${expandedTokens.join(", ")}", dish: "${params.dishKeyword}", cuisineType: "${params.cuisineType}")`);
 
     return filtered
       .map((b: any): Restaurant => ({
@@ -1233,25 +1392,42 @@ async function verifyAvailability(
         return null;
       }
 
-      // CUISINE RELEVANCE CHECK: If user searched for a specific cuisine or dish,
-      // verify the scraped page actually mentions it (applies to ALL platforms).
+      // TWO-TIER CUISINE/DISH RELEVANCE CHECK (applies to ALL platforms).
+      // For DISH searches (e.g. "oysters"): accept if page mentions the dish keyword
+      // OR the parent cuisine type (e.g. "seafood"). A seafood restaurant likely serves
+      // oysters even if "oysters" isn't on the booking page.
+      // For CUISINE searches (e.g. "seafood"): standard check — page must mention the cuisine.
       const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
       const MEAL_TERMS_SET = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
       const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS_SET.has(t));
-      if (cuisineTokens.length > 0) {
+      
+      // Build expanded check tokens: include parent cuisine types for dish searches
+      const verifyTokens = [...cuisineTokens];
+      if (params.dishKeyword) {
+        const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
+        for (const pc of parentCuisines) {
+          if (!verifyTokens.includes(pc)) verifyTokens.push(pc);
+        }
+        if (params.cuisineType && !verifyTokens.includes(params.cuisineType)) {
+          verifyTokens.push(params.cuisineType);
+        }
+      }
+      
+      if (verifyTokens.length > 0) {
         const pageText = `${lower} ${(r.name || "").toLowerCase()}`;
-        // Check each token with singular/plural flexibility
-        const hasCuisineMatch = cuisineTokens.some((token) => {
+        const hasMatch = verifyTokens.some((token) => {
           if (pageText.includes(token)) return true;
-          // Try singular/plural variants (oysters↔oyster, tacos↔taco, steaks↔steak)
           const singular = token.endsWith("s") ? token.slice(0, -1) : null;
           const plural = !token.endsWith("s") ? token + "s" : null;
           if (singular && pageText.includes(singular)) return true;
           if (plural && pageText.includes(plural)) return true;
           return false;
         });
-        if (!hasCuisineMatch) {
-          console.log(`✗ ${r.name} [${r.platform}] — failed cuisine/dish relevance check for: ${cuisineTokens.join(", ")}`);
+        if (!hasMatch) {
+          const label = params.dishKeyword 
+            ? `dish="${params.dishKeyword}" OR cuisineType="${params.cuisineType}"`
+            : cuisineTokens.join(", ");
+          console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${label} (checked: ${verifyTokens.join(", ")})`);
           return null;
         }
       }
