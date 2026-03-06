@@ -1516,9 +1516,18 @@ async function verifyAvailability(
     try {
       const isYelp = r.platform === "yelp";
 
+      const scrapeFormats: unknown[] = ["markdown"];
+      // For Resy/OT: piggyback JSON extraction to get the restaurant's street address
+      if (!isYelp) {
+        scrapeFormats.push({
+          type: "json",
+          prompt: "Extract the restaurant's full street address including street number, street name, city, state, and zip code. Return as { \"address\": \"full street address\" } or { \"address\": null } if not found.",
+        });
+      }
+
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
-        formats: ["markdown"],
+        formats: scrapeFormats,
         onlyMainContent: true,
       };
       if (isYelp) {
