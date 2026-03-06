@@ -457,6 +457,20 @@ User query: "${query}"`;
   parsed.cuisineType = (parsed.cuisineType || "").trim().toLowerCase();
   parsed.dishKeyword = (parsed.dishKeyword || "").trim().toLowerCase();
   
+  // Post-parse cleanup: if user explicitly used a category term (e.g. "steakhouse"),
+  // clear dishKeyword so we use strict category matching, not loose dish matching
+  const CATEGORY_ROOTS: Record<string, string> = {
+    steakhouse: "steak", chophouse: "steak", pizzeria: "pizza",
+    "sushi bar": "sushi", "sushi restaurant": "sushi",
+  };
+  if (parsed.cuisineType && parsed.dishKeyword) {
+    const root = CATEGORY_ROOTS[parsed.cuisineType];
+    if (root && parsed.dishKeyword === root && query.toLowerCase().includes(parsed.cuisineType)) {
+      console.log(`Clearing dishKeyword "${parsed.dishKeyword}" — user said "${parsed.cuisineType}" (category search)`);
+      parsed.dishKeyword = "";
+    }
+  }
+
   // If AI didn't classify but we can infer from DISH_TO_CUISINE_MAP
   if (!parsed.cuisineType && parsed.dishKeyword) {
     const mapped = DISH_TO_CUISINE_MAP[parsed.dishKeyword];
