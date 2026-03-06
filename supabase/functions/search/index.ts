@@ -909,13 +909,12 @@ async function verifyAvailability(
   const limitedCounts = limited.reduce(
     (acc, r) => {
       acc[r.platform] = (acc[r.platform] || 0) + 1;
-      acc[r.platform] += 1;
       return acc;
     },
-    { resy: 0, opentable: 0, yelp: 0 }
+    { resy: 0, opentable: 0, yelp: 0, tock: 0 } as Record<string, number>
   );
   console.log(
-    `Verifying (capped): total=${limited.length}, resy=${limitedCounts.resy}, ot=${limitedCounts.opentable}, yelp=${limitedCounts.yelp}`
+    `Verifying (capped): total=${limited.length}, resy=${limitedCounts.resy}, ot=${limitedCounts.opentable}, yelp=${limitedCounts.yelp}, tock=${limitedCounts.tock}`
   );
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency)
