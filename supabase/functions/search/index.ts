@@ -181,7 +181,7 @@ serve(async (req) => {
     console.log(`Candidates — ${platformCounts.join(", ")}, deduped: ${allCandidates.length}`);
 
     // Step 3: Select candidates with round-robin balance, then verify per-adapter
-    const selected = selectCandidatesForVerification(allCandidates, 24);
+    const selected = selectCandidatesForVerification(allCandidates, 30, params);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
