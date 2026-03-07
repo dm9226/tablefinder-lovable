@@ -1629,10 +1629,10 @@ async function verifyAvailability(
         }
       }
 
-      // Check structured extraction for no-availability / notify-only signals
-      if (jsonData && r.platform !== "yelp") {
-        if (jsonData.noAvailability === true || jsonData.notifyOnly === true) {
-          console.log(`✗ ${r.name} [${r.platform}] — structured extraction: noAvailability=${jsonData.noAvailability}, notifyOnly=${jsonData.notifyOnly}`);
+      // Check structured extraction for no-availability signals (OT only now)
+      if (jsonData && isOT) {
+        if (jsonData.noAvailability === true) {
+          console.log(`✗ ${r.name} [opentable] — structured extraction: noAvailability`);
           return null;
         }
       }
