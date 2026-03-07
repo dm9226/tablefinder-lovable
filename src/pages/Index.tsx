@@ -159,7 +159,7 @@ const Index = () => {
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
-      <header className="pt-16 pb-10 px-4 text-center">
+      <header className="pt-6 pb-3 px-4 text-center">
         <h1 className="font-heading text-4xl md:text-5xl font-bold text-foreground mb-2 tracking-tight">
           Table<span className="text-primary">Finder</span>
         </h1>
