@@ -331,9 +331,9 @@ serve(async (req) => {
     // Step 4: Enrich with AI (ratings, cuisine, neighborhood, description, vibeTags)
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
 
-    // Step 5: Cache write DISABLED for testing
-    // await setCachedResults(cacheKey, query, params, enriched);
-    console.log(`Cache write SKIPPED (testing mode) — ${enriched.length} results`);
+    // Step 5: Cache results
+    setCachedResults(cacheKey, query, params, enriched); // fire-and-forget
+    console.log(`Cache write — ${enriched.length} results`);
     // Clean transient fields before returning
     const finalResults = cleanTransientFields(enriched);
 
