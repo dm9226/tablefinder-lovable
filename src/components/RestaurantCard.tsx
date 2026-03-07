@@ -78,7 +78,7 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
 
         {/* Description */}
         {restaurant.description && (
-          <p className="text-sm text-muted-foreground/80 font-body italic truncate">
+          <p className="text-sm text-muted-foreground/80 font-body italic">
             {restaurant.description}
           </p>
         )}
