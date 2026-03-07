@@ -1757,14 +1757,48 @@ async function verifyAvailability(
         }
       }
 
-      // For Resy: also detect "Notify" / "NotifyAll" as a global no-availability signal
-      if (r.platform === "resy") {
-        const notifyPatterns = /\bnotify\s*(me)?\s*(all\s*times?)?\b/i;
-        const hasNotify = notifyPatterns.test(markdown);
-        const hasBookableSlot = /\b(book|reserve|select\s+time|choose\s+time)\b/i.test(bookingMarkdown);
-        if (hasNotify && !hasBookableSlot && structuredTimes.length === 0) {
-          console.log(`✗ ${r.name} [resy] — notify-only page, no bookable slots`);
-          return null;
+      // ── RESY-SPECIFIC: Parse meal section from markdown directly ──
+      // Resy pages have predictable structure: ## dinner / ## lunch sections
+      // with time slots listed as "6:00 PM\n\nDining Room" lines.
+      // If "Notify" appears in the meal section, ALL times there are notify-only.
+      if (isResy) {
+        const mealSectionRegex = new RegExp(
+          `## (?:${mealLabel}|all day)([\\s\\S]*?)(?=##|$)`, "i"
+        );
+        const mealMatch = markdown.match(mealSectionRegex);
+        
+        if (mealMatch) {
+          const mealSection = mealMatch[1];
+          const hasNotify = /\bnotify\b/i.test(mealSection);
+          
+          if (hasNotify) {
+            console.log(`✗ ${r.name} [resy] — "${mealLabel}" section contains Notify marker, rejecting`);
+            return null;
+          }
+          
+          // Extract times ONLY from the meal section (not from Need to Know etc.)
+          const resyTimeRegex = /\b(\d{1,2}):(\d{2})\s*(am|pm)\b/gi;
+          let resyMatch;
+          while ((resyMatch = resyTimeRegex.exec(mealSection)) !== null) {
+            const parsed = parseTimeStr(resyMatch[0]);
+            if (parsed && !seenTimes.has(parsed.time)) {
+              seenTimes.add(parsed.time);
+              foundTimes.push(parsed);
+            }
+          }
+          
+          if (foundTimes.length > 0) {
+            console.log(`  ${r.name} [resy]: extracted ${foundTimes.length} times from "${mealLabel}" section: ${foundTimes.map(t=>t.time).join(", ")}`);
+          } else {
+            console.log(`✗ ${r.name} [resy] — no times in "${mealLabel}" section`);
+            return null;
+          }
+        } else {
+          // No meal section found — check for general Notify
+          if (/\bnotify\b/i.test(markdown)) {
+            console.log(`✗ ${r.name} [resy] — no "${mealLabel}" section and Notify detected`);
+            return null;
+          }
         }
       }
 
