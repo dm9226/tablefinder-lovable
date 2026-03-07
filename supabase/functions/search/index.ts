@@ -1587,21 +1587,10 @@ async function verifyAvailability(
   firecrawlKey: string,
   amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
-  // Keep latency bounded, but ensure platform diversity in the verification set.
-  const limited = selectCandidatesForVerification(candidates, 24);
-  const limitedCounts = limited.reduce(
-    (acc, r) => {
-      acc[r.platform] += 1;
-      return acc;
-    },
-    { resy: 0, opentable: 0, yelp: 0 }
-  );
-  console.log(
-    `Verifying (capped): total=${limited.length}, resy=${limitedCounts.resy}, ot=${limitedCounts.opentable}, yelp=${limitedCounts.yelp}`
-  );
+  if (candidates.length === 0) return [];
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency)
-  const checked = await Promise.all(limited.map(async (r) => {
+  const checked = await Promise.all(candidates.map(async (r) => {
     try {
       const isYelp = r.platform === "yelp";
 
