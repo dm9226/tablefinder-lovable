@@ -1742,10 +1742,19 @@ async function verifyAvailability(
 
       // Collect all found times and check if any fall within the window
       const foundTimes: { time: string; minutes: number }[] = [];
+      const seenTimes = new Set<string>(); // for deduplication
 
       // 12-hour format matches
       let match12;
       while ((match12 = timeSlotRegex12.exec(markdown)) !== null) {
+        // A. Context check: skip times near "notify", "sold out", "waitlist"
+        const ctxStart = Math.max(0, match12.index - 60);
+        const ctxEnd = Math.min(markdown.length, match12.index + match12[0].length + 60);
+        const context = markdown.substring(ctxStart, ctxEnd).toLowerCase();
+        if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) {
+          continue;
+        }
+
         const rawH = parseInt(match12[1]);
         const m = parseInt(match12[2]);
         const ampm = match12[3].toLowerCase();
@@ -1756,6 +1765,11 @@ async function verifyAvailability(
         const displayH = h24 % 12 || 12;
         const displayAmpm = h24 >= 12 ? "PM" : "AM";
         const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${displayAmpm}`;
+
+        // B. Deduplicate
+        if (seenTimes.has(formatted)) continue;
+        seenTimes.add(formatted);
+
         foundTimes.push({ time: formatted, minutes: totalMin });
       }
 
@@ -1763,26 +1777,45 @@ async function verifyAvailability(
       if (foundTimes.length === 0 && hasBookingAction) {
         let match24;
         while ((match24 = timeSlotRegex24.exec(markdown)) !== null) {
+          const ctxStart = Math.max(0, match24.index - 60);
+          const ctxEnd = Math.min(markdown.length, match24.index + match24[0].length + 60);
+          const context = markdown.substring(ctxStart, ctxEnd).toLowerCase();
+          if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) {
+            continue;
+          }
+
           const [hStr, mStr] = match24[1].split(":");
           const totalMin = parseInt(hStr) * 60 + parseInt(mStr);
-          // Skip common non-time numbers (years, prices, etc.)
-          if (totalMin >= 360 && totalMin <= 1380) { // 6:00 AM to 11:00 PM
+          if (totalMin >= 360 && totalMin <= 1380) {
             const displayH = parseInt(hStr) % 12 || 12;
             const displayAmpm = parseInt(hStr) >= 12 ? "PM" : "AM";
-            foundTimes.push({ time: `${displayH}:${mStr} ${displayAmpm}`, minutes: totalMin });
+            const formatted = `${displayH}:${mStr} ${displayAmpm}`;
+            if (seenTimes.has(formatted)) continue;
+            seenTimes.add(formatted);
+            foundTimes.push({ time: formatted, minutes: totalMin });
           }
         }
       }
 
-      // Filter times to those within the meal window
-      const matchingTimes = foundTimes.filter((t) =>
+      // C. Filter times to those within the meal window
+      let matchingTimes = foundTimes.filter((t) =>
         t.minutes >= windowStart && t.minutes <= windowEnd
       );
 
+      // D. Sort by proximity to requested time, keep closest 5
+      const [reqHour, reqMin] = params.time.split(":").map(Number);
+      const requestedMinutes = reqHour * 60 + (reqMin || 0);
+      matchingTimes.sort((a, b) =>
+        Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes)
+      );
+      matchingTimes = matchingTimes.slice(0, 5);
+
+      // E. Re-sort chronologically for display
+      matchingTimes.sort((a, b) => a.minutes - b.minutes);
+
       if (matchingTimes.length > 0) {
-        // Update the restaurant's timeSlots with verified times
         r.timeSlots = matchingTimes.map((t) => ({ time: t.time }));
-        console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} ${mealLabel} slots (${windowStart/60|0}:${(windowStart%60).toString().padStart(2,"0")}–${windowEnd/60|0}:${(windowEnd%60).toString().padStart(2,"0")})`);
+        console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} ${mealLabel} slots (${windowStart/60|0}:${(windowStart%60).toString().padStart(2,"0")}–${windowEnd/60|0}:${(windowEnd%60).toString().padStart(2,"0")}): ${matchingTimes.map(t => t.time).join(", ")}`);
         return r;
       }
 
