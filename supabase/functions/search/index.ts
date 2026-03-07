@@ -261,16 +261,33 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
-    // Step 1: Parse user query (caching DISABLED for testing)
-    // TODO: Re-enable parse cache and search cache when testing is complete
-    const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+    // Step 1: Parse user query (with parse cache)
+    const parseCacheKey = normalizeQueryForParseCacheKey(query, location);
+    const parseCacheHash = simpleHash(parseCacheKey);
+    let params: SearchParams;
+    const cachedParse = await getCachedParse(parseCacheHash);
+    if (cachedParse) {
+      console.log("Parse cache HIT");
+      params = cachedParse;
+    } else {
+      params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+      setCachedParse(parseCacheHash, query, location, params); // fire-and-forget
+    }
     console.log("Parsed params:", JSON.stringify(params));
 
     // Build cache key from normalized params
     const cacheKey = buildCacheKey(params);
 
-    // Cache-only mode: DISABLED for testing — always return empty so frontend does fresh search
+    // Cache-only mode: return cached results if fresh enough
     if (cacheOnly) {
+      const cached = await getCachedResults(cacheKey);
+      if (cached) {
+        console.log(`Search cache HIT (age=${Math.round(cached.age / 1000)}s)`);
+        return new Response(
+          JSON.stringify({ results: cached.results, params, cached: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
       return new Response(
         JSON.stringify({ results: [], params, cached: false }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
