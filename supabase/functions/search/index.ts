@@ -124,6 +124,18 @@ interface Restaurant {
   _addressCity?: string; // transient: city from extracted address
 }
 
+// ─── Provider Adapter Interface ───
+interface ApiKeys {
+  firecrawlKey: string;
+  yelpKey?: string;
+}
+
+interface ProviderAdapter {
+  platform: "resy" | "opentable" | "yelp";
+  discover(params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
+  verify(candidates: Restaurant[], params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
+}
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -294,7 +306,7 @@ serve(async (req) => {
       );
     }
 
-    // Step 2: Discover candidates from all platforms in parallel
+    // Step 2: Discover candidates from all platforms via adapters
     if (!YELP_API_KEY) {
       console.warn("YELP_API_KEY missing — skipping Yelp");
     }
@@ -305,25 +317,31 @@ serve(async (req) => {
       console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
     }
 
-    const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
-      searchFirecrawl(params, FIRECRAWL_API_KEY, "resy", amenityTerms),
-      searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable", amenityTerms),
-      YELP_API_KEY
-        ? fetchYelpCandidates(params, YELP_API_KEY, amenityTerms)
-        : Promise.resolve([] as Restaurant[]),
-    ]);
+    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, yelpKey: YELP_API_KEY };
+    const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter];
+    if (YELP_API_KEY) adapters.push(yelpAdapter);
 
-    // Normalize Firecrawl results into Restaurant objects
-    const resyRaw = normalizeCandidates("resy", resyCandidates, params);
-    const otRaw = normalizeCandidates("opentable", otCandidates, params);
+    const discovered = await Promise.all(
+      adapters.map(a => a.discover(params, keys, amenityTerms))
+    );
+    const allCandidates = dedupeByName(discovered.flat());
 
-    const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates]);
-    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, deduped: ${allCandidates.length}`);
+    // Log counts per platform
+    const platformCounts = adapters.map((a, i) => `${a.platform}: ${discovered[i].length}`);
+    console.log(`Candidates — ${platformCounts.join(", ")}, deduped: ${allCandidates.length}`);
 
+    // Step 3: Select candidates with round-robin balance, then verify per-adapter
+    const selected = selectCandidatesForVerification(allCandidates, 24);
+    const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
+    console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
-    // Step 3: UNIFIED VERIFICATION GATE
-    const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY, amenityTerms);
-    console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
+    const verified = (await Promise.all(
+      adapters.map(a => a.verify(
+        selected.filter(c => c.platform === a.platform),
+        params, keys, amenityTerms
+      ))
+    )).flat();
+    console.log(`Verified available: ${verified.length}/${selected.length}`);
 
     // Step 3.5: Batch geocode non-Yelp results using extracted addresses
     await geocodeVerifiedResults(verified, params);
@@ -1569,21 +1587,10 @@ async function verifyAvailability(
   firecrawlKey: string,
   amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
-  // Keep latency bounded, but ensure platform diversity in the verification set.
-  const limited = selectCandidatesForVerification(candidates, 24);
-  const limitedCounts = limited.reduce(
-    (acc, r) => {
-      acc[r.platform] += 1;
-      return acc;
-    },
-    { resy: 0, opentable: 0, yelp: 0 }
-  );
-  console.log(
-    `Verifying (capped): total=${limited.length}, resy=${limitedCounts.resy}, ot=${limitedCounts.opentable}, yelp=${limitedCounts.yelp}`
-  );
+  if (candidates.length === 0) return [];
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency)
-  const checked = await Promise.all(limited.map(async (r) => {
+  const checked = await Promise.all(candidates.map(async (r) => {
     try {
       const isYelp = r.platform === "yelp";
 
@@ -2057,3 +2064,38 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number): numb
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
+
+// ─── Provider Adapters ───
+
+const resyAdapter: ProviderAdapter = {
+  platform: "resy",
+  async discover(params, keys, amenityTerms) {
+    const raw = await searchFirecrawl(params, keys.firecrawlKey, "resy", amenityTerms);
+    return normalizeCandidates("resy", raw, params);
+  },
+  async verify(candidates, params, keys, amenityTerms) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+  },
+};
+
+const opentableAdapter: ProviderAdapter = {
+  platform: "opentable",
+  async discover(params, keys, amenityTerms) {
+    const raw = await searchFirecrawl(params, keys.firecrawlKey, "opentable", amenityTerms);
+    return normalizeCandidates("opentable", raw, params);
+  },
+  async verify(candidates, params, keys, amenityTerms) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+  },
+};
+
+const yelpAdapter: ProviderAdapter = {
+  platform: "yelp",
+  async discover(params, keys, amenityTerms) {
+    if (!keys.yelpKey) return [];
+    return fetchYelpCandidates(params, keys.yelpKey, amenityTerms);
+  },
+  async verify(candidates, params, keys, amenityTerms) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+  },
+};
