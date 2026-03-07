@@ -5,31 +5,15 @@ import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
-const SESSION_KEY = "tablefinder_results";
-const SESSION_META_KEY = "tablefinder_meta";
-
 const Index = () => {
-  const [results, setResults] = useState<Restaurant[]>(() => {
-    try {
-      const saved = sessionStorage.getItem(SESSION_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
+  const [results, setResults] = useState<Restaurant[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hasSearched, setHasSearched] = useState(() => {
-    try { return !!sessionStorage.getItem(SESSION_KEY); } catch { return false; }
-  });
+  const [hasSearched, setHasSearched] = useState(false);
   const [location, setLocation] = useState<string | null>(null);
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [searchMeta, setSearchMeta] = useState<SearchMeta | null>(() => {
-    try {
-      const saved = sessionStorage.getItem(SESSION_META_KEY);
-      return saved ? JSON.parse(saved) : null;
-    } catch { return null; }
-  });
+  const [searchMeta, setSearchMeta] = useState<SearchMeta | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // Auto-detect location on mount
