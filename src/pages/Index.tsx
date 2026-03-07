@@ -169,7 +169,7 @@ const Index = () => {
       </header>
 
       {/* Search */}
-      <section className="px-4 pb-10">
+      <section className="px-4 pb-3">
         <SearchBar
           onSearch={handleSearch}
           isLoading={isLoading}
