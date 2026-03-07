@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { SearchBar } from "@/components/SearchBar";
 import { ResultsGrid } from "@/components/ResultsGrid";
-import { Restaurant } from "@/types/restaurant";
+import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
