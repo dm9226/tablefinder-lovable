@@ -1715,10 +1715,42 @@ async function verifyAvailability(
         return null;
       }
 
+      // ── STRATEGY 1: Use structured extracted availableTimes if present ──
+      const structuredTimes: string[] = (jsonData?.availableTimes || []).filter(
+        (t: unknown) => typeof t === "string" && t.length > 0
+      );
+
+      // ── Strip non-booking sections from markdown for regex fallback ──
+      // Remove "Need to Know", "Hours of Operation", "About", etc. sections
+      let bookingMarkdown = markdown;
+      const sectionCutMarkers = [
+        "need to know", "hours of operation", "dining style", "about the restaurant",
+        "about this restaurant", "cross street", "additional info", "special features",
+        "neighborhood", "cuisines", "booked .* times today",
+      ];
+      for (const marker of sectionCutMarkers) {
+        const markerRegex = new RegExp(`(?:^|\\n)#+?\\s*${marker}|(?:^|\\n)\\*\\*${marker}`, "im");
+        const idx = bookingMarkdown.search(markerRegex);
+        if (idx > 200) { // Only cut if there's enough content before
+          bookingMarkdown = bookingMarkdown.substring(0, idx);
+        }
+      }
+
+      // For Resy: also detect "Notify" / "NotifyAll" as a global no-availability signal
+      if (r.platform === "resy") {
+        const notifyPatterns = /\bnotify\s*(me)?\s*(all\s*times?)?\b/i;
+        const hasNotify = notifyPatterns.test(markdown);
+        const hasBookableSlot = /\b(book|reserve|select\s+time|choose\s+time)\b/i.test(bookingMarkdown);
+        if (hasNotify && !hasBookableSlot && structuredTimes.length === 0) {
+          console.log(`✗ ${r.name} [resy] — notify-only page, no bookable slots`);
+          return null;
+        }
+      }
+
       // Extract all time slots from the page
       const timeSlotRegex12 = /\b(\d{1,2}):(\d{2})\s?(am|pm)\b/gi;
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
-      const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(markdown);
+      const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
       const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
 
       // Determine meal window from requested time
