@@ -91,6 +91,10 @@ const Index = () => {
         if (controller.signal.aborted) return;
 
         if (!cacheFnError && cacheData?.cached && cacheData.results?.length > 0) {
+          // Store search meta from cached response
+          if (cacheData.params) {
+            setSearchMeta(cacheData.params as SearchMeta);
+          }
           // Show cached results immediately
           setResults(cacheData.results);
           sessionStorage.setItem(SESSION_KEY, JSON.stringify(cacheData.results));
