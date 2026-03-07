@@ -100,6 +100,7 @@ const Index = () => {
           // Store search meta from cached response
           if (cacheData.params) {
             setSearchMeta(cacheData.params as SearchMeta);
+            sessionStorage.setItem(SESSION_META_KEY, JSON.stringify(cacheData.params));
           }
           // Show cached results immediately
           setResults(cacheData.results);
