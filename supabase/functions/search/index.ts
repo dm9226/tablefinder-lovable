@@ -1565,26 +1565,30 @@ async function verifyAvailability(
     try {
       const isYelp = r.platform === "yelp";
 
-      const scrapeFormats: string[] = isYelp ? ["markdown"] : ["markdown", "extract"];
+      const isResy = r.platform === "resy";
+      const isOT = r.platform === "opentable";
+      // Resy: markdown-only (predictable structure, no LLM needed)
+      // OpenTable: markdown + extract (benefits from LLM extraction)
+      // Yelp: markdown-only
+      const scrapeFormats: string[] = isOT ? ["markdown", "extract"] : ["markdown"];
 
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: scrapeFormats,
         onlyMainContent: true,
-        waitFor: isYelp ? 2000 : 1500, // Wait for booking widgets to render
+        // No waitFor — Firecrawl default rendering is sufficient
       };
-      if (!isYelp) {
+      if (isOT) {
         scrapePayload.extract = {
           schema: {
             type: "object",
             properties: {
               address: { type: "string", description: "Full street address including street number, street name, city, state, and zip code" },
-              availableTimes: { type: "array", items: { type: "string" }, description: "List of bookable/reservable time slots shown on the page (e.g. '7:00 PM', '8:30 PM'). Only include times that can actually be clicked to book, NOT times behind a Notify button or sold-out times." },
-              notifyOnly: { type: "boolean", description: "True if the page only shows a Notify button or all times are sold out with no bookable slots" },
+              availableTimes: { type: "array", items: { type: "string" }, description: "List of bookable/reservable time slots shown on the page (e.g. '7:00 PM', '8:30 PM'). Only include times that can actually be clicked to book." },
               noAvailability: { type: "boolean", description: "True if the page shows no availability or no tables available for this date/party size" },
             },
           },
-          prompt: "Extract the restaurant's address and availability info. For availableTimes, ONLY include times that have a clickable Book/Reserve button. Do NOT include times that show 'Notify' or 'Sold Out'. Set notifyOnly=true if the only option is a Notify button. Set noAvailability=true if there are no bookable time slots at all.",
+          prompt: "Extract the restaurant's address and available booking times. For availableTimes, ONLY include times from the reservation/booking widget that can be clicked to book. IGNORE times mentioned in 'Need to Know', 'About', 'Hours of Operation', or descriptive text sections.",
         };
       }
 
