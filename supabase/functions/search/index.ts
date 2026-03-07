@@ -444,39 +444,61 @@ Return JSON:
 
 User query: "${query}"`;
 
-  const aiResp = await fetch(AI_GATEWAY, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "google/gemini-2.5-flash-lite",
-      messages: [{ role: "user", content: parsePrompt }],
-      tools: [{
-        type: "function",
-        function: {
-          name: "extract_search_params",
-          description: "Extract structured restaurant search parameters",
-           parameters: {
-            type: "object",
-            properties: {
-              cuisine: { type: "string" }, 
-              cuisineType: { type: "string", description: "Broad restaurant category (e.g. seafood, italian, japanese). Empty if none." },
-              dishKeyword: { type: "string", description: "Specific dish or ingredient (e.g. oysters, sushi, steak). Empty if none." },
-              date: { type: "string" },
-              time: { type: "string" }, partySize: { type: "number" },
-              city: { type: "string" }, state: { type: "string" },
-              zipCode: { type: "string" },
-            },
-            required: ["cuisine", "cuisineType", "dishKeyword", "date", "time", "partySize", "city", "state"],
-            additionalProperties: false,
+  const requestBody = {
+    model: "google/gemini-2.5-flash-lite",
+    messages: [{ role: "user", content: parsePrompt }],
+    tools: [{
+      type: "function",
+      function: {
+        name: "extract_search_params",
+        description: "Extract structured restaurant search parameters",
+         parameters: {
+          type: "object",
+          properties: {
+            cuisine: { type: "string" }, 
+            cuisineType: { type: "string", description: "Broad restaurant category (e.g. seafood, italian, japanese). Empty if none." },
+            dishKeyword: { type: "string", description: "Specific dish or ingredient (e.g. oysters, sushi, steak). Empty if none." },
+            date: { type: "string" },
+            time: { type: "string" }, partySize: { type: "number" },
+            city: { type: "string" }, state: { type: "string" },
+            zipCode: { type: "string" },
           },
+          required: ["cuisine", "cuisineType", "dishKeyword", "date", "time", "partySize", "city", "state"],
+          additionalProperties: false,
         },
-      }],
-      tool_choice: { type: "function", function: { name: "extract_search_params" } },
-    }),
+      },
+    }],
+    tool_choice: { type: "function", function: { name: "extract_search_params" } },
+  };
+  const aiHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+
+  let aiResp = await fetch(AI_GATEWAY, {
+    method: "POST",
+    headers: aiHeaders,
+    body: JSON.stringify(requestBody),
   });
 
   if (!aiResp.ok) throw new Error("Failed to parse search query");
-  const aiData = await aiResp.json();
+  let respText = await aiResp.text();
+
+  // Retry once if AI gateway returned empty/truncated response
+  if (!respText || respText.length < 10) {
+    console.warn("AI gateway returned empty response, retrying once...");
+    const retryResp = await fetch(AI_GATEWAY, {
+      method: "POST",
+      headers: aiHeaders,
+      body: JSON.stringify(requestBody),
+    });
+    if (!retryResp.ok) throw new Error("Search temporarily unavailable. Please try again.");
+    respText = await retryResp.text();
+    if (!respText || respText.length < 10) {
+      throw new Error("Search temporarily unavailable. Please try again.");
+    }
+  }
+
+  let aiData;
+  try { aiData = JSON.parse(respText); }
+  catch { throw new Error("Search temporarily unavailable. Please try again."); }
   const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
   if (!toolCall) throw new Error("Failed to parse search query");
 
