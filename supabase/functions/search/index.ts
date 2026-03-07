@@ -1790,55 +1790,84 @@ async function verifyAvailability(
       const foundTimes: { time: string; minutes: number }[] = [];
       const seenTimes = new Set<string>(); // for deduplication
 
-      // 12-hour format matches
-      let match12;
-      while ((match12 = timeSlotRegex12.exec(markdown)) !== null) {
-        // A. Context check: skip times near "notify", "sold out", "waitlist"
-        const ctxStart = Math.max(0, match12.index - 60);
-        const ctxEnd = Math.min(markdown.length, match12.index + match12[0].length + 60);
-        const context = markdown.substring(ctxStart, ctxEnd).toLowerCase();
-        if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) {
-          continue;
-        }
-
-        const rawH = parseInt(match12[1]);
-        const m = parseInt(match12[2]);
-        const ampm = match12[3].toLowerCase();
+      // Helper: parse a time string like "7:00 PM" into { time, minutes }
+      const parseTimeStr = (raw: string): { time: string; minutes: number } | null => {
+        const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+        if (!m12) return null;
+        const rawH = parseInt(m12[1]);
+        const mins = parseInt(m12[2]);
+        const ampm = m12[3].toLowerCase();
         let h24 = rawH;
         if (ampm === "pm" && rawH !== 12) h24 += 12;
         if (ampm === "am" && rawH === 12) h24 = 0;
-        const totalMin = h24 * 60 + m;
+        const totalMin = h24 * 60 + mins;
         const displayH = h24 % 12 || 12;
         const displayAmpm = h24 >= 12 ? "PM" : "AM";
-        const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${displayAmpm}`;
+        const formatted = `${displayH}:${mins.toString().padStart(2, "0")} ${displayAmpm}`;
+        return { time: formatted, minutes: totalMin };
+      };
 
-        // B. Deduplicate
-        if (seenTimes.has(formatted)) continue;
-        seenTimes.add(formatted);
-
-        foundTimes.push({ time: formatted, minutes: totalMin });
+      // ── STRATEGY 1: Use structured extracted times first ──
+      if (structuredTimes.length > 0) {
+        console.log(`  ${r.name}: structured extraction returned ${structuredTimes.length} times: ${structuredTimes.join(", ")}`);
+        for (const st of structuredTimes) {
+          const parsed = parseTimeStr(st);
+          if (parsed && !seenTimes.has(parsed.time)) {
+            seenTimes.add(parsed.time);
+            foundTimes.push(parsed);
+          }
+        }
       }
 
-      // If no 12h times found but 24h times + booking action exist, try 24h
-      if (foundTimes.length === 0 && hasBookingAction) {
-        let match24;
-        while ((match24 = timeSlotRegex24.exec(markdown)) !== null) {
-          const ctxStart = Math.max(0, match24.index - 60);
-          const ctxEnd = Math.min(markdown.length, match24.index + match24[0].length + 60);
-          const context = markdown.substring(ctxStart, ctxEnd).toLowerCase();
+      // ── STRATEGY 2: Regex fallback on cleaned booking markdown ──
+      if (foundTimes.length === 0) {
+        let match12;
+        while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
+          // Context check: skip times near "notify", "sold out", "waitlist"
+          const ctxStart = Math.max(0, match12.index - 60);
+          const ctxEnd = Math.min(bookingMarkdown.length, match12.index + match12[0].length + 60);
+          const context = bookingMarkdown.substring(ctxStart, ctxEnd).toLowerCase();
           if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) {
             continue;
           }
 
-          const [hStr, mStr] = match24[1].split(":");
-          const totalMin = parseInt(hStr) * 60 + parseInt(mStr);
-          if (totalMin >= 360 && totalMin <= 1380) {
-            const displayH = parseInt(hStr) % 12 || 12;
-            const displayAmpm = parseInt(hStr) >= 12 ? "PM" : "AM";
-            const formatted = `${displayH}:${mStr} ${displayAmpm}`;
-            if (seenTimes.has(formatted)) continue;
-            seenTimes.add(formatted);
-            foundTimes.push({ time: formatted, minutes: totalMin });
+          const rawH = parseInt(match12[1]);
+          const m = parseInt(match12[2]);
+          const ampm = match12[3].toLowerCase();
+          let h24 = rawH;
+          if (ampm === "pm" && rawH !== 12) h24 += 12;
+          if (ampm === "am" && rawH === 12) h24 = 0;
+          const totalMin = h24 * 60 + m;
+          const displayH = h24 % 12 || 12;
+          const displayAmpm = h24 >= 12 ? "PM" : "AM";
+          const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${displayAmpm}`;
+
+          if (seenTimes.has(formatted)) continue;
+          seenTimes.add(formatted);
+          foundTimes.push({ time: formatted, minutes: totalMin });
+        }
+
+        // If no 12h times found but 24h times + booking action exist, try 24h
+        if (foundTimes.length === 0 && hasBookingAction) {
+          let match24;
+          while ((match24 = timeSlotRegex24.exec(bookingMarkdown)) !== null) {
+            const ctxStart = Math.max(0, match24.index - 60);
+            const ctxEnd = Math.min(bookingMarkdown.length, match24.index + match24[0].length + 60);
+            const context = bookingMarkdown.substring(ctxStart, ctxEnd).toLowerCase();
+            if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) {
+              continue;
+            }
+
+            const [hStr, mStr] = match24[1].split(":");
+            const totalMin = parseInt(hStr) * 60 + parseInt(mStr);
+            if (totalMin >= 360 && totalMin <= 1380) {
+              const displayH = parseInt(hStr) % 12 || 12;
+              const displayAmpm = parseInt(hStr) >= 12 ? "PM" : "AM";
+              const formatted = `${displayH}:${mStr} ${displayAmpm}`;
+              if (seenTimes.has(formatted)) continue;
+              seenTimes.add(formatted);
+              foundTimes.push({ time: formatted, minutes: totalMin });
+            }
           }
         }
       }
