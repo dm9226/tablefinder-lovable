@@ -193,6 +193,7 @@ const Index = () => {
           error={error}
           hasSearched={hasSearched}
           onCancel={cancelSearch}
+          searchMeta={searchMeta}
         />
       </section>
 
