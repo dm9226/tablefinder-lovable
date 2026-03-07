@@ -50,28 +50,32 @@ export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearch
 
   return (
     <div className="w-full max-w-2xl mx-auto px-4">
-      {/* Search meta summary */}
+      {/* Search meta summary — always visible after search */}
       {searchMeta && (
         <p className="text-xs text-muted-foreground font-body mb-1.5 px-4">
           {formatSearchMeta(searchMeta)}
         </p>
       )}
-      <div className="flex items-center justify-between mb-2 px-4">
-        <p className="text-xs text-muted-foreground font-body">
-          {results.length} result{results.length !== 1 ? "s" : ""}
-        </p>
-        {isRefreshing && (
-          <div className="flex items-center gap-1.5 text-xs text-primary font-body animate-pulse">
-            <RefreshCw className="h-3 w-3 animate-spin" />
-            Updating results…
+      {results.length > 0 && (
+        <>
+          <div className="flex items-center justify-between mb-2 px-4">
+            <p className="text-xs text-muted-foreground font-body">
+              {results.length} result{results.length !== 1 ? "s" : ""}
+            </p>
+            {isRefreshing && (
+              <div className="flex items-center gap-1.5 text-xs text-primary font-body animate-pulse">
+                <RefreshCw className="h-3 w-3 animate-spin" />
+                Updating results…
+              </div>
+            )}
           </div>
-        )}
-      </div>
-      <div className="border border-border rounded-lg overflow-hidden bg-card">
-        {results.map((r) => (
-          <RestaurantCard key={r.id} restaurant={r} />
-        ))}
-      </div>
+          <div className="border border-border rounded-lg overflow-hidden bg-card">
+            {results.map((r) => (
+              <RestaurantCard key={r.id} restaurant={r} />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

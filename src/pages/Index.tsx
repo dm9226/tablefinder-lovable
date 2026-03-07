@@ -6,6 +6,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
 const SESSION_KEY = "tablefinder_results";
+const SESSION_META_KEY = "tablefinder_meta";
 
 const Index = () => {
   const [results, setResults] = useState<Restaurant[]>(() => {
@@ -23,7 +24,12 @@ const Index = () => {
   const [location, setLocation] = useState<string | null>(null);
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [searchMeta, setSearchMeta] = useState<SearchMeta | null>(null);
+  const [searchMeta, setSearchMeta] = useState<SearchMeta | null>(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_META_KEY);
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
   const abortRef = useRef<AbortController | null>(null);
 
   // Auto-detect location on mount
@@ -94,6 +100,7 @@ const Index = () => {
           // Store search meta from cached response
           if (cacheData.params) {
             setSearchMeta(cacheData.params as SearchMeta);
+            sessionStorage.setItem(SESSION_META_KEY, JSON.stringify(cacheData.params));
           }
           // Show cached results immediately
           setResults(cacheData.results);
@@ -116,7 +123,10 @@ const Index = () => {
               const freshResults = freshData.results;
               setResults(freshResults);
               sessionStorage.setItem(SESSION_KEY, JSON.stringify(freshResults));
-              if (freshData.params) setSearchMeta(freshData.params as SearchMeta);
+              if (freshData.params) {
+                setSearchMeta(freshData.params as SearchMeta);
+                sessionStorage.setItem(SESSION_META_KEY, JSON.stringify(freshData.params));
+              }
             }
           } catch (err) {
             if (controller.signal.aborted) return;
@@ -148,7 +158,10 @@ const Index = () => {
         const newResults = data?.results || [];
         setResults(newResults);
         sessionStorage.setItem(SESSION_KEY, JSON.stringify(newResults));
-        if (data?.params) setSearchMeta(data.params as SearchMeta);
+        if (data?.params) {
+          setSearchMeta(data.params as SearchMeta);
+          sessionStorage.setItem(SESSION_META_KEY, JSON.stringify(data.params));
+        }
       } catch (err: any) {
         if (controller.signal.aborted) return;
         console.error("Search error:", err);

@@ -1554,15 +1554,21 @@ async function verifyAvailability(
         url: r.platformUrl,
         formats: scrapeFormats,
         onlyMainContent: true,
+        waitFor: isYelp ? 2000 : 1500, // Wait for booking widgets to render
       };
       if (!isYelp) {
         scrapePayload.extract = {
-          prompt: "Extract the restaurant's full street address including street number, street name, city, state, and zip code. Return as { \"address\": \"full street address\" } or { \"address\": null } if not found.",
+          schema: {
+            type: "object",
+            properties: {
+              address: { type: "string", description: "Full street address including street number, street name, city, state, and zip code" },
+              availableTimes: { type: "array", items: { type: "string" }, description: "List of bookable/reservable time slots shown on the page (e.g. '7:00 PM', '8:30 PM'). Only include times that can actually be clicked to book, NOT times behind a Notify button or sold-out times." },
+              notifyOnly: { type: "boolean", description: "True if the page only shows a Notify button or all times are sold out with no bookable slots" },
+              noAvailability: { type: "boolean", description: "True if the page shows no availability or no tables available for this date/party size" },
+            },
+          },
+          prompt: "Extract the restaurant's address and availability info. For availableTimes, ONLY include times that have a clickable Book/Reserve button. Do NOT include times that show 'Notify' or 'Sold Out'. Set notifyOnly=true if the only option is a Notify button. Set noAvailability=true if there are no bookable time slots at all.",
         };
-      }
-      if (isYelp) {
-        // Yelp reservation widgets are more JS-heavy; short wait improves extraction without large latency hit.
-        scrapePayload.waitFor = 2000;
       }
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -1587,18 +1593,26 @@ async function verifyAvailability(
         return null;
       }
 
-      // Extract street address from Firecrawl JSON extraction (for geocoding later)
+      // Extract structured data from Firecrawl JSON extraction
+      const jsonData = data?.data?.extract || data?.extract;
+      
       if (r.platform !== "yelp" && !r._address) {
-        const jsonData = data?.data?.extract || data?.extract;
         const extractedAddr = jsonData?.address;
         if (extractedAddr && typeof extractedAddr === "string" && extractedAddr.length > 5) {
           r._address = extractedAddr;
-          // Try to parse city from address (e.g. "123 Main St, Atlanta, GA 30309" → "Atlanta")
           const cityMatch = extractedAddr.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
           r._addressCity = cityMatch ? cityMatch[1].trim() : undefined;
           console.log(`  Address extracted (JSON) for ${r.name}: ${extractedAddr}`);
         } else {
           console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+        }
+      }
+
+      // Check structured extraction for no-availability / notify-only signals
+      if (jsonData && r.platform !== "yelp") {
+        if (jsonData.noAvailability === true || jsonData.notifyOnly === true) {
+          console.log(`✗ ${r.name} [${r.platform}] — structured extraction: noAvailability=${jsonData.noAvailability}, notifyOnly=${jsonData.notifyOnly}`);
+          return null;
         }
       }
 
@@ -1701,10 +1715,42 @@ async function verifyAvailability(
         return null;
       }
 
+      // ── STRATEGY 1: Use structured extracted availableTimes if present ──
+      const structuredTimes: string[] = (jsonData?.availableTimes || []).filter(
+        (t: unknown) => typeof t === "string" && t.length > 0
+      );
+
+      // ── Strip non-booking sections from markdown for regex fallback ──
+      // Remove "Need to Know", "Hours of Operation", "About", etc. sections
+      let bookingMarkdown = markdown;
+      const sectionCutMarkers = [
+        "need to know", "hours of operation", "dining style", "about the restaurant",
+        "about this restaurant", "cross street", "additional info", "special features",
+        "neighborhood", "cuisines", "booked .* times today",
+      ];
+      for (const marker of sectionCutMarkers) {
+        const markerRegex = new RegExp(`(?:^|\\n)#+?\\s*${marker}|(?:^|\\n)\\*\\*${marker}`, "im");
+        const idx = bookingMarkdown.search(markerRegex);
+        if (idx > 200) { // Only cut if there's enough content before
+          bookingMarkdown = bookingMarkdown.substring(0, idx);
+        }
+      }
+
+      // For Resy: also detect "Notify" / "NotifyAll" as a global no-availability signal
+      if (r.platform === "resy") {
+        const notifyPatterns = /\bnotify\s*(me)?\s*(all\s*times?)?\b/i;
+        const hasNotify = notifyPatterns.test(markdown);
+        const hasBookableSlot = /\b(book|reserve|select\s+time|choose\s+time)\b/i.test(bookingMarkdown);
+        if (hasNotify && !hasBookableSlot && structuredTimes.length === 0) {
+          console.log(`✗ ${r.name} [resy] — notify-only page, no bookable slots`);
+          return null;
+        }
+      }
+
       // Extract all time slots from the page
       const timeSlotRegex12 = /\b(\d{1,2}):(\d{2})\s?(am|pm)\b/gi;
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
-      const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(markdown);
+      const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
       const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
 
       // Determine meal window from requested time
@@ -1744,55 +1790,84 @@ async function verifyAvailability(
       const foundTimes: { time: string; minutes: number }[] = [];
       const seenTimes = new Set<string>(); // for deduplication
 
-      // 12-hour format matches
-      let match12;
-      while ((match12 = timeSlotRegex12.exec(markdown)) !== null) {
-        // A. Context check: skip times near "notify", "sold out", "waitlist"
-        const ctxStart = Math.max(0, match12.index - 60);
-        const ctxEnd = Math.min(markdown.length, match12.index + match12[0].length + 60);
-        const context = markdown.substring(ctxStart, ctxEnd).toLowerCase();
-        if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) {
-          continue;
-        }
-
-        const rawH = parseInt(match12[1]);
-        const m = parseInt(match12[2]);
-        const ampm = match12[3].toLowerCase();
+      // Helper: parse a time string like "7:00 PM" into { time, minutes }
+      const parseTimeStr = (raw: string): { time: string; minutes: number } | null => {
+        const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+        if (!m12) return null;
+        const rawH = parseInt(m12[1]);
+        const mins = parseInt(m12[2]);
+        const ampm = m12[3].toLowerCase();
         let h24 = rawH;
         if (ampm === "pm" && rawH !== 12) h24 += 12;
         if (ampm === "am" && rawH === 12) h24 = 0;
-        const totalMin = h24 * 60 + m;
+        const totalMin = h24 * 60 + mins;
         const displayH = h24 % 12 || 12;
         const displayAmpm = h24 >= 12 ? "PM" : "AM";
-        const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${displayAmpm}`;
+        const formatted = `${displayH}:${mins.toString().padStart(2, "0")} ${displayAmpm}`;
+        return { time: formatted, minutes: totalMin };
+      };
 
-        // B. Deduplicate
-        if (seenTimes.has(formatted)) continue;
-        seenTimes.add(formatted);
-
-        foundTimes.push({ time: formatted, minutes: totalMin });
+      // ── STRATEGY 1: Use structured extracted times first ──
+      if (structuredTimes.length > 0) {
+        console.log(`  ${r.name}: structured extraction returned ${structuredTimes.length} times: ${structuredTimes.join(", ")}`);
+        for (const st of structuredTimes) {
+          const parsed = parseTimeStr(st);
+          if (parsed && !seenTimes.has(parsed.time)) {
+            seenTimes.add(parsed.time);
+            foundTimes.push(parsed);
+          }
+        }
       }
 
-      // If no 12h times found but 24h times + booking action exist, try 24h
-      if (foundTimes.length === 0 && hasBookingAction) {
-        let match24;
-        while ((match24 = timeSlotRegex24.exec(markdown)) !== null) {
-          const ctxStart = Math.max(0, match24.index - 60);
-          const ctxEnd = Math.min(markdown.length, match24.index + match24[0].length + 60);
-          const context = markdown.substring(ctxStart, ctxEnd).toLowerCase();
+      // ── STRATEGY 2: Regex fallback on cleaned booking markdown ──
+      if (foundTimes.length === 0) {
+        let match12;
+        while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
+          // Context check: skip times near "notify", "sold out", "waitlist"
+          const ctxStart = Math.max(0, match12.index - 60);
+          const ctxEnd = Math.min(bookingMarkdown.length, match12.index + match12[0].length + 60);
+          const context = bookingMarkdown.substring(ctxStart, ctxEnd).toLowerCase();
           if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) {
             continue;
           }
 
-          const [hStr, mStr] = match24[1].split(":");
-          const totalMin = parseInt(hStr) * 60 + parseInt(mStr);
-          if (totalMin >= 360 && totalMin <= 1380) {
-            const displayH = parseInt(hStr) % 12 || 12;
-            const displayAmpm = parseInt(hStr) >= 12 ? "PM" : "AM";
-            const formatted = `${displayH}:${mStr} ${displayAmpm}`;
-            if (seenTimes.has(formatted)) continue;
-            seenTimes.add(formatted);
-            foundTimes.push({ time: formatted, minutes: totalMin });
+          const rawH = parseInt(match12[1]);
+          const m = parseInt(match12[2]);
+          const ampm = match12[3].toLowerCase();
+          let h24 = rawH;
+          if (ampm === "pm" && rawH !== 12) h24 += 12;
+          if (ampm === "am" && rawH === 12) h24 = 0;
+          const totalMin = h24 * 60 + m;
+          const displayH = h24 % 12 || 12;
+          const displayAmpm = h24 >= 12 ? "PM" : "AM";
+          const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${displayAmpm}`;
+
+          if (seenTimes.has(formatted)) continue;
+          seenTimes.add(formatted);
+          foundTimes.push({ time: formatted, minutes: totalMin });
+        }
+
+        // If no 12h times found but 24h times + booking action exist, try 24h
+        if (foundTimes.length === 0 && hasBookingAction) {
+          let match24;
+          while ((match24 = timeSlotRegex24.exec(bookingMarkdown)) !== null) {
+            const ctxStart = Math.max(0, match24.index - 60);
+            const ctxEnd = Math.min(bookingMarkdown.length, match24.index + match24[0].length + 60);
+            const context = bookingMarkdown.substring(ctxStart, ctxEnd).toLowerCase();
+            if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) {
+              continue;
+            }
+
+            const [hStr, mStr] = match24[1].split(":");
+            const totalMin = parseInt(hStr) * 60 + parseInt(mStr);
+            if (totalMin >= 360 && totalMin <= 1380) {
+              const displayH = parseInt(hStr) % 12 || 12;
+              const displayAmpm = parseInt(hStr) >= 12 ? "PM" : "AM";
+              const formatted = `${displayH}:${mStr} ${displayAmpm}`;
+              if (seenTimes.has(formatted)) continue;
+              seenTimes.add(formatted);
+              foundTimes.push({ time: formatted, minutes: totalMin });
+            }
           }
         }
       }
