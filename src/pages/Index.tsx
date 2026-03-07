@@ -116,6 +116,7 @@ const Index = () => {
               const freshResults = freshData.results;
               setResults(freshResults);
               sessionStorage.setItem(SESSION_KEY, JSON.stringify(freshResults));
+              if (freshData.params) setSearchMeta(freshData.params as SearchMeta);
             }
           } catch (err) {
             if (controller.signal.aborted) return;
