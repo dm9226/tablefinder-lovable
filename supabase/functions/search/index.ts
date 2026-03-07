@@ -144,7 +144,7 @@ serve(async (req) => {
   }
 
   try {
-    const { query, lat, lng, location, cacheOnly } = await req.json();
+    const { query, lat, lng, location } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
     const YELP_API_KEY = Deno.env.get("YELP_API_KEY");
@@ -152,38 +152,9 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
-    // Step 1: Parse user query (with parse cache)
-    const parseCacheKey = normalizeQueryForParseCacheKey(query, location);
-    const parseCacheHash = simpleHash(parseCacheKey);
-    let params: SearchParams;
-    const cachedParse = await getCachedParse(parseCacheHash);
-    if (cachedParse) {
-      console.log("Parse cache HIT");
-      params = cachedParse;
-    } else {
-      params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
-      setCachedParse(parseCacheHash, query, location, params); // fire-and-forget
-    }
+    // Step 1: Parse user query (always fresh)
+    const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
     console.log("Parsed params:", JSON.stringify(params));
-
-    // Build cache key from normalized params
-    const cacheKey = buildCacheKey(params);
-
-    // Cache-only mode: return cached results if fresh enough
-    if (cacheOnly) {
-      const cached = await getCachedResults(cacheKey);
-      if (cached) {
-        console.log(`Search cache HIT (age=${Math.round(cached.age / 1000)}s)`);
-        return new Response(
-          JSON.stringify({ results: cached.results, params, cached: true }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-      return new Response(
-        JSON.stringify({ results: [], params, cached: false }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
 
     // Step 2: Discover candidates from all platforms via adapters
     if (!YELP_API_KEY) {
