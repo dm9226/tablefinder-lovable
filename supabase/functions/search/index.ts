@@ -1593,18 +1593,26 @@ async function verifyAvailability(
         return null;
       }
 
-      // Extract street address from Firecrawl JSON extraction (for geocoding later)
+      // Extract structured data from Firecrawl JSON extraction
+      const jsonData = data?.data?.extract || data?.extract;
+      
       if (r.platform !== "yelp" && !r._address) {
-        const jsonData = data?.data?.extract || data?.extract;
         const extractedAddr = jsonData?.address;
         if (extractedAddr && typeof extractedAddr === "string" && extractedAddr.length > 5) {
           r._address = extractedAddr;
-          // Try to parse city from address (e.g. "123 Main St, Atlanta, GA 30309" → "Atlanta")
           const cityMatch = extractedAddr.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
           r._addressCity = cityMatch ? cityMatch[1].trim() : undefined;
           console.log(`  Address extracted (JSON) for ${r.name}: ${extractedAddr}`);
         } else {
           console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+        }
+      }
+
+      // Check structured extraction for no-availability / notify-only signals
+      if (jsonData && r.platform !== "yelp") {
+        if (jsonData.noAvailability === true || jsonData.notifyOnly === true) {
+          console.log(`✗ ${r.name} [${r.platform}] — structured extraction: noAvailability=${jsonData.noAvailability}, notifyOnly=${jsonData.notifyOnly}`);
+          return null;
         }
       }
 
