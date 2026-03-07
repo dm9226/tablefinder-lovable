@@ -2064,3 +2064,38 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number): numb
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
+
+// ─── Provider Adapters ───
+
+const resyAdapter: ProviderAdapter = {
+  platform: "resy",
+  async discover(params, keys, amenityTerms) {
+    const raw = await searchFirecrawl(params, keys.firecrawlKey, "resy", amenityTerms);
+    return normalizeCandidates("resy", raw, params);
+  },
+  async verify(candidates, params, keys, amenityTerms) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+  },
+};
+
+const opentableAdapter: ProviderAdapter = {
+  platform: "opentable",
+  async discover(params, keys, amenityTerms) {
+    const raw = await searchFirecrawl(params, keys.firecrawlKey, "opentable", amenityTerms);
+    return normalizeCandidates("opentable", raw, params);
+  },
+  async verify(candidates, params, keys, amenityTerms) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+  },
+};
+
+const yelpAdapter: ProviderAdapter = {
+  platform: "yelp",
+  async discover(params, keys, amenityTerms) {
+    if (!keys.yelpKey) return [];
+    return fetchYelpCandidates(params, keys.yelpKey, amenityTerms);
+  },
+  async verify(candidates, params, keys, amenityTerms) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+  },
+};
