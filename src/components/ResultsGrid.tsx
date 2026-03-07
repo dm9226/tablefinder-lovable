@@ -1,6 +1,6 @@
-import { Restaurant } from "@/types/restaurant";
+import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { RestaurantCard } from "./RestaurantCard";
-import { SearchX, RefreshCw } from "lucide-react";
+import { SearchX, RefreshCw, CalendarDays, Clock, Users, MapPin } from "lucide-react";
 import { SearchProgress } from "./SearchProgress";
 
 interface ResultsGridProps {
@@ -10,9 +10,20 @@ interface ResultsGridProps {
   error: string | null;
   hasSearched: boolean;
   onCancel: () => void;
+  searchMeta?: SearchMeta | null;
 }
 
-export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearched, onCancel }: ResultsGridProps) {
+function formatSearchMeta(meta: SearchMeta): string {
+  const parts: string[] = [];
+  if (meta.date) parts.push(meta.date);
+  if (meta.time) parts.push(meta.time);
+  if (meta.partySize) parts.push(`${meta.partySize} guest${meta.partySize !== 1 ? "s" : ""}`);
+  const loc = [meta.city, meta.state].filter(Boolean).join(", ");
+  if (loc) parts.push(loc);
+  return parts.join(" · ");
+}
+
+export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearched, onCancel, searchMeta }: ResultsGridProps) {
   if (isLoading) {
     return <SearchProgress onCancel={onCancel} />;
   }
@@ -39,6 +50,12 @@ export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearch
 
   return (
     <div className="w-full max-w-2xl mx-auto px-4">
+      {/* Search meta summary */}
+      {searchMeta && (
+        <p className="text-xs text-muted-foreground font-body mb-1.5 px-4">
+          {formatSearchMeta(searchMeta)}
+        </p>
+      )}
       <div className="flex items-center justify-between mb-2 px-4">
         <p className="text-xs text-muted-foreground font-body">
           {results.length} result{results.length !== 1 ? "s" : ""}

@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { SearchBar } from "@/components/SearchBar";
 import { ResultsGrid } from "@/components/ResultsGrid";
-import { Restaurant } from "@/types/restaurant";
+import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
@@ -23,6 +23,7 @@ const Index = () => {
   const [location, setLocation] = useState<string | null>(null);
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [searchMeta, setSearchMeta] = useState<SearchMeta | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // Auto-detect location on mount
@@ -90,6 +91,10 @@ const Index = () => {
         if (controller.signal.aborted) return;
 
         if (!cacheFnError && cacheData?.cached && cacheData.results?.length > 0) {
+          // Store search meta from cached response
+          if (cacheData.params) {
+            setSearchMeta(cacheData.params as SearchMeta);
+          }
           // Show cached results immediately
           setResults(cacheData.results);
           sessionStorage.setItem(SESSION_KEY, JSON.stringify(cacheData.results));
@@ -111,6 +116,7 @@ const Index = () => {
               const freshResults = freshData.results;
               setResults(freshResults);
               sessionStorage.setItem(SESSION_KEY, JSON.stringify(freshResults));
+              if (freshData.params) setSearchMeta(freshData.params as SearchMeta);
             }
           } catch (err) {
             if (controller.signal.aborted) return;
@@ -142,6 +148,7 @@ const Index = () => {
         const newResults = data?.results || [];
         setResults(newResults);
         sessionStorage.setItem(SESSION_KEY, JSON.stringify(newResults));
+        if (data?.params) setSearchMeta(data.params as SearchMeta);
       } catch (err: any) {
         if (controller.signal.aborted) return;
         console.error("Search error:", err);
@@ -158,7 +165,7 @@ const Index = () => {
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
-      <header className="pt-16 pb-10 px-4 text-center">
+      <header className="pt-6 pb-3 px-4 text-center">
         <h1 className="font-heading text-4xl md:text-5xl font-bold text-foreground mb-2 tracking-tight">
           Table<span className="text-primary">Finder</span>
         </h1>
@@ -168,7 +175,7 @@ const Index = () => {
       </header>
 
       {/* Search */}
-      <section className="px-4 pb-10">
+      <section className="px-4 pb-3">
         <SearchBar
           onSearch={handleSearch}
           isLoading={isLoading}
@@ -186,6 +193,7 @@ const Index = () => {
           error={error}
           hasSearched={hasSearched}
           onCancel={cancelSearch}
+          searchMeta={searchMeta}
         />
       </section>
 
