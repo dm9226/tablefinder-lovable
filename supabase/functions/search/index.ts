@@ -1779,10 +1779,50 @@ async function verifyAvailability(
         }
       }
 
+      // Determine meal window from requested time
+      const [reqH] = params.time.split(":").map(Number);
+      let windowStart: number;
+      let windowEnd: number;
+      let mealLabel: string;
+
+      if (reqH < 10) {
+        windowStart = 360;
+        windowEnd = 720;
+        mealLabel = "breakfast";
+      } else if (reqH < 12) {
+        windowStart = 630;
+        windowEnd = 900;
+        mealLabel = "brunch";
+      } else if (reqH < 16) {
+        windowStart = 660;
+        windowEnd = 960;
+        mealLabel = "lunch";
+      } else {
+        windowStart = 1080;
+        windowEnd = 1439;
+        mealLabel = "dinner";
+      }
+
+      const foundTimes: { time: string; minutes: number }[] = [];
+      const seenTimes = new Set<string>();
+
+      const parseTimeStr = (raw: string): { time: string; minutes: number } | null => {
+        const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+        if (!m12) return null;
+        const rawH = parseInt(m12[1]);
+        const mins = parseInt(m12[2]);
+        const ampm = m12[3].toLowerCase();
+        let h24 = rawH;
+        if (ampm === "pm" && rawH !== 12) h24 += 12;
+        if (ampm === "am" && rawH === 12) h24 = 0;
+        const totalMin = h24 * 60 + mins;
+        const displayH = h24 % 12 || 12;
+        const displayAmpm = h24 >= 12 ? "PM" : "AM";
+        const formatted = `${displayH}:${mins.toString().padStart(2, "0")} ${displayAmpm}`;
+        return { time: formatted, minutes: totalMin };
+      };
+
       // ── RESY-SPECIFIC: Parse meal section from markdown directly ──
-      // Resy pages have predictable structure: ## dinner / ## lunch sections
-      // with time slots listed as "6:00 PM\n\nDining Room" lines.
-      // If "Notify" appears in the meal section, ALL times there are notify-only.
       if (isResy) {
         const mealSectionRegex = new RegExp(
           `## (?:${mealLabel}|all day)([\\s\\S]*?)(?=##|$)`, "i"
@@ -1798,7 +1838,6 @@ async function verifyAvailability(
             return null;
           }
           
-          // Extract times ONLY from the meal section (not from Need to Know etc.)
           const resyTimeRegex = /\b(\d{1,2}):(\d{2})\s*(am|pm)\b/gi;
           let resyMatch;
           while ((resyMatch = resyTimeRegex.exec(mealSection)) !== null) {
@@ -1816,7 +1855,6 @@ async function verifyAvailability(
             return null;
           }
         } else {
-          // No meal section found — check for general Notify
           if (/\bnotify\b/i.test(markdown)) {
             console.log(`✗ ${r.name} [resy] — no "${mealLabel}" section and Notify detected`);
             return null;
@@ -1829,60 +1867,6 @@ async function verifyAvailability(
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
       const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
-
-      // Determine meal window from requested time
-      const [reqH] = params.time.split(":").map(Number);
-      // Meal windows (in minutes from midnight):
-      // Breakfast: 6:00 AM (360) — 12:00 PM (720)
-      // Brunch:   10:30 AM (630) — 3:00 PM (900)
-      // Lunch:    11:00 AM (660) — 4:00 PM (960)
-      // Dinner:    4:00 PM (960) — 11:59 PM (1439)
-      let windowStart: number;
-      let windowEnd: number;
-      let mealLabel: string;
-
-      if (reqH < 10) {
-        // Breakfast window
-        windowStart = 360;  // 6:00 AM
-        windowEnd = 720;    // 12:00 PM
-        mealLabel = "breakfast";
-      } else if (reqH < 12) {
-        // Brunch window
-        windowStart = 630;  // 10:30 AM
-        windowEnd = 900;    // 3:00 PM
-        mealLabel = "brunch";
-      } else if (reqH < 16) {
-        // Lunch window
-        windowStart = 660;  // 11:00 AM
-        windowEnd = 960;    // 4:00 PM
-        mealLabel = "lunch";
-      } else {
-        // Dinner window
-        windowStart = 1080; // 6:00 PM
-        windowEnd = 1439;   // 11:59 PM
-        mealLabel = "dinner";
-      }
-
-      // Collect all found times and check if any fall within the window
-      const foundTimes: { time: string; minutes: number }[] = [];
-      const seenTimes = new Set<string>(); // for deduplication
-
-      // Helper: parse a time string like "7:00 PM" into { time, minutes }
-      const parseTimeStr = (raw: string): { time: string; minutes: number } | null => {
-        const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
-        if (!m12) return null;
-        const rawH = parseInt(m12[1]);
-        const mins = parseInt(m12[2]);
-        const ampm = m12[3].toLowerCase();
-        let h24 = rawH;
-        if (ampm === "pm" && rawH !== 12) h24 += 12;
-        if (ampm === "am" && rawH === 12) h24 = 0;
-        const totalMin = h24 * 60 + mins;
-        const displayH = h24 % 12 || 12;
-        const displayAmpm = h24 >= 12 ? "PM" : "AM";
-        const formatted = `${displayH}:${mins.toString().padStart(2, "0")} ${displayAmpm}`;
-        return { time: formatted, minutes: totalMin };
-      };
 
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
       // ── STRATEGY 2: For OT, use structured extracted times first ──
