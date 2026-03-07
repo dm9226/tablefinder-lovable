@@ -306,7 +306,7 @@ serve(async (req) => {
       );
     }
 
-    // Step 2: Discover candidates from all platforms in parallel
+    // Step 2: Discover candidates from all platforms via adapters
     if (!YELP_API_KEY) {
       console.warn("YELP_API_KEY missing — skipping Yelp");
     }
@@ -317,25 +317,31 @@ serve(async (req) => {
       console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
     }
 
-    const [resyCandidates, otCandidates, yelpCandidates] = await Promise.all([
-      searchFirecrawl(params, FIRECRAWL_API_KEY, "resy", amenityTerms),
-      searchFirecrawl(params, FIRECRAWL_API_KEY, "opentable", amenityTerms),
-      YELP_API_KEY
-        ? fetchYelpCandidates(params, YELP_API_KEY, amenityTerms)
-        : Promise.resolve([] as Restaurant[]),
-    ]);
+    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, yelpKey: YELP_API_KEY };
+    const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter];
+    if (YELP_API_KEY) adapters.push(yelpAdapter);
 
-    // Normalize Firecrawl results into Restaurant objects
-    const resyRaw = normalizeCandidates("resy", resyCandidates, params);
-    const otRaw = normalizeCandidates("opentable", otCandidates, params);
+    const discovered = await Promise.all(
+      adapters.map(a => a.discover(params, keys, amenityTerms))
+    );
+    const allCandidates = dedupeByName(discovered.flat());
 
-    const allCandidates = dedupeByName([...resyRaw, ...otRaw, ...yelpCandidates]);
-    console.log(`Candidates — Resy: ${resyRaw.length}, OT: ${otRaw.length}, Yelp: ${yelpCandidates.length}, deduped: ${allCandidates.length}`);
+    // Log counts per platform
+    const platformCounts = adapters.map((a, i) => `${a.platform}: ${discovered[i].length}`);
+    console.log(`Candidates — ${platformCounts.join(", ")}, deduped: ${allCandidates.length}`);
 
+    // Step 3: Select candidates with round-robin balance, then verify per-adapter
+    const selected = selectCandidatesForVerification(allCandidates, 24);
+    const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
+    console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
-    // Step 3: UNIFIED VERIFICATION GATE
-    const verified = await verifyAvailability(allCandidates, params, FIRECRAWL_API_KEY, amenityTerms);
-    console.log(`Verified available: ${verified.length}/${allCandidates.length}`);
+    const verified = (await Promise.all(
+      adapters.map(a => a.verify(
+        selected.filter(c => c.platform === a.platform),
+        params, keys, amenityTerms
+      ))
+    )).flat();
+    console.log(`Verified available: ${verified.length}/${selected.length}`);
 
     // Step 3.5: Batch geocode non-Yelp results using extracted addresses
     await geocodeVerifiedResults(verified, params);
