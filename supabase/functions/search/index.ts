@@ -1867,48 +1867,6 @@ async function verifyAvailability(
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
       const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
-        
-        if (mealMatch) {
-          const mealSection = mealMatch[1];
-          const hasNotify = /\bnotify\b/i.test(mealSection);
-          
-          if (hasNotify) {
-            console.log(`✗ ${r.name} [resy] — "${mealLabel}" section contains Notify marker, rejecting`);
-            return null;
-          }
-          
-          // Extract times ONLY from the meal section (not from Need to Know etc.)
-          const resyTimeRegex = /\b(\d{1,2}):(\d{2})\s*(am|pm)\b/gi;
-          let resyMatch;
-          while ((resyMatch = resyTimeRegex.exec(mealSection)) !== null) {
-            const parsed = parseTimeStr(resyMatch[0]);
-            if (parsed && !seenTimes.has(parsed.time)) {
-              seenTimes.add(parsed.time);
-              foundTimes.push(parsed);
-            }
-          }
-          
-          if (foundTimes.length > 0) {
-            console.log(`  ${r.name} [resy]: extracted ${foundTimes.length} times from "${mealLabel}" section: ${foundTimes.map(t=>t.time).join(", ")}`);
-          } else {
-            console.log(`✗ ${r.name} [resy] — no times in "${mealLabel}" section`);
-            return null;
-          }
-        } else {
-          // No meal section found — check for general Notify
-          if (/\bnotify\b/i.test(markdown)) {
-            console.log(`✗ ${r.name} [resy] — no "${mealLabel}" section and Notify detected`);
-            return null;
-          }
-        }
-      }
-
-      // Extract all time slots from the page
-      const timeSlotRegex12 = /\b(\d{1,2}):(\d{2})\s?(am|pm)\b/gi;
-      const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
-      const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
-      const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
-
 
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
       // ── STRATEGY 2: For OT, use structured extracted times first ──
