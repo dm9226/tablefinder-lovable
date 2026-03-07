@@ -127,7 +127,7 @@ const Index = () => {
         <ResultsGrid
           results={results}
           isLoading={isLoading}
-          isRefreshing={isRefreshing}
+          isRefreshing={false}
           error={error}
           hasSearched={hasSearched}
           onCancel={cancelSearch}
