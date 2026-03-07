@@ -6,6 +6,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
 const SESSION_KEY = "tablefinder_results";
+const SESSION_META_KEY = "tablefinder_meta";
 
 const Index = () => {
   const [results, setResults] = useState<Restaurant[]>(() => {
