@@ -123,7 +123,10 @@ const Index = () => {
               const freshResults = freshData.results;
               setResults(freshResults);
               sessionStorage.setItem(SESSION_KEY, JSON.stringify(freshResults));
-              if (freshData.params) setSearchMeta(freshData.params as SearchMeta);
+              if (freshData.params) {
+                setSearchMeta(freshData.params as SearchMeta);
+                sessionStorage.setItem(SESSION_META_KEY, JSON.stringify(freshData.params));
+              }
             }
           } catch (err) {
             if (controller.signal.aborted) return;
