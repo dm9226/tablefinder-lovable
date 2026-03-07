@@ -136,128 +136,7 @@ interface ProviderAdapter {
   verify(candidates: Restaurant[], params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
 }
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
-const PARSE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-function normalizeQueryForParseCacheKey(query: string, location: string | undefined): string {
-  // Normalize: lowercase, collapse whitespace, trim, include location hint
-  const norm = (query || "").toLowerCase().replace(/\s+/g, " ").trim();
-  const loc = (location || "").toLowerCase().replace(/\s+/g, " ").trim();
-  return `${norm}|${loc}`;
-}
-
-function simpleHash(str: string): string {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) { h = (h << 5) - h + str.charCodeAt(i); h |= 0; }
-  return Math.abs(h).toString(36);
-}
-
-async function getCachedParse(queryHash: string): Promise<SearchParams | null> {
-  try {
-    const resp = await fetch(
-      `${SUPABASE_URL}/rest/v1/parse_cache?query_hash=eq.${encodeURIComponent(queryHash)}&select=parsed_params,created_at&limit=1`,
-      {
-        headers: {
-          apikey: SUPABASE_SERVICE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-        },
-      }
-    );
-    if (!resp.ok) { await resp.text(); return null; }
-    const rows = await resp.json();
-    if (!rows || rows.length === 0) return null;
-    const row = rows[0];
-    const age = Date.now() - new Date(row.created_at).getTime();
-    if (age > PARSE_CACHE_TTL_MS) return null;
-    return row.parsed_params as SearchParams;
-  } catch (e) {
-    console.error("Parse cache read error:", e);
-    return null;
-  }
-}
-
-async function setCachedParse(queryHash: string, queryText: string, location: string | undefined, params: SearchParams): Promise<void> {
-  try {
-    await fetch(`${SUPABASE_URL}/rest/v1/parse_cache`, {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_SERVICE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "resolution=merge-duplicates",
-      },
-      body: JSON.stringify({
-        query_hash: queryHash,
-        query_text: queryText,
-        parsed_params: params,
-        location_hint: location || null,
-      }),
-    });
-  } catch (e) {
-    console.error("Parse cache write error:", e);
-  }
-}
-
-function buildCacheKey(params: SearchParams): string {
-  const parts = [
-    (params.city || "").toLowerCase().trim(),
-    (params.state || "").toLowerCase().trim(),
-    (params.cuisine || "").toLowerCase().trim(),
-    params.date,
-    params.time,
-    String(params.partySize),
-  ];
-  return parts.join("|");
-}
-
-async function getCachedResults(cacheKey: string): Promise<{ results: Restaurant[]; age: number } | null> {
-  try {
-    const resp = await fetch(
-      `${SUPABASE_URL}/rest/v1/search_cache?cache_key=eq.${encodeURIComponent(cacheKey)}&select=results,updated_at&limit=1`,
-      {
-        headers: {
-          apikey: SUPABASE_SERVICE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-        },
-      }
-    );
-    if (!resp.ok) return null;
-    const rows = await resp.json();
-    if (!rows || rows.length === 0) return null;
-    const row = rows[0];
-    const age = Date.now() - new Date(row.updated_at).getTime();
-    if (age > CACHE_TTL_MS) return null; // stale beyond TTL
-    return { results: row.results || [], age };
-  } catch (e) {
-    console.error("Cache read error:", e);
-    return null;
-  }
-}
-
-async function setCachedResults(cacheKey: string, queryText: string, params: SearchParams, results: Restaurant[]): Promise<void> {
-  try {
-    await fetch(`${SUPABASE_URL}/rest/v1/search_cache`, {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_SERVICE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "resolution=merge-duplicates",
-      },
-      body: JSON.stringify({
-        cache_key: cacheKey,
-        query_text: queryText,
-        parsed_params: params,
-        results,
-        updated_at: new Date().toISOString(),
-      }),
-    });
-  } catch (e) {
-    console.error("Cache write error:", e);
-  }
-}
+// Caching removed — all searches are fresh
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -265,7 +144,7 @@ serve(async (req) => {
   }
 
   try {
-    const { query, lat, lng, location, cacheOnly } = await req.json();
+    const { query, lat, lng, location } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
     const YELP_API_KEY = Deno.env.get("YELP_API_KEY");
@@ -273,38 +152,9 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
-    // Step 1: Parse user query (with parse cache)
-    const parseCacheKey = normalizeQueryForParseCacheKey(query, location);
-    const parseCacheHash = simpleHash(parseCacheKey);
-    let params: SearchParams;
-    const cachedParse = await getCachedParse(parseCacheHash);
-    if (cachedParse) {
-      console.log("Parse cache HIT");
-      params = cachedParse;
-    } else {
-      params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
-      setCachedParse(parseCacheHash, query, location, params); // fire-and-forget
-    }
+    // Step 1: Parse user query (always fresh)
+    const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
     console.log("Parsed params:", JSON.stringify(params));
-
-    // Build cache key from normalized params
-    const cacheKey = buildCacheKey(params);
-
-    // Cache-only mode: return cached results if fresh enough
-    if (cacheOnly) {
-      const cached = await getCachedResults(cacheKey);
-      if (cached) {
-        console.log(`Search cache HIT (age=${Math.round(cached.age / 1000)}s)`);
-        return new Response(
-          JSON.stringify({ results: cached.results, params, cached: true }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-      return new Response(
-        JSON.stringify({ results: [], params, cached: false }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
 
     // Step 2: Discover candidates from all platforms via adapters
     if (!YELP_API_KEY) {
@@ -349,9 +199,6 @@ serve(async (req) => {
     // Step 4: Enrich with AI (ratings, cuisine, neighborhood, description, vibeTags)
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
 
-    // Step 5: Cache results
-    setCachedResults(cacheKey, query, params, enriched); // fire-and-forget
-    console.log(`Cache write — ${enriched.length} results`);
     // Clean transient fields before returning
     const finalResults = cleanTransientFields(enriched);
 
