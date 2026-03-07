@@ -124,6 +124,18 @@ interface Restaurant {
   _addressCity?: string; // transient: city from extracted address
 }
 
+// ─── Provider Adapter Interface ───
+interface ApiKeys {
+  firecrawlKey: string;
+  yelpKey?: string;
+}
+
+interface ProviderAdapter {
+  platform: "resy" | "opentable" | "yelp";
+  discover(params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
+  verify(candidates: Restaurant[], params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
+}
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
