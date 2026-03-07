@@ -261,16 +261,33 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
-    // Step 1: Parse user query (caching DISABLED for testing)
-    // TODO: Re-enable parse cache and search cache when testing is complete
-    const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+    // Step 1: Parse user query (with parse cache)
+    const parseCacheKey = normalizeQueryForParseCacheKey(query, location);
+    const parseCacheHash = simpleHash(parseCacheKey);
+    let params: SearchParams;
+    const cachedParse = await getCachedParse(parseCacheHash);
+    if (cachedParse) {
+      console.log("Parse cache HIT");
+      params = cachedParse;
+    } else {
+      params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+      setCachedParse(parseCacheHash, query, location, params); // fire-and-forget
+    }
     console.log("Parsed params:", JSON.stringify(params));
 
     // Build cache key from normalized params
     const cacheKey = buildCacheKey(params);
 
-    // Cache-only mode: DISABLED for testing — always return empty so frontend does fresh search
+    // Cache-only mode: return cached results if fresh enough
     if (cacheOnly) {
+      const cached = await getCachedResults(cacheKey);
+      if (cached) {
+        console.log(`Search cache HIT (age=${Math.round(cached.age / 1000)}s)`);
+        return new Response(
+          JSON.stringify({ results: cached.results, params, cached: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
       return new Response(
         JSON.stringify({ results: [], params, cached: false }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -314,9 +331,9 @@ serve(async (req) => {
     // Step 4: Enrich with AI (ratings, cuisine, neighborhood, description, vibeTags)
     const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
 
-    // Step 5: Cache write DISABLED for testing
-    // await setCachedResults(cacheKey, query, params, enriched);
-    console.log(`Cache write SKIPPED (testing mode) — ${enriched.length} results`);
+    // Step 5: Cache results
+    setCachedResults(cacheKey, query, params, enriched); // fire-and-forget
+    console.log(`Cache write — ${enriched.length} results`);
     // Clean transient fields before returning
     const finalResults = cleanTransientFields(enriched);
 
@@ -1548,26 +1565,30 @@ async function verifyAvailability(
     try {
       const isYelp = r.platform === "yelp";
 
-      const scrapeFormats: string[] = isYelp ? ["markdown"] : ["markdown", "extract"];
+      const isResy = r.platform === "resy";
+      const isOT = r.platform === "opentable";
+      // Resy: markdown-only (predictable structure, no LLM needed)
+      // OpenTable: markdown + extract (benefits from LLM extraction)
+      // Yelp: markdown-only
+      const scrapeFormats: string[] = isOT ? ["markdown", "extract"] : ["markdown"];
 
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: scrapeFormats,
         onlyMainContent: true,
-        waitFor: isYelp ? 2000 : 1500, // Wait for booking widgets to render
+        // No waitFor — Firecrawl default rendering is sufficient
       };
-      if (!isYelp) {
+      if (isOT) {
         scrapePayload.extract = {
           schema: {
             type: "object",
             properties: {
               address: { type: "string", description: "Full street address including street number, street name, city, state, and zip code" },
-              availableTimes: { type: "array", items: { type: "string" }, description: "List of bookable/reservable time slots shown on the page (e.g. '7:00 PM', '8:30 PM'). Only include times that can actually be clicked to book, NOT times behind a Notify button or sold-out times." },
-              notifyOnly: { type: "boolean", description: "True if the page only shows a Notify button or all times are sold out with no bookable slots" },
+              availableTimes: { type: "array", items: { type: "string" }, description: "List of bookable/reservable time slots shown on the page (e.g. '7:00 PM', '8:30 PM'). Only include times that can actually be clicked to book." },
               noAvailability: { type: "boolean", description: "True if the page shows no availability or no tables available for this date/party size" },
             },
           },
-          prompt: "Extract the restaurant's address and availability info. For availableTimes, ONLY include times that have a clickable Book/Reserve button. Do NOT include times that show 'Notify' or 'Sold Out'. Set notifyOnly=true if the only option is a Notify button. Set noAvailability=true if there are no bookable time slots at all.",
+          prompt: "Extract the restaurant's address and available booking times. For availableTimes, ONLY include times from the reservation/booking widget that can be clicked to book. IGNORE times mentioned in 'Need to Know', 'About', 'Hours of Operation', or descriptive text sections.",
         };
       }
 
@@ -1608,10 +1629,10 @@ async function verifyAvailability(
         }
       }
 
-      // Check structured extraction for no-availability / notify-only signals
-      if (jsonData && r.platform !== "yelp") {
-        if (jsonData.noAvailability === true || jsonData.notifyOnly === true) {
-          console.log(`✗ ${r.name} [${r.platform}] — structured extraction: noAvailability=${jsonData.noAvailability}, notifyOnly=${jsonData.notifyOnly}`);
+      // Check structured extraction for no-availability signals (OT only now)
+      if (jsonData && isOT) {
+        if (jsonData.noAvailability === true) {
+          console.log(`✗ ${r.name} [opentable] — structured extraction: noAvailability`);
           return null;
         }
       }
@@ -1736,14 +1757,48 @@ async function verifyAvailability(
         }
       }
 
-      // For Resy: also detect "Notify" / "NotifyAll" as a global no-availability signal
-      if (r.platform === "resy") {
-        const notifyPatterns = /\bnotify\s*(me)?\s*(all\s*times?)?\b/i;
-        const hasNotify = notifyPatterns.test(markdown);
-        const hasBookableSlot = /\b(book|reserve|select\s+time|choose\s+time)\b/i.test(bookingMarkdown);
-        if (hasNotify && !hasBookableSlot && structuredTimes.length === 0) {
-          console.log(`✗ ${r.name} [resy] — notify-only page, no bookable slots`);
-          return null;
+      // ── RESY-SPECIFIC: Parse meal section from markdown directly ──
+      // Resy pages have predictable structure: ## dinner / ## lunch sections
+      // with time slots listed as "6:00 PM\n\nDining Room" lines.
+      // If "Notify" appears in the meal section, ALL times there are notify-only.
+      if (isResy) {
+        const mealSectionRegex = new RegExp(
+          `## (?:${mealLabel}|all day)([\\s\\S]*?)(?=##|$)`, "i"
+        );
+        const mealMatch = markdown.match(mealSectionRegex);
+        
+        if (mealMatch) {
+          const mealSection = mealMatch[1];
+          const hasNotify = /\bnotify\b/i.test(mealSection);
+          
+          if (hasNotify) {
+            console.log(`✗ ${r.name} [resy] — "${mealLabel}" section contains Notify marker, rejecting`);
+            return null;
+          }
+          
+          // Extract times ONLY from the meal section (not from Need to Know etc.)
+          const resyTimeRegex = /\b(\d{1,2}):(\d{2})\s*(am|pm)\b/gi;
+          let resyMatch;
+          while ((resyMatch = resyTimeRegex.exec(mealSection)) !== null) {
+            const parsed = parseTimeStr(resyMatch[0]);
+            if (parsed && !seenTimes.has(parsed.time)) {
+              seenTimes.add(parsed.time);
+              foundTimes.push(parsed);
+            }
+          }
+          
+          if (foundTimes.length > 0) {
+            console.log(`  ${r.name} [resy]: extracted ${foundTimes.length} times from "${mealLabel}" section: ${foundTimes.map(t=>t.time).join(", ")}`);
+          } else {
+            console.log(`✗ ${r.name} [resy] — no times in "${mealLabel}" section`);
+            return null;
+          }
+        } else {
+          // No meal section found — check for general Notify
+          if (/\bnotify\b/i.test(markdown)) {
+            console.log(`✗ ${r.name} [resy] — no "${mealLabel}" section and Notify detected`);
+            return null;
+          }
         }
       }
 
@@ -1807,8 +1862,9 @@ async function verifyAvailability(
         return { time: formatted, minutes: totalMin };
       };
 
-      // ── STRATEGY 1: Use structured extracted times first ──
-      if (structuredTimes.length > 0) {
+      // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
+      // ── STRATEGY 2: For OT, use structured extracted times first ──
+      if (!isResy && structuredTimes.length > 0) {
         console.log(`  ${r.name}: structured extraction returned ${structuredTimes.length} times: ${structuredTimes.join(", ")}`);
         for (const st of structuredTimes) {
           const parsed = parseTimeStr(st);
@@ -1819,8 +1875,8 @@ async function verifyAvailability(
         }
       }
 
-      // ── STRATEGY 2: Regex fallback on cleaned booking markdown ──
-      if (foundTimes.length === 0) {
+      // ── STRATEGY 3: Regex fallback on cleaned booking markdown (non-Resy only) ──
+      if (!isResy && foundTimes.length === 0) {
         let match12;
         while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
           // Context check: skip times near "notify", "sold out", "waitlist"
