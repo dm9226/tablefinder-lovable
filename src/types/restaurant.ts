@@ -32,6 +32,14 @@ export interface SearchParams {
   lng?: number;
 }
 
+export interface SearchMeta {
+  date: string;
+  time: string;
+  partySize: number;
+  city: string;
+  state?: string;
+}
+
 export interface SearchState {
   query: string;
   isLoading: boolean;

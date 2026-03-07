@@ -1,19 +1,10 @@
 import { Restaurant } from "@/types/restaurant";
-import { Star, MapPin, ChevronRight, Clock, Users } from "lucide-react";
-import resyLogo from "@/assets/resy_logo.png";
-import opentableLogo from "@/assets/opentable_logo.png";
-import yelpLogo from "@/assets/yelp_logo.png";
+import { Star, MapPin, ChevronRight, Clock } from "lucide-react";
 
 const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
   opentable: "bg-emerald-500/15 text-emerald-400",
   yelp: "bg-orange-500/15 text-orange-400",
-};
-
-const PLATFORM_LOGOS: Record<string, string> = {
-  resy: resyLogo,
-  opentable: opentableLogo,
-  yelp: yelpLogo,
 };
 
 interface RestaurantCardProps {
@@ -40,30 +31,6 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
       onClick={handleClick}
       className="flex gap-3 px-4 py-3.5 border-b border-border hover:bg-muted/50 transition-colors group w-full text-left"
     >
-      {/* Thumbnail */}
-      <div className="shrink-0 w-16 h-16 rounded-lg overflow-hidden bg-muted flex items-center justify-center">
-        {restaurant.imageUrl ? (
-          <img
-            src={restaurant.imageUrl}
-            alt={restaurant.name}
-            className="w-full h-full object-cover"
-            loading="lazy"
-            onError={(e) => {
-              const img = e.currentTarget;
-              img.className = "w-10 h-10 object-contain rounded";
-              img.src = PLATFORM_LOGOS[restaurant.platform] || "";
-              img.onerror = null;
-            }}
-          />
-        ) : (
-          <img
-            src={PLATFORM_LOGOS[restaurant.platform] || ""}
-            alt={restaurant.platform}
-            className="w-10 h-10 object-contain rounded"
-          />
-        )}
-      </div>
-
       {/* Content */}
       <div className="flex-1 min-w-0 flex flex-col gap-1.5">
         {/* Row 1: platform badge + name */}
@@ -130,11 +97,11 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
           </div>
         )}
 
-        {/* Time slots */}
+        {/* Time slots — max 3 */}
         {slots.length > 0 && (
           <div className="flex items-center gap-1.5 flex-wrap">
             <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-            {slots.slice(0, 6).map((slot, i) => (
+            {slots.slice(0, 3).map((slot, i) => (
               <span
                 key={i}
                 className="px-1.5 py-0.5 rounded text-[13px] font-body font-medium bg-primary/10 text-primary"
@@ -142,9 +109,9 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
                 {slot.time}
               </span>
             ))}
-            {slots.length > 6 && (
+            {slots.length > 3 && (
               <span className="text-[13px] text-muted-foreground font-body">
-                +{slots.length - 6} more
+                +{slots.length - 3} more
               </span>
             )}
           </div>

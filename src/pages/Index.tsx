@@ -23,6 +23,7 @@ const Index = () => {
   const [location, setLocation] = useState<string | null>(null);
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [searchMeta, setSearchMeta] = useState<SearchMeta | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // Auto-detect location on mount
