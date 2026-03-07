@@ -1862,8 +1862,9 @@ async function verifyAvailability(
         return { time: formatted, minutes: totalMin };
       };
 
-      // ── STRATEGY 1: Use structured extracted times first ──
-      if (structuredTimes.length > 0) {
+      // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
+      // ── STRATEGY 2: For OT, use structured extracted times first ──
+      if (!isResy && structuredTimes.length > 0) {
         console.log(`  ${r.name}: structured extraction returned ${structuredTimes.length} times: ${structuredTimes.join(", ")}`);
         for (const st of structuredTimes) {
           const parsed = parseTimeStr(st);
@@ -1874,8 +1875,8 @@ async function verifyAvailability(
         }
       }
 
-      // ── STRATEGY 2: Regex fallback on cleaned booking markdown ──
-      if (foundTimes.length === 0) {
+      // ── STRATEGY 3: Regex fallback on cleaned booking markdown (non-Resy only) ──
+      if (!isResy && foundTimes.length === 0) {
         let match12;
         while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
           // Context check: skip times near "notify", "sold out", "waitlist"
