@@ -148,6 +148,7 @@ const Index = () => {
         const newResults = data?.results || [];
         setResults(newResults);
         sessionStorage.setItem(SESSION_KEY, JSON.stringify(newResults));
+        if (data?.params) setSearchMeta(data.params as SearchMeta);
       } catch (err: any) {
         if (controller.signal.aborted) return;
         console.error("Search error:", err);
