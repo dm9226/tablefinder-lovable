@@ -48,84 +48,28 @@ const Index = () => {
   const cancelSearch = useCallback(() => {
     abortRef.current?.abort();
     setIsLoading(false);
-    setIsRefreshing(false);
     toast.info("Search cancelled");
   }, []);
 
   const handleSearch = useCallback(
     async (query: string) => {
-      // Cancel any in-flight search
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
 
       setIsLoading(true);
-      setIsRefreshing(false);
       setError(null);
       setHasSearched(true);
       setResults([]);
 
-      const searchBody = {
-        query,
-        lat: coords?.lat,
-        lng: coords?.lng,
-        location: location,
-      };
-
       try {
-        // Phase 1: Try cache-only (instant)
-        const { data: cacheData, error: cacheFnError } = await supabase.functions.invoke("search", {
-          body: { ...searchBody, cacheOnly: true },
-        });
-
-        if (controller.signal.aborted) return;
-
-        if (!cacheFnError && cacheData?.cached && cacheData.results?.length > 0) {
-          // Store search meta from cached response
-          if (cacheData.params) {
-            setSearchMeta(cacheData.params as SearchMeta);
-            sessionStorage.setItem(SESSION_META_KEY, JSON.stringify(cacheData.params));
-          }
-          // Show cached results immediately
-          setResults(cacheData.results);
-          sessionStorage.setItem(SESSION_KEY, JSON.stringify(cacheData.results));
-          setIsLoading(false);
-          setIsRefreshing(true); // show "updating" indicator
-
-          // Phase 2: Run fresh search in background
-          try {
-            const { data: freshData, error: freshFnError } = await supabase.functions.invoke("search", {
-              body: searchBody,
-            });
-
-            if (controller.signal.aborted) return;
-
-            if (freshData?.error) {
-              // Fresh search failed but we have cached results — just stop refreshing
-              console.warn("Fresh search error (cached results retained):", freshData.error);
-            } else if (!freshFnError && freshData?.results) {
-              const freshResults = freshData.results;
-              setResults(freshResults);
-              sessionStorage.setItem(SESSION_KEY, JSON.stringify(freshResults));
-              if (freshData.params) {
-                setSearchMeta(freshData.params as SearchMeta);
-                sessionStorage.setItem(SESSION_META_KEY, JSON.stringify(freshData.params));
-              }
-            }
-          } catch (err) {
-            if (controller.signal.aborted) return;
-            console.warn("Background refresh failed:", err);
-          } finally {
-            if (!controller.signal.aborted) {
-              setIsRefreshing(false);
-            }
-          }
-          return;
-        }
-
-        // No cache hit — do full search (show loading state)
         const { data, error: fnError } = await supabase.functions.invoke("search", {
-          body: searchBody,
+          body: {
+            query,
+            lat: coords?.lat,
+            lng: coords?.lng,
+            location: location,
+          },
         });
 
         if (controller.signal.aborted) return;
@@ -139,12 +83,9 @@ const Index = () => {
           throw new Error(msg);
         }
 
-        const newResults = data?.results || [];
-        setResults(newResults);
-        sessionStorage.setItem(SESSION_KEY, JSON.stringify(newResults));
+        setResults(data?.results || []);
         if (data?.params) {
           setSearchMeta(data.params as SearchMeta);
-          sessionStorage.setItem(SESSION_META_KEY, JSON.stringify(data.params));
         }
       } catch (err: any) {
         if (controller.signal.aborted) return;
