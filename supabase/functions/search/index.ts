@@ -1779,15 +1779,94 @@ async function verifyAvailability(
         }
       }
 
+      // Determine meal window from requested time
+      const [reqH] = params.time.split(":").map(Number);
+      let windowStart: number;
+      let windowEnd: number;
+      let mealLabel: string;
+
+      if (reqH < 10) {
+        windowStart = 360;
+        windowEnd = 720;
+        mealLabel = "breakfast";
+      } else if (reqH < 12) {
+        windowStart = 630;
+        windowEnd = 900;
+        mealLabel = "brunch";
+      } else if (reqH < 16) {
+        windowStart = 660;
+        windowEnd = 960;
+        mealLabel = "lunch";
+      } else {
+        windowStart = 1080;
+        windowEnd = 1439;
+        mealLabel = "dinner";
+      }
+
+      const foundTimes: { time: string; minutes: number }[] = [];
+      const seenTimes = new Set<string>();
+
+      const parseTimeStr = (raw: string): { time: string; minutes: number } | null => {
+        const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+        if (!m12) return null;
+        const rawH = parseInt(m12[1]);
+        const mins = parseInt(m12[2]);
+        const ampm = m12[3].toLowerCase();
+        let h24 = rawH;
+        if (ampm === "pm" && rawH !== 12) h24 += 12;
+        if (ampm === "am" && rawH === 12) h24 = 0;
+        const totalMin = h24 * 60 + mins;
+        const displayH = h24 % 12 || 12;
+        const displayAmpm = h24 >= 12 ? "PM" : "AM";
+        const formatted = `${displayH}:${mins.toString().padStart(2, "0")} ${displayAmpm}`;
+        return { time: formatted, minutes: totalMin };
+      };
+
       // ── RESY-SPECIFIC: Parse meal section from markdown directly ──
-      // Resy pages have predictable structure: ## dinner / ## lunch sections
-      // with time slots listed as "6:00 PM\n\nDining Room" lines.
-      // If "Notify" appears in the meal section, ALL times there are notify-only.
       if (isResy) {
         const mealSectionRegex = new RegExp(
           `## (?:${mealLabel}|all day)([\\s\\S]*?)(?=##|$)`, "i"
         );
         const mealMatch = markdown.match(mealSectionRegex);
+        
+        if (mealMatch) {
+          const mealSection = mealMatch[1];
+          const hasNotify = /\bnotify\b/i.test(mealSection);
+          
+          if (hasNotify) {
+            console.log(`✗ ${r.name} [resy] — "${mealLabel}" section contains Notify marker, rejecting`);
+            return null;
+          }
+          
+          const resyTimeRegex = /\b(\d{1,2}):(\d{2})\s*(am|pm)\b/gi;
+          let resyMatch;
+          while ((resyMatch = resyTimeRegex.exec(mealSection)) !== null) {
+            const parsed = parseTimeStr(resyMatch[0]);
+            if (parsed && !seenTimes.has(parsed.time)) {
+              seenTimes.add(parsed.time);
+              foundTimes.push(parsed);
+            }
+          }
+          
+          if (foundTimes.length > 0) {
+            console.log(`  ${r.name} [resy]: extracted ${foundTimes.length} times from "${mealLabel}" section: ${foundTimes.map(t=>t.time).join(", ")}`);
+          } else {
+            console.log(`✗ ${r.name} [resy] — no times in "${mealLabel}" section`);
+            return null;
+          }
+        } else {
+          if (/\bnotify\b/i.test(markdown)) {
+            console.log(`✗ ${r.name} [resy] — no "${mealLabel}" section and Notify detected`);
+            return null;
+          }
+        }
+      }
+
+      // Extract all time slots from the page
+      const timeSlotRegex12 = /\b(\d{1,2}):(\d{2})\s?(am|pm)\b/gi;
+      const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
+      const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
+      const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
         
         if (mealMatch) {
           const mealSection = mealMatch[1];
