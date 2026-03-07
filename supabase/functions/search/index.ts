@@ -1394,15 +1394,30 @@ const NO_AVAILABILITY_SIGNALS = [
   "temporarily unavailable",
 ];
 
+function scoreCandidateRelevance(candidate: Restaurant, params: { cuisine?: string }): number {
+  if (!params.cuisine) return 0;
+  const keywords = params.cuisine.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  if (keywords.length === 0) return 0;
+  let score = 0;
+  const name = candidate.name.toLowerCase();
+  const url = candidate.platformUrl?.toLowerCase() || "";
+  const cuisine = candidate.cuisine?.toLowerCase() || "";
+  if (keywords.some(k => name.includes(k))) score++;
+  if (keywords.some(k => url.includes(k))) score++;
+  if (keywords.some(k => cuisine.includes(k))) score++;
+  return score;
+}
+
 function selectCandidatesForVerification(
   candidates: Restaurant[],
-  maxCandidates: number
+  maxCandidates: number,
+  params: { cuisine?: string }
 ): Restaurant[] {
   const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp"];
   const buckets = {
-    resy: candidates.filter((c) => c.platform === "resy"),
-    opentable: candidates.filter((c) => c.platform === "opentable"),
-    yelp: candidates.filter((c) => c.platform === "yelp"),
+    resy: candidates.filter((c) => c.platform === "resy").sort((a, b) => scoreCandidateRelevance(b, params) - scoreCandidateRelevance(a, params)),
+    opentable: candidates.filter((c) => c.platform === "opentable").sort((a, b) => scoreCandidateRelevance(b, params) - scoreCandidateRelevance(a, params)),
+    yelp: candidates.filter((c) => c.platform === "yelp").sort((a, b) => scoreCandidateRelevance(b, params) - scoreCandidateRelevance(a, params)),
   };
 
   const cursors = { resy: 0, opentable: 0, yelp: 0 };
