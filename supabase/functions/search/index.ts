@@ -1411,24 +1411,33 @@ function selectCandidatesForVerification(
     yelp: candidates.filter((c) => c.platform === "yelp"),
   };
 
-  const cursors = { resy: 0, opentable: 0, yelp: 0 };
-  const selected: Restaurant[] = [];
-
-  while (selected.length < maxCandidates) {
-    let pushedInRound = false;
-
-    for (const platform of platformOrder) {
-      const cursor = cursors[platform];
-      const bucket = buckets[platform];
-      if (cursor < bucket.length) {
-        selected.push(bucket[cursor]);
-        cursors[platform] = cursor + 1;
-        pushedInRound = true;
-        if (selected.length >= maxCandidates) break;
-      }
+  // Proportional allocation: distribute slots based on candidate volume per platform
+  const total = candidates.length || 1;
+  const quotas: Record<string, number> = {};
+  let assigned = 0;
+  for (const platform of platformOrder) {
+    const raw = Math.round((buckets[platform].length / total) * maxCandidates);
+    // Cap quota to actual bucket size
+    quotas[platform] = Math.min(raw, buckets[platform].length);
+    assigned += quotas[platform];
+  }
+  // Distribute any remaining slots (due to rounding or capped buckets) round-robin
+  let remaining = maxCandidates - assigned;
+  for (const platform of platformOrder) {
+    if (remaining <= 0) break;
+    const canAdd = buckets[platform].length - quotas[platform];
+    if (canAdd > 0) {
+      const add = Math.min(canAdd, remaining);
+      quotas[platform] += add;
+      remaining -= add;
     }
+  }
 
-    if (!pushedInRound) break;
+  console.log(`[SELECTION] Proportional quotas: ${platformOrder.map(p => `${p}=${quotas[p]}/${buckets[p].length}`).join(", ")}`);
+
+  const selected: Restaurant[] = [];
+  for (const platform of platformOrder) {
+    selected.push(...buckets[platform].slice(0, quotas[platform]));
   }
 
   return selected;
