@@ -180,6 +180,12 @@ serve(async (req) => {
     const platformCounts = adapters.map((a, i) => `${a.platform}: ${discovered[i].length}`);
     console.log(`Candidates — ${platformCounts.join(", ")}, deduped: ${allCandidates.length}`);
 
+    // Log ALL discovered candidate URLs per platform for diagnostics
+    for (const platform of ["resy", "opentable", "yelp"] as const) {
+      const urls = allCandidates.filter(c => c.platform === platform).map(c => c.bookingUrl || c.name);
+      console.log(`[DISCOVERY] ${platform} (${urls.length}): ${urls.join(" | ")}`);
+    }
+
     // Step 3: Select candidates with round-robin balance, then verify per-adapter
     const selected = selectCandidatesForVerification(allCandidates, 24);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
