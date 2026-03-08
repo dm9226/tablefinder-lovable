@@ -199,14 +199,30 @@ serve(async (req) => {
     )).flat();
     console.log(`Verified available: ${verified.length}/${selected.length}`);
 
-    // Step 3.5: Batch geocode non-Yelp results using extracted addresses
-    await geocodeVerifiedResults(verified, params);
+    // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
+    const [, enriched] = await Promise.all([
+      geocodeVerifiedResults(verified, params),
+      enrichWithAI(verified, LOVABLE_API_KEY, params),
+    ]);
 
-    // Step 4: Enrich with AI (ratings, cuisine, neighborhood, description, vibeTags)
-    const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
+    // Apply distance filtering (was previously inside enrichWithAI)
+    const metroCity = getMetroCityName(params.city || "", params.state || "");
+    const wasMetroNormalized = metroCity !== (params.city || "");
+    const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
+    const nearby = enriched.filter((r) => {
+      const d = r.distanceMiles;
+      if (d === null || d === undefined) return true;
+      return d <= MAX_DISTANCE_MILES;
+    });
+    const sorted = nearby.sort((a, b) => {
+      const dA = a.distanceMiles ?? 9999;
+      const dB = b.distanceMiles ?? 9999;
+      if (Math.abs(dA - dB) > 0.5) return dA - dB;
+      return (b.rating ?? 0) - (a.rating ?? 0);
+    });
 
     // Clean transient fields before returning
-    const finalResults = cleanTransientFields(enriched);
+    const finalResults = cleanTransientFields(sorted);
 
     return new Response(
       JSON.stringify({ results: finalResults, params, cached: false }),
