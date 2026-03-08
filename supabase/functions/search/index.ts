@@ -1474,30 +1474,12 @@ async function verifyAvailability(
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-      // Resy: markdown-only (predictable structure, no LLM needed)
-      // OpenTable: markdown + extract (benefits from LLM extraction)
-      // Yelp: markdown-only
-      const scrapeFormats: string[] = isOT ? ["markdown", "extract"] : ["markdown"];
-
+      // All platforms use markdown-only — no LLM extract (saves 2-4s per OT scrape)
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
-        formats: scrapeFormats,
+        formats: ["markdown"],
         onlyMainContent: true,
-        // No waitFor — Firecrawl default rendering is sufficient
       };
-      if (isOT) {
-        scrapePayload.extract = {
-          schema: {
-            type: "object",
-            properties: {
-              address: { type: "string", description: "Full street address including street number, street name, city, state, and zip code" },
-              availableTimes: { type: "array", items: { type: "string" }, description: "List of bookable/reservable time slots shown on the page (e.g. '7:00 PM', '8:30 PM'). Only include times that can actually be clicked to book." },
-              noAvailability: { type: "boolean", description: "True if the page shows no availability or no tables available for this date/party size" },
-            },
-          },
-          prompt: "Extract the restaurant's address and available booking times. For availableTimes, ONLY include times from the reservation/booking widget that can be clicked to book. IGNORE times mentioned in 'Need to Know', 'About', 'Hours of Operation', or descriptive text sections.",
-        };
-      }
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
         method: "POST",
