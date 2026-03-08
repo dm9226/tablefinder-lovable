@@ -661,8 +661,8 @@ async function searchFirecrawl(
 
   const queries = platform === "resy"
     ? [
-        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} reservation`,
-        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} book table`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName} best rated${cuisine} restaurant`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName} top${cuisine} reservation`,
         // Dish-aware: add parent cuisine type query for better Resy recall
         ...(needsCuisineTypeQuery ? [
           `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisineTypeSuffix} restaurant reservation`,
@@ -671,8 +671,8 @@ async function searchFirecrawl(
       ]
     : platform === "opentable"
     ? [
-        `site:opentable.com/r ${cityState}${cuisine} restaurant reserve`,
-        `site:opentable.com ${cityState}${cuisine} opentable reservation`,
+        `site:opentable.com/r ${cityState} best rated${cuisine} restaurant`,
+        `site:opentable.com/r ${cityState} top${cuisine} restaurant reservation`,
         // Dish-aware: add parent cuisine type query for better OT recall
         ...(needsCuisineTypeQuery ? [
           `site:opentable.com/r ${cityState}${cuisineTypeSuffix} restaurant reservation`,
@@ -680,8 +680,8 @@ async function searchFirecrawl(
         ...(amenitySuffix ? [`site:opentable.com/r ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ]
     : [
-        `site:yelp.com/reservations ${cityState}${cuisine}`,
-        `site:yelp.com/biz ${cityState}${cuisine} reservation`,
+        `site:yelp.com/reservations ${cityState} best${cuisine}`,
+        `site:yelp.com/biz ${cityState} top rated${cuisine} reservation`,
         ...(needsCuisineTypeQuery ? [
           `site:yelp.com/biz ${cityState}${cuisineTypeSuffix} restaurant reservation`,
         ] : []),
