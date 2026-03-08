@@ -181,7 +181,7 @@ serve(async (req) => {
     console.log(`Candidates — ${platformCounts.join(", ")}, deduped: ${allCandidates.length}`);
 
     // Step 3: Select candidates with round-robin balance, then verify per-adapter
-    const selected = selectCandidatesForVerification(allCandidates, 30, params);
+    const selected = selectCandidatesForVerification(allCandidates, 24);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
@@ -661,8 +661,8 @@ async function searchFirecrawl(
 
   const queries = platform === "resy"
     ? [
-        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} reservation`,
-        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisine} book table`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName} best rated${cuisine} restaurant`,
+        `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName} top${cuisine} reservation`,
         // Dish-aware: add parent cuisine type query for better Resy recall
         ...(needsCuisineTypeQuery ? [
           `site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${cuisineTypeSuffix} restaurant reservation`,
@@ -671,8 +671,8 @@ async function searchFirecrawl(
       ]
     : platform === "opentable"
     ? [
-        `site:opentable.com/r ${cityState}${cuisine} restaurant reserve`,
-        `site:opentable.com ${cityState}${cuisine} opentable reservation`,
+        `site:opentable.com/r ${cityState} best rated${cuisine} restaurant`,
+        `site:opentable.com/r ${cityState} top${cuisine} restaurant reservation`,
         // Dish-aware: add parent cuisine type query for better OT recall
         ...(needsCuisineTypeQuery ? [
           `site:opentable.com/r ${cityState}${cuisineTypeSuffix} restaurant reservation`,
@@ -680,8 +680,8 @@ async function searchFirecrawl(
         ...(amenitySuffix ? [`site:opentable.com/r ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ]
     : [
-        `site:yelp.com/reservations ${cityState}${cuisine}`,
-        `site:yelp.com/biz ${cityState}${cuisine} reservation`,
+        `site:yelp.com/reservations ${cityState} best${cuisine}`,
+        `site:yelp.com/biz ${cityState} top rated${cuisine} reservation`,
         ...(needsCuisineTypeQuery ? [
           `site:yelp.com/biz ${cityState}${cuisineTypeSuffix} restaurant reservation`,
         ] : []),
@@ -1394,30 +1394,15 @@ const NO_AVAILABILITY_SIGNALS = [
   "temporarily unavailable",
 ];
 
-function scoreCandidateRelevance(candidate: Restaurant, params: { cuisine?: string }): number {
-  if (!params.cuisine) return 0;
-  const keywords = params.cuisine.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-  if (keywords.length === 0) return 0;
-  let score = 0;
-  const name = candidate.name.toLowerCase();
-  const url = candidate.platformUrl?.toLowerCase() || "";
-  const cuisine = candidate.cuisine?.toLowerCase() || "";
-  if (keywords.some(k => name.includes(k))) score++;
-  if (keywords.some(k => url.includes(k))) score++;
-  if (keywords.some(k => cuisine.includes(k))) score++;
-  return score;
-}
-
 function selectCandidatesForVerification(
   candidates: Restaurant[],
-  maxCandidates: number,
-  params: { cuisine?: string }
+  maxCandidates: number
 ): Restaurant[] {
   const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp"];
   const buckets = {
-    resy: candidates.filter((c) => c.platform === "resy").sort((a, b) => scoreCandidateRelevance(b, params) - scoreCandidateRelevance(a, params)),
-    opentable: candidates.filter((c) => c.platform === "opentable").sort((a, b) => scoreCandidateRelevance(b, params) - scoreCandidateRelevance(a, params)),
-    yelp: candidates.filter((c) => c.platform === "yelp").sort((a, b) => scoreCandidateRelevance(b, params) - scoreCandidateRelevance(a, params)),
+    resy: candidates.filter((c) => c.platform === "resy"),
+    opentable: candidates.filter((c) => c.platform === "opentable"),
+    yelp: candidates.filter((c) => c.platform === "yelp"),
   };
 
   const cursors = { resy: 0, opentable: 0, yelp: 0 };
