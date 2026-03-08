@@ -199,14 +199,30 @@ serve(async (req) => {
     )).flat();
     console.log(`Verified available: ${verified.length}/${selected.length}`);
 
-    // Step 3.5: Batch geocode non-Yelp results using extracted addresses
-    await geocodeVerifiedResults(verified, params);
+    // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
+    const [, enriched] = await Promise.all([
+      geocodeVerifiedResults(verified, params),
+      enrichWithAI(verified, LOVABLE_API_KEY, params),
+    ]);
 
-    // Step 4: Enrich with AI (ratings, cuisine, neighborhood, description, vibeTags)
-    const enriched = await enrichWithAI(verified, LOVABLE_API_KEY, params);
+    // Apply distance filtering (was previously inside enrichWithAI)
+    const metroCity = getMetroCityName(params.city || "", params.state || "");
+    const wasMetroNormalized = metroCity !== (params.city || "");
+    const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
+    const nearby = enriched.filter((r) => {
+      const d = r.distanceMiles;
+      if (d === null || d === undefined) return true;
+      return d <= MAX_DISTANCE_MILES;
+    });
+    const sorted = nearby.sort((a, b) => {
+      const dA = a.distanceMiles ?? 9999;
+      const dB = b.distanceMiles ?? 9999;
+      if (Math.abs(dA - dB) > 0.5) return dA - dB;
+      return (b.rating ?? 0) - (a.rating ?? 0);
+    });
 
     // Clean transient fields before returning
-    const finalResults = cleanTransientFields(enriched);
+    const finalResults = cleanTransientFields(sorted);
 
     return new Response(
       JSON.stringify({ results: finalResults, params, cached: false }),
@@ -706,7 +722,7 @@ async function searchFirecrawl(
         const resp = await fetch(`${FIRECRAWL_API}/search`, {
           method: "POST",
           headers: { Authorization: `Bearer ${firecrawlKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ query, limit: 20 }),
+          body: JSON.stringify({ query, limit: 12 }),
         });
         const data = await resp.json();
         if (!resp.ok) {
@@ -1185,7 +1201,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
   const geocodePromises = toGeocode.map((r, i) => {
     return new Promise<void>(async (resolve) => {
       // Stagger starts by 300ms
-      await new Promise(wait => setTimeout(wait, i * 300));
+      await new Promise(wait => setTimeout(wait, i * 100));
       try {
         const addr = r._address!;
         const resp = await fetch(
@@ -1352,21 +1368,8 @@ ${list}`,
       };
     });
 
-    // Filter out restaurants beyond distance cap
-    const wasMetroNormalized = metroCity !== (params.city || "");
-    const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
-    const nearby = enriched.filter((r) => {
-      const d = r.distanceMiles;
-      if (d === null || d === undefined) return true;
-      return d <= MAX_DISTANCE_MILES;
-    });
-
-    return nearby.sort((a, b) => {
-      const dA = a.distanceMiles ?? 9999;
-      const dB = b.distanceMiles ?? 9999;
-      if (Math.abs(dA - dB) > 0.5) return dA - dB;
-      return (b.rating ?? 0) - (a.rating ?? 0);
-    });
+    // Distance filtering moved to main flow (runs after parallel geocode+enrich)
+    return enriched;
   } catch (err) {
     console.error("AI enrich error:", err);
     return results;
@@ -1458,30 +1461,12 @@ async function verifyAvailability(
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-      // Resy: markdown-only (predictable structure, no LLM needed)
-      // OpenTable: markdown + extract (benefits from LLM extraction)
-      // Yelp: markdown-only
-      const scrapeFormats: string[] = isOT ? ["markdown", "extract"] : ["markdown"];
-
+      // All platforms use markdown-only — no LLM extract (saves 2-4s per OT scrape)
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
-        formats: scrapeFormats,
+        formats: ["markdown"],
         onlyMainContent: true,
-        // No waitFor — Firecrawl default rendering is sufficient
       };
-      if (isOT) {
-        scrapePayload.extract = {
-          schema: {
-            type: "object",
-            properties: {
-              address: { type: "string", description: "Full street address including street number, street name, city, state, and zip code" },
-              availableTimes: { type: "array", items: { type: "string" }, description: "List of bookable/reservable time slots shown on the page (e.g. '7:00 PM', '8:30 PM'). Only include times that can actually be clicked to book." },
-              noAvailability: { type: "boolean", description: "True if the page shows no availability or no tables available for this date/party size" },
-            },
-          },
-          prompt: "Extract the restaurant's address and available booking times. For availableTimes, ONLY include times from the reservation/booking widget that can be clicked to book. IGNORE times mentioned in 'Need to Know', 'About', 'Hours of Operation', or descriptive text sections.",
-        };
-      }
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
         method: "POST",
@@ -1505,10 +1490,12 @@ async function verifyAvailability(
         return null;
       }
 
-      // Extract structured data from Firecrawl JSON extraction
+      // Extract structured data from Firecrawl JSON extraction (if present)
       const jsonData = data?.data?.extract || data?.extract;
       
+      // Extract address from markdown via regex (all platforms)
       if (r.platform !== "yelp" && !r._address) {
+        // Try structured extraction first (if available)
         const extractedAddr = jsonData?.address;
         if (extractedAddr && typeof extractedAddr === "string" && extractedAddr.length > 5) {
           r._address = extractedAddr;
@@ -1516,15 +1503,18 @@ async function verifyAvailability(
           r._addressCity = cityMatch ? cityMatch[1].trim() : undefined;
           console.log(`  Address extracted (JSON) for ${r.name}: ${extractedAddr}`);
         } else {
-          console.log(`  No address extracted for ${r.name} [${r.platform}]`);
-        }
-      }
-
-      // Check structured extraction for no-availability signals (OT only now)
-      if (jsonData && isOT) {
-        if (jsonData.noAvailability === true) {
-          console.log(`✗ ${r.name} [opentable] — structured extraction: noAvailability`);
-          return null;
+          // Regex fallback: extract address from markdown
+          // Match patterns like "123 Main St, City, ST 12345" or "123 Main Street, City, State"
+          const addrRegex = /(\d{1,5}\s+[A-Z][A-Za-z\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Rd|Road|Dr(?:ive)?|Ln|Lane|Way|Pl(?:ace)?|Ct|Court|Pkwy|Hwy|Cir(?:cle)?|Ter(?:race)?)[.,]?\s+[A-Z][A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5})/m;
+          const addrMatch = markdown.match(addrRegex);
+          if (addrMatch) {
+            r._address = addrMatch[1].trim();
+            const cityMatch2 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+            r._addressCity = cityMatch2 ? cityMatch2[1].trim() : undefined;
+            console.log(`  Address extracted (regex) for ${r.name}: ${r._address}`);
+          } else {
+            console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+          }
         }
       }
 
