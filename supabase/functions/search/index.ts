@@ -1201,7 +1201,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
   const geocodePromises = toGeocode.map((r, i) => {
     return new Promise<void>(async (resolve) => {
       // Stagger starts by 300ms
-      await new Promise(wait => setTimeout(wait, i * 300));
+      await new Promise(wait => setTimeout(wait, i * 100));
       try {
         const addr = r._address!;
         const resp = await fetch(
