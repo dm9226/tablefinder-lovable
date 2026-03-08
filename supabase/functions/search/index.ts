@@ -722,7 +722,7 @@ async function searchFirecrawl(
         const resp = await fetch(`${FIRECRAWL_API}/search`, {
           method: "POST",
           headers: { Authorization: `Bearer ${firecrawlKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ query, limit: 20 }),
+          body: JSON.stringify({ query, limit: 12 }),
         });
         const data = await resp.json();
         if (!resp.ok) {
