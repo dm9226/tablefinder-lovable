@@ -1503,10 +1503,12 @@ async function verifyAvailability(
         return null;
       }
 
-      // Extract structured data from Firecrawl JSON extraction
+      // Extract structured data from Firecrawl JSON extraction (if present)
       const jsonData = data?.data?.extract || data?.extract;
       
+      // Extract address from markdown via regex (all platforms)
       if (r.platform !== "yelp" && !r._address) {
+        // Try structured extraction first (if available)
         const extractedAddr = jsonData?.address;
         if (extractedAddr && typeof extractedAddr === "string" && extractedAddr.length > 5) {
           r._address = extractedAddr;
@@ -1514,15 +1516,18 @@ async function verifyAvailability(
           r._addressCity = cityMatch ? cityMatch[1].trim() : undefined;
           console.log(`  Address extracted (JSON) for ${r.name}: ${extractedAddr}`);
         } else {
-          console.log(`  No address extracted for ${r.name} [${r.platform}]`);
-        }
-      }
-
-      // Check structured extraction for no-availability signals (OT only now)
-      if (jsonData && isOT) {
-        if (jsonData.noAvailability === true) {
-          console.log(`✗ ${r.name} [opentable] — structured extraction: noAvailability`);
-          return null;
+          // Regex fallback: extract address from markdown
+          // Match patterns like "123 Main St, City, ST 12345" or "123 Main Street, City, State"
+          const addrRegex = /(\d{1,5}\s+[A-Z][A-Za-z\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Rd|Road|Dr(?:ive)?|Ln|Lane|Way|Pl(?:ace)?|Ct|Court|Pkwy|Hwy|Cir(?:cle)?|Ter(?:race)?)[.,]?\s+[A-Z][A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5})/m;
+          const addrMatch = markdown.match(addrRegex);
+          if (addrMatch) {
+            r._address = addrMatch[1].trim();
+            const cityMatch2 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+            r._addressCity = cityMatch2 ? cityMatch2[1].trim() : undefined;
+            console.log(`  Address extracted (regex) for ${r.name}: ${r._address}`);
+          } else {
+            console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+          }
         }
       }
 
