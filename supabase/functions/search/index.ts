@@ -1457,7 +1457,7 @@ async function verifyAvailability(
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: ["markdown"],
-        onlyMainContent: true,
+        onlyMainContent: !isOT,  // false for OT to capture reservation widget
       };
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -1683,6 +1683,8 @@ async function verifyAvailability(
 
       const foundTimes: { time: string; minutes: number }[] = [];
       const seenTimes = new Set<string>();
+      const [reqHour, reqMin] = params.time.split(":").map(Number);
+      const requestedMinutes = reqHour * 60 + (reqMin || 0);
 
       const parseTimeStr = (raw: string): { time: string; minutes: number } | null => {
         const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
@@ -1699,6 +1701,87 @@ async function verifyAvailability(
         const formatted = `${displayH}:${mins.toString().padStart(2, "0")} ${displayAmpm}`;
         return { time: formatted, minutes: totalMin };
       };
+
+      // ── OPENTABLE-SPECIFIC: Parse "Select a time" section ──
+      if (isOT) {
+        // Step 1: Find the "Select a time" section
+        const selectTimeIdx = markdown.indexOf("### Select a time");
+        const selectTimeLower = markdown.toLowerCase().indexOf("select a time");
+        
+        if (selectTimeIdx !== -1 || selectTimeLower !== -1) {
+          const sectionStart = selectTimeIdx !== -1 ? selectTimeIdx : selectTimeLower;
+          // Extract section from header to next heading or end (max 500 chars)
+          const sectionEnd = markdown.indexOf("\n#", sectionStart + 10);
+          const otSection = markdown.substring(sectionStart, sectionEnd !== -1 ? sectionEnd : sectionStart + 500);
+          
+          // Step 2: Extract times from markdown list items ("- 6:30 PM")
+          const otTimeRegex = /^[\s]*[-•*]\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))/gm;
+          let otMatch;
+          while ((otMatch = otTimeRegex.exec(otSection)) !== null) {
+            // Skip if near "Notify me" marker
+            const afterMatch = otSection.substring(otMatch.index, otMatch.index + otMatch[0].length + 30);
+            if (/notify/i.test(afterMatch)) continue;
+            
+            const parsed = parseTimeStr(otMatch[1]);
+            if (parsed && !seenTimes.has(parsed.time)) {
+              seenTimes.add(parsed.time);
+              foundTimes.push(parsed);
+            }
+          }
+          
+          // Also try non-list format: standalone times on their own line
+          if (foundTimes.length === 0) {
+            const otStandaloneRegex = /^\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\s*$/gm;
+            let otStandalone;
+            while ((otStandalone = otStandaloneRegex.exec(otSection)) !== null) {
+              const parsed = parseTimeStr(otStandalone[1]);
+              if (parsed && !seenTimes.has(parsed.time)) {
+                seenTimes.add(parsed.time);
+                foundTimes.push(parsed);
+              }
+            }
+          }
+          
+          if (foundTimes.length > 0) {
+            console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from "Select a time" section: ${foundTimes.map(t=>t.time).join(", ")}`);
+          }
+        }
+        
+        // Step 3: If OT parser found nothing, strip dropdown noise and try generic regex
+        // The dropdown is a single line with 10+ concatenated times like "12:00 AM12:30 AM..."
+        if (foundTimes.length === 0) {
+          // Remove lines with 10+ time matches (dropdown noise)
+          const lines = bookingMarkdown.split("\n");
+          const cleanedLines = lines.filter(line => {
+            const timeMatches = line.match(/\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)/g);
+            return !timeMatches || timeMatches.length < 10;
+          });
+          bookingMarkdown = cleanedLines.join("\n");
+          console.log(`  ${r.name} [opentable]: no "Select a time" section found, falling through to generic regex (dropdown noise stripped)`);
+        }
+        
+        // Step 4: Apply tighter OT time window: requested time -1h to +2h
+        if (foundTimes.length > 0) {
+          const [rH, rM] = params.time.split(":").map(Number);
+          const reqMins = rH * 60 + (rM || 0);
+          const otWindowStart = Math.max(0, reqMins - 60);    // -1 hour
+          const otWindowEnd = Math.min(1439, reqMins + 120);   // +2 hours
+          
+          const otFiltered = foundTimes.filter(t => t.minutes >= otWindowStart && t.minutes <= otWindowEnd);
+          
+          if (otFiltered.length > 0) {
+            // Sort by proximity, keep top 5
+            otFiltered.sort((a, b) => Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes));
+            const top5 = otFiltered.slice(0, 5).sort((a, b) => a.minutes - b.minutes);
+            r.timeSlots = top5.map(t => ({ time: t.time }));
+            console.log(`✓ Verified ${r.name} [opentable] — ${top5.length} slots in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}): ${top5.map(t => t.time).join(", ")}`);
+            return r;
+          } else {
+            console.log(`✗ ${r.name} [opentable] — found ${foundTimes.length} slots but none in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}). Found: ${foundTimes.map(t => t.time).join(", ")}`);
+            return null;
+          }
+        }
+      }
 
       // ── RESY-SPECIFIC: Parse meal section from markdown directly ──
       if (isResy) {
@@ -1806,8 +1889,6 @@ async function verifyAvailability(
       );
 
       // D. Sort by proximity to requested time, keep closest 5
-      const [reqHour, reqMin] = params.time.split(":").map(Number);
-      const requestedMinutes = reqHour * 60 + (reqMin || 0);
       matchingTimes.sort((a, b) =>
         Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes)
       );
@@ -1827,6 +1908,13 @@ async function verifyAvailability(
       // If we DID find times but none are in the meal window, that's a real rejection.
       if (foundTimes.length === 0 && hasYelpAvailabilityMarker) {
         console.log(`✓ Verified ${r.name} [yelp] — reservation markers present but no extractable times (trusting marker for ${mealLabel})`);
+        return r;
+      }
+
+      // For OpenTable, if generic regex also found nothing but booking markers exist, trust the link
+      const hasOTBookingMarker = isOT && /\b(make\s+a\s+reservation|select\s+a\s+time|find\s+a\s+table|book\s+a\s+table|reserve\s+a\s+table)\b/i.test(markdown);
+      if (foundTimes.length === 0 && hasOTBookingMarker) {
+        console.log(`✓ Verified ${r.name} [opentable] — booking markers present but no extractable times (trusting marker)`);
         return r;
       }
 
