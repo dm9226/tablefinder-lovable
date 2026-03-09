@@ -1505,7 +1505,17 @@ async function verifyAvailability(
             r._addressCity = cityMatch2 ? cityMatch2[1].trim() : undefined;
             console.log(`  Address extracted (regex) for ${r.name}: ${r._address}`);
           } else {
-            console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+            // Fallback: match address without zip code (e.g. "123 Main St, Atlanta, GA")
+            const addrRegexNoZip = /(\d{1,5}\s+[A-Z][A-Za-z\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Rd|Road|Dr(?:ive)?|Ln|Lane|Way|Pl(?:ace)?|Ct|Court|Pkwy|Parkway|Hwy|Highway|Cir(?:cle)?|Ter(?:race)?)[.,]?\s+[A-Za-z\s]+,\s*[A-Z]{2})\b/m;
+            const addrMatch2 = markdown.match(addrRegexNoZip);
+            if (addrMatch2) {
+              r._address = addrMatch2[1].trim();
+              const cityMatch3 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+              r._addressCity = cityMatch3 ? cityMatch3[1].trim() : undefined;
+              console.log(`  Address extracted (no-zip regex) for ${r.name}: ${r._address}`);
+            } else {
+              console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+            }
           }
         }
       }
