@@ -1526,7 +1526,17 @@ async function verifyAvailability(
               r._addressCity = cityMatch3 ? cityMatch3[1].trim() : undefined;
               console.log(`  Address extracted (no-zip regex) for ${r.name}: ${r._address}`);
             } else {
-              console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+              // Broadest fallback: number + any text + City, ST
+              const addrRegexBroad = /(\d{1,5}\s+[A-Za-z\s.#']+,\s*[A-Za-z\s]+,\s*[A-Z]{2}(?:\s+\d{5})?)/m;
+              const addrMatch3 = markdown.match(addrRegexBroad);
+              if (addrMatch3) {
+                r._address = addrMatch3[1].trim();
+                const cityMatch4 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+                r._addressCity = cityMatch4 ? cityMatch4[1].trim() : undefined;
+                console.log(`  Address extracted (broad regex) for ${r.name}: ${r._address}`);
+              } else {
+                console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+              }
             }
           }
         }
