@@ -1617,18 +1617,14 @@ async function verifyAvailability(
         return null;
       }
 
-      // ── STRATEGY 1: Use structured extracted availableTimes if present ──
-      const structuredTimes: string[] = (jsonData?.availableTimes || []).filter(
-        (t: unknown) => typeof t === "string" && t.length > 0
-      );
+      // (structuredTimes removed — jsonData/extract format no longer used)
 
       // ── Strip non-booking sections from markdown for regex fallback ──
       // Remove "Need to Know", "Hours of Operation", "About", etc. sections
       let bookingMarkdown = markdown;
       const sectionCutMarkers = [
-        "need to know", "hours of operation", "dining style", "about the restaurant",
+        "need to know", "hours of operation", "about the restaurant",
         "about this restaurant", "cross street", "additional info", "special features",
-        "neighborhood", "cuisines", "booked .* times today",
       ];
       for (const marker of sectionCutMarkers) {
         const markerRegex = new RegExp(`(?:^|\\n)#+?\\s*${marker}|(?:^|\\n)\\*\\*${marker}`, "im");
@@ -1728,19 +1724,7 @@ async function verifyAvailability(
       const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|make\s+a\s+reservation|reservations?|available|party\s*size|select\s+(a\s+)?time|choose\s+(a\s+)?time)\b/i.test(markdown);
 
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
-      // ── STRATEGY 2: For OT, use structured extracted times first ──
-      if (!isResy && structuredTimes.length > 0) {
-        console.log(`  ${r.name}: structured extraction returned ${structuredTimes.length} times: ${structuredTimes.join(", ")}`);
-        for (const st of structuredTimes) {
-          const parsed = parseTimeStr(st);
-          if (parsed && !seenTimes.has(parsed.time)) {
-            seenTimes.add(parsed.time);
-            foundTimes.push(parsed);
-          }
-        }
-      }
-
-      // ── STRATEGY 3: Regex fallback on cleaned booking markdown (non-Resy only) ──
+      // ── STRATEGY 2: Regex on cleaned booking markdown (non-Resy only) ──
       if (!isResy && foundTimes.length === 0) {
         let match12;
         while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
