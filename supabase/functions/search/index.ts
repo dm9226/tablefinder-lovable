@@ -1911,6 +1911,13 @@ async function verifyAvailability(
         return r;
       }
 
+      // For OpenTable, if generic regex also found nothing but booking markers exist, trust the link
+      const hasOTBookingMarker = isOT && /\b(make\s+a\s+reservation|select\s+a\s+time|find\s+a\s+table|book\s+a\s+table|reserve\s+a\s+table)\b/i.test(markdown);
+      if (foundTimes.length === 0 && hasOTBookingMarker) {
+        console.log(`✓ Verified ${r.name} [opentable] — booking markers present but no extractable times (trusting marker)`);
+        return r;
+      }
+
       if (foundTimes.length > 0) {
         console.log(`✗ ${r.name} [${r.platform}] — found ${foundTimes.length} slots but none in ${mealLabel} window (found: ${foundTimes.map(t => t.time).join(", ")})`);
       } else {
