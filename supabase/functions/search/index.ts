@@ -1617,10 +1617,7 @@ async function verifyAvailability(
         return null;
       }
 
-      // ── STRATEGY 1: Use structured extracted availableTimes if present ──
-      const structuredTimes: string[] = (jsonData?.availableTimes || []).filter(
-        (t: unknown) => typeof t === "string" && t.length > 0
-      );
+      // (structuredTimes removed — jsonData/extract format no longer used)
 
       // ── Strip non-booking sections from markdown for regex fallback ──
       // Remove "Need to Know", "Hours of Operation", "About", etc. sections
