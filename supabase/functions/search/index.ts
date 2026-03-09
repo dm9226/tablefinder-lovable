@@ -1458,6 +1458,7 @@ async function verifyAvailability(
         url: r.platformUrl,
         formats: ["markdown"],
         onlyMainContent: !isOT,
+        ...(isOT && { waitFor: 3000 }),
       };
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -1485,10 +1486,21 @@ async function verifyAvailability(
       // Extract structured data from Firecrawl JSON extraction (if present)
       const jsonData = data?.data?.extract || data?.extract;
       
-      // Extract address from markdown via regex (all platforms)
+      // Extract address from markdown/metadata (all platforms)
       if (r.platform !== "yelp" && !r._address) {
-        // Try structured extraction first (if available)
-        const extractedAddr = jsonData?.address;
+        // Try OG metadata first (OpenTable populates these)
+        const meta2 = data?.data?.metadata || data?.metadata;
+        const ogStreet = meta2?.["og:street-address"] || meta2?.["street-address"];
+        const ogCity = meta2?.["og:locality"] || meta2?.locality;
+        const ogState = meta2?.["og:region"] || meta2?.region;
+        const ogZip = meta2?.["og:postal-code"] || meta2?.["postal-code"];
+        if (ogStreet && ogCity && ogState) {
+          r._address = `${ogStreet}, ${ogCity}, ${ogState}${ogZip ? " " + ogZip : ""}`;
+          r._addressCity = ogCity;
+          console.log(`  Address extracted (metadata) for ${r.name}: ${r._address}`);
+        }
+        // Try structured extraction next (if available)
+        const extractedAddr = !r._address ? (jsonData?.address) : null;
         if (extractedAddr && typeof extractedAddr === "string" && extractedAddr.length > 5) {
           r._address = extractedAddr;
           const cityMatch = extractedAddr.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
@@ -1514,7 +1526,17 @@ async function verifyAvailability(
               r._addressCity = cityMatch3 ? cityMatch3[1].trim() : undefined;
               console.log(`  Address extracted (no-zip regex) for ${r.name}: ${r._address}`);
             } else {
-              console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+              // Broadest fallback: number + any text + City, ST
+              const addrRegexBroad = /(\d{1,5}\s+[A-Za-z\s.#']+,\s*[A-Za-z\s]+,\s*[A-Z]{2}(?:\s+\d{5})?)/m;
+              const addrMatch3 = markdown.match(addrRegexBroad);
+              if (addrMatch3) {
+                r._address = addrMatch3[1].trim();
+                const cityMatch4 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+                r._addressCity = cityMatch4 ? cityMatch4[1].trim() : undefined;
+                console.log(`  Address extracted (broad regex) for ${r.name}: ${r._address}`);
+              } else {
+                console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+              }
             }
           }
         }
