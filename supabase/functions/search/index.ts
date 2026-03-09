@@ -1457,7 +1457,7 @@ async function verifyAvailability(
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: ["markdown"],
-        onlyMainContent: true,
+        onlyMainContent: !isOT,  // false for OT to capture reservation widget
       };
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
