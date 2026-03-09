@@ -1889,8 +1889,6 @@ async function verifyAvailability(
       );
 
       // D. Sort by proximity to requested time, keep closest 5
-      const [reqHour, reqMin] = params.time.split(":").map(Number);
-      const requestedMinutes = reqHour * 60 + (reqMin || 0);
       matchingTimes.sort((a, b) =>
         Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes)
       );
