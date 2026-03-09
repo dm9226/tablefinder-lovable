@@ -1626,9 +1626,8 @@ async function verifyAvailability(
       // Remove "Need to Know", "Hours of Operation", "About", etc. sections
       let bookingMarkdown = markdown;
       const sectionCutMarkers = [
-        "need to know", "hours of operation", "dining style", "about the restaurant",
+        "need to know", "hours of operation", "about the restaurant",
         "about this restaurant", "cross street", "additional info", "special features",
-        "neighborhood", "cuisines", "booked .* times today",
       ];
       for (const marker of sectionCutMarkers) {
         const markerRegex = new RegExp(`(?:^|\\n)#+?\\s*${marker}|(?:^|\\n)\\*\\*${marker}`, "im");
