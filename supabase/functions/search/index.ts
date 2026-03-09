@@ -200,16 +200,32 @@ serve(async (req) => {
     console.log(`Verified available: ${verified.length}/${selected.length}`);
 
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
-    const [, enriched] = await Promise.all([
+    const [, enrichmentMap] = await Promise.all([
       geocodeVerifiedResults(verified, params),
       enrichWithAI(verified, LOVABLE_API_KEY, params),
     ]);
 
-    // Apply distance filtering (was previously inside enrichWithAI)
+    // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
+    for (let i = 0; i < verified.length; i++) {
+      const e = enrichmentMap.get(i);
+      if (!e) continue;
+      const r = verified[i];
+      r.rating = e.rating ?? r.rating;
+      r.reviewCount = e.reviewCount ?? r.reviewCount;
+      r.cuisine = e.cuisine || r.cuisine;
+      r.description = e.description || r.description;
+      r.vibeTags = e.vibeTags || r.vibeTags;
+      r.priceRange = e.priceRange || r.priceRange;
+      if (e.neighborhood && r.neighborhood === params.city) {
+        r.neighborhood = e.neighborhood;
+      }
+    }
+
+    // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
     const wasMetroNormalized = metroCity !== (params.city || "");
     const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
-    const nearby = enriched.filter((r) => {
+    const nearby = verified.filter((r) => {
       const d = r.distanceMiles;
       if (d === null || d === undefined) return true;
       return d <= MAX_DISTANCE_MILES;
@@ -1301,8 +1317,9 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 // AI provides: rating, reviewCount, cuisine, priceRange, description, vibeTags
 // Coordinates and neighborhoods come from geocoding extracted addresses (not AI)
 
-async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams): Promise<Restaurant[]> {
-  if (results.length === 0) return [];
+async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams): Promise<Map<number, any>> {
+  const emptyMap = new Map<number, any>();
+  if (results.length === 0) return emptyMap;
 
   const metroCity = getMetroCityName(params.city || "", params.state || "");
   const list = results.map((r, i) => `${i}. ${r.name} (${r.platform})`).join("\n");
@@ -1331,11 +1348,11 @@ ${list}`,
       }),
     });
 
-    if (!resp.ok) { await resp.text(); return results; }
+    if (!resp.ok) { await resp.text(); return emptyMap; }
 
     const aiData = await resp.json();
     const content = aiData.choices?.[0]?.message?.content;
-    if (!content) return results;
+    if (!content) return emptyMap;
 
     const parsed = JSON.parse(content);
     const enrichments = parsed.restaurants || [];
@@ -1344,35 +1361,10 @@ ${list}`,
       if (typeof e.index === "number") eMap.set(e.index, e);
     }
 
-    const enriched = results.map((r, i) => {
-      const e = eMap.get(i);
-
-      // Neighborhood priority: geocoded address > AI neighborhood > existing
-      // Only use AI neighborhood if we don't already have one from geocoding
-      let neighborhood = r.neighborhood;
-      if (e?.neighborhood && neighborhood === params.city) {
-        // Current neighborhood is just the search city (default) — use AI's instead
-        neighborhood = e.neighborhood;
-      }
-
-      return {
-        ...r,
-        rating: e?.rating ?? r.rating,
-        reviewCount: e?.reviewCount ?? r.reviewCount,
-        cuisine: e?.cuisine || r.cuisine,
-        description: e?.description || r.description,
-        vibeTags: e?.vibeTags || r.vibeTags,
-        neighborhood,
-        priceRange: e?.priceRange || r.priceRange,
-        // distanceMiles already set by geocodeVerifiedResults or Yelp API — don't touch
-      };
-    });
-
-    // Distance filtering moved to main flow (runs after parallel geocode+enrich)
-    return enriched;
+    return eMap;
   } catch (err) {
     console.error("AI enrich error:", err);
-    return results;
+    return emptyMap;
   }
 }
 
@@ -1465,7 +1457,7 @@ async function verifyAvailability(
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: ["markdown"],
-        onlyMainContent: true,
+        onlyMainContent: !isOT,
       };
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -1513,7 +1505,17 @@ async function verifyAvailability(
             r._addressCity = cityMatch2 ? cityMatch2[1].trim() : undefined;
             console.log(`  Address extracted (regex) for ${r.name}: ${r._address}`);
           } else {
-            console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+            // Fallback: match address without zip code (e.g. "123 Main St, Atlanta, GA")
+            const addrRegexNoZip = /(\d{1,5}\s+[A-Z][A-Za-z\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Rd|Road|Dr(?:ive)?|Ln|Lane|Way|Pl(?:ace)?|Ct|Court|Pkwy|Parkway|Hwy|Highway|Cir(?:cle)?|Ter(?:race)?)[.,]?\s+[A-Za-z\s]+,\s*[A-Z]{2})\b/m;
+            const addrMatch2 = markdown.match(addrRegexNoZip);
+            if (addrMatch2) {
+              r._address = addrMatch2[1].trim();
+              const cityMatch3 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+              r._addressCity = cityMatch3 ? cityMatch3[1].trim() : undefined;
+              console.log(`  Address extracted (no-zip regex) for ${r.name}: ${r._address}`);
+            } else {
+              console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+            }
           }
         }
       }
