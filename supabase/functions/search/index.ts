@@ -1457,8 +1457,7 @@ async function verifyAvailability(
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: ["markdown"],
-        onlyMainContent: !isOT,
-        ...(isOT && { waitFor: 3000 }),
+        onlyMainContent: true,
       };
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
