@@ -200,16 +200,32 @@ serve(async (req) => {
     console.log(`Verified available: ${verified.length}/${selected.length}`);
 
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
-    const [, enriched] = await Promise.all([
+    const [, enrichmentMap] = await Promise.all([
       geocodeVerifiedResults(verified, params),
       enrichWithAI(verified, LOVABLE_API_KEY, params),
     ]);
 
-    // Apply distance filtering (was previously inside enrichWithAI)
+    // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
+    for (let i = 0; i < verified.length; i++) {
+      const e = enrichmentMap.get(i);
+      if (!e) continue;
+      const r = verified[i];
+      r.rating = e.rating ?? r.rating;
+      r.reviewCount = e.reviewCount ?? r.reviewCount;
+      r.cuisine = e.cuisine || r.cuisine;
+      r.description = e.description || r.description;
+      r.vibeTags = e.vibeTags || r.vibeTags;
+      r.priceRange = e.priceRange || r.priceRange;
+      if (e.neighborhood && r.neighborhood === params.city) {
+        r.neighborhood = e.neighborhood;
+      }
+    }
+
+    // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
     const wasMetroNormalized = metroCity !== (params.city || "");
     const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
-    const nearby = enriched.filter((r) => {
+    const nearby = verified.filter((r) => {
       const d = r.distanceMiles;
       if (d === null || d === undefined) return true;
       return d <= MAX_DISTANCE_MILES;
