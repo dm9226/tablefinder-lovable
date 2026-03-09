@@ -475,7 +475,7 @@ User query: "${query}"`;
           { headers: { "User-Agent": "TableFinder/1.0" } }
         );
         const revData = await revResp.json();
-        parsed.city = revData.address?.city || revData.address?.town || "";
+        parsed.city = revData.address?.city || revData.address?.town || revData.address?.village || revData.address?.suburb || "";
         parsed.state = revData.address?.state_code || revData.address?.state || "";
         if (parsed.city) {
           cityFromBrowser = true;
