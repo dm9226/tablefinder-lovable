@@ -1683,6 +1683,8 @@ async function verifyAvailability(
 
       const foundTimes: { time: string; minutes: number }[] = [];
       const seenTimes = new Set<string>();
+      const [reqHour, reqMin] = params.time.split(":").map(Number);
+      const requestedMinutes = reqHour * 60 + (reqMin || 0);
 
       const parseTimeStr = (raw: string): { time: string; minutes: number } | null => {
         const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
