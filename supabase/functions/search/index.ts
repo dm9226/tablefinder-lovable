@@ -1317,8 +1317,9 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 // AI provides: rating, reviewCount, cuisine, priceRange, description, vibeTags
 // Coordinates and neighborhoods come from geocoding extracted addresses (not AI)
 
-async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams): Promise<Restaurant[]> {
-  if (results.length === 0) return [];
+async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams): Promise<Map<number, any>> {
+  const emptyMap = new Map<number, any>();
+  if (results.length === 0) return emptyMap;
 
   const metroCity = getMetroCityName(params.city || "", params.state || "");
   const list = results.map((r, i) => `${i}. ${r.name} (${r.platform})`).join("\n");
@@ -1347,11 +1348,11 @@ ${list}`,
       }),
     });
 
-    if (!resp.ok) { await resp.text(); return results; }
+    if (!resp.ok) { await resp.text(); return emptyMap; }
 
     const aiData = await resp.json();
     const content = aiData.choices?.[0]?.message?.content;
-    if (!content) return results;
+    if (!content) return emptyMap;
 
     const parsed = JSON.parse(content);
     const enrichments = parsed.restaurants || [];
@@ -1360,35 +1361,10 @@ ${list}`,
       if (typeof e.index === "number") eMap.set(e.index, e);
     }
 
-    const enriched = results.map((r, i) => {
-      const e = eMap.get(i);
-
-      // Neighborhood priority: geocoded address > AI neighborhood > existing
-      // Only use AI neighborhood if we don't already have one from geocoding
-      let neighborhood = r.neighborhood;
-      if (e?.neighborhood && neighborhood === params.city) {
-        // Current neighborhood is just the search city (default) — use AI's instead
-        neighborhood = e.neighborhood;
-      }
-
-      return {
-        ...r,
-        rating: e?.rating ?? r.rating,
-        reviewCount: e?.reviewCount ?? r.reviewCount,
-        cuisine: e?.cuisine || r.cuisine,
-        description: e?.description || r.description,
-        vibeTags: e?.vibeTags || r.vibeTags,
-        neighborhood,
-        priceRange: e?.priceRange || r.priceRange,
-        // distanceMiles already set by geocodeVerifiedResults or Yelp API — don't touch
-      };
-    });
-
-    // Distance filtering moved to main flow (runs after parallel geocode+enrich)
-    return enriched;
+    return eMap;
   } catch (err) {
     console.error("AI enrich error:", err);
-    return results;
+    return emptyMap;
   }
 }
 
