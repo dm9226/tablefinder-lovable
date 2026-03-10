@@ -1217,20 +1217,24 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
   if (missingAddress.length > 0) {
     const city = params.city || "";
     const state = params.state || "";
+    const metroCity = getMetroCityName(city, state);
     const nameGeoPromises = missingAddress.map((r, i) => {
       return new Promise<void>(async (resolve) => {
         await new Promise(wait => setTimeout(wait, i * 100));
         try {
-          const nameQuery = `${r.name.replace(/\s+restaurant$/i, "")}, ${city}, ${state}`;
+          const cleanName = r.name.replace(/\s+restaurant$/i, "");
+          const nameQuery = `${cleanName}, ${metroCity}, ${state}`;
           const resp = await fetch(
             `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
             { headers: { "User-Agent": "TableFinder/1.0" } }
           );
+          let found = false;
           if (resp.ok) {
             const data = await resp.json();
             if (data?.[0]) {
+              found = true;
               r._address = nameQuery;
-              r._addressCity = city;
+              r._addressCity = metroCity;
               const geoAddr = data[0].address;
               const lat = parseFloat(data[0].lat);
               const lng = parseFloat(data[0].lon);
@@ -1240,8 +1244,32 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
                 if (geoNeighborhood) r.neighborhood = geoNeighborhood;
                 console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
               }
-            } else {
-              console.log(`  [ADDR_NAME_MISS] Name geocode returned no results for: ${nameQuery}`);
+            }
+          }
+          // Broader retry: name + state only
+          if (!found) {
+            const broaderQuery = `${cleanName}, ${state}`;
+            console.log(`  [ADDR_NAME_RETRY] Trying broader query: ${broaderQuery}`);
+            const resp2 = await fetch(
+              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(broaderQuery)}&format=json&limit=1&addressdetails=1`,
+              { headers: { "User-Agent": "TableFinder/1.0" } }
+            );
+            if (resp2.ok) {
+              const data2 = await resp2.json();
+              if (data2?.[0]) {
+                r._address = broaderQuery;
+                r._addressCity = data2[0].address?.city || metroCity;
+                const lat = parseFloat(data2[0].lat);
+                const lng = parseFloat(data2[0].lon);
+                if (Number.isFinite(lat) && Number.isFinite(lng) && params.lat && params.lng) {
+                  r.distanceMiles = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
+                  const geoAddr2 = data2[0].address;
+                  const geoNeighborhood = geoAddr2?.suburb || geoAddr2?.neighbourhood || geoAddr2?.city_district || "";
+                  if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+                  console.log(`  Geocoded (broader fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                }
+              } else {
+                console.log(`  [ADDR_NAME_MISS] No results for: ${nameQuery} OR ${broaderQuery}`);
             }
           }
         } catch (err) {
