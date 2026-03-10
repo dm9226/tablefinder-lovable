@@ -1317,7 +1317,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
           }
           // Broader retry: name + state only
           if (!found) {
-            const broaderQuery = `${cleanName}, ${state}`;
+            const broaderQuery = `${cleanedGeoName}, ${state}`;
             console.log(`  [ADDR_NAME_RETRY] Trying broader query: ${broaderQuery}`);
             const resp2 = await fetch(
               `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(broaderQuery)}&format=json&limit=1&addressdetails=1`,
