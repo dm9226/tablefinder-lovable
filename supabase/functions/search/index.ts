@@ -1279,7 +1279,14 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
       return new Promise<void>(async (resolve) => {
         await new Promise(wait => setTimeout(wait, i * 100));
         try {
-          const cleanName = r.name.replace(/\s+restaurant$/i, "");
+          const cleanedGeoName = r.name
+            .replace(/\s+restaurant$/i, "")
+            .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "")
+            .replace(/\s+on\s+OpenTable$/i, "")
+            .replace(/\s+on\s+Resy$/i, "")
+            .replace(/[•·]\s*[A-Za-z\s&]+$/i, "")
+            .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "")
+            .trim();
           const nameQuery = `${cleanName}, ${metroCity}, ${state}`;
           const resp = await fetch(
             `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
