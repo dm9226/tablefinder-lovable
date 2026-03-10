@@ -573,7 +573,7 @@ User query: "${query}"`;
   const distinctStates = [...new Set(usableCandidates.map((c: any) => c.stateCode))];
 
   // If user did NOT explicitly include a state, do NOT guess for ambiguous cities.
-  if (!hasExplicitState) {
+  if (!hasExplicitState && !cityFromBrowser) {
     if (distinctStates.length > 1) {
       const options = [...new Set(usableCandidates.map((c: any) => `${parsed.city}, ${c.stateCode}`))].slice(0, 4);
       throw new Error(`Multiple locations found for "${parsed.city}". Please include the state or zip code — e.g. ${options.join(" or ")}.`);
@@ -828,6 +828,7 @@ const RESY_METRO_MAP: Record<string, string> = {
   "powder springs|ga": "atlanta",
   "mableton|ga": "atlanta",
   "vinings|ga": "atlanta",
+  "cumberland|ga": "atlanta",
   // NYC metro
   "brooklyn|ny": "new-york",
   "queens|ny": "new-york",
@@ -1211,6 +1212,47 @@ function toTwelveHourLabel(time24: string): string {
 // ─── Batch geocode verified results ───
 
 async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams): Promise<void> {
+  // First, for any non-Yelp results missing an address, try name-based geocoding as fallback
+  const missingAddress = results.filter(r => r.platform !== "yelp" && !r._address && !r.distanceMiles);
+  if (missingAddress.length > 0) {
+    const city = params.city || "";
+    const state = params.state || "";
+    const nameGeoPromises = missingAddress.map((r, i) => {
+      return new Promise<void>(async (resolve) => {
+        await new Promise(wait => setTimeout(wait, i * 100));
+        try {
+          const nameQuery = `${r.name.replace(/\s+restaurant$/i, "")}, ${city}, ${state}`;
+          const resp = await fetch(
+            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
+            { headers: { "User-Agent": "TableFinder/1.0" } }
+          );
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data?.[0]) {
+              r._address = nameQuery;
+              r._addressCity = city;
+              const geoAddr = data[0].address;
+              const lat = parseFloat(data[0].lat);
+              const lng = parseFloat(data[0].lon);
+              if (Number.isFinite(lat) && Number.isFinite(lng) && params.lat && params.lng) {
+                r.distanceMiles = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
+                const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+                if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+                console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+              }
+            } else {
+              console.log(`  [ADDR_NAME_MISS] Name geocode returned no results for: ${nameQuery}`);
+            }
+          }
+        } catch (err) {
+          console.log(`  Name geocode error for ${r.name}:`, err);
+        }
+        resolve();
+      });
+    });
+    await Promise.all(nameGeoPromises);
+  }
+
   const toGeocode = results.filter(r => r.platform !== "yelp" && r._address && !r.distanceMiles);
   if (toGeocode.length === 0) return;
 
