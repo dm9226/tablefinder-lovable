@@ -1096,9 +1096,14 @@ function cleanName(title: string | undefined, url: string, platform: string): st
     const cleaned = title
       .replace(/\s*\|.*$/i, "")
       .replace(/\s*-\s*(resy|opentable|yelp).*$/i, "")
+      .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "") // "- Atlanta, GA on OpenTable"
+      .replace(/\s+on\s+OpenTable$/i, "")
+      .replace(/\s+on\s+Resy$/i, "")
+      .replace(/[•·|]\s*[A-Za-z\s&]+$/i, "") // trailing bullet sections like "• Sushi • Bar"
       .replace(/^book\s+(your\s+)?/i, "")
       .replace(/\s+reservation(s)?.*$/i, "")
-      .replace(/\s*-\s*\w+,?\s*\w{2}$/i, "") // trailing "- Atlanta, GA"
+      .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "") // trailing "- Atlanta, GA" or "- Buckhead"
+      .replace(/\s*-\s*(Updated|Restaurant)\s.*$/i, "") // "- Updated 2026" or "- Restaurant Name"
       .trim();
     if (cleaned.length > 1) return cleaned;
   }
