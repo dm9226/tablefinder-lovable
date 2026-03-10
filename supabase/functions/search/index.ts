@@ -199,6 +199,16 @@ serve(async (req) => {
     )).flat();
     console.log(`Verified available: ${verified.length}/${selected.length}`);
 
+    // Diagnostic: address extraction summary per platform
+    for (const platform of ["resy", "opentable", "yelp"] as const) {
+      const platResults = verified.filter(r => r.platform === platform);
+      const withAddr = platResults.filter(r => r._address).length;
+      const withoutAddr = platResults.filter(r => !r._address && r.platform !== "yelp").length;
+      if (platResults.length > 0) {
+        console.log(`[ADDR_SUMMARY] ${platform}: ${withAddr}/${platResults.length} have addresses${withoutAddr > 0 ? ` (${withoutAddr} missing)` : ""}`);
+      }
+    }
+
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
     const [, enrichmentMap] = await Promise.all([
       geocodeVerifiedResults(verified, params),
