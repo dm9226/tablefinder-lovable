@@ -828,6 +828,7 @@ const RESY_METRO_MAP: Record<string, string> = {
   "powder springs|ga": "atlanta",
   "mableton|ga": "atlanta",
   "vinings|ga": "atlanta",
+  "cumberland|ga": "atlanta",
   // NYC metro
   "brooklyn|ny": "new-york",
   "queens|ny": "new-york",
