@@ -474,7 +474,25 @@ User query: "${query}"`;
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
   parsed.state = INVALID_CITY.has((parsed.state || "").trim().toLowerCase()) ? "" : parsed.state?.trim() || "";
+
+  // Strip embedded state suffix from city (AI sometimes returns "North Druid Hills, GA")
+  const citySuffix = parsed.city.match(/^(.+),\s*([A-Z]{2})$/);
+  if (citySuffix) {
+    parsed.city = citySuffix[1].trim();
+    if (!parsed.state) parsed.state = citySuffix[2];
+  }
   parsed.state = normalizeStateCode(parsed.state);
+
+  // Parse browser location string for reliable city/state
+  let browserCity = "";
+  let browserState = "";
+  if (location) {
+    const locMatch = location.match(/^(.+),\s*([A-Z]{2})$/);
+    if (locMatch) {
+      browserCity = locMatch[1].trim();
+      browserState = locMatch[2].trim();
+    }
+  }
 
   // Handle zip code: geocode to city/state/coords
   const zipCode = (parsed as any).zipCode?.trim() || "";
@@ -518,10 +536,18 @@ User query: "${query}"`;
     }
   }
 
-  // If city is still empty, try reverse-geocoding from coords — otherwise ask the user
+  // If city is still empty, use browser-provided location directly (no redundant Nominatim call)
   let cityFromBrowser = false;
   if (!parsed.city) {
-    if (lat && lng) {
+    if (browserCity && browserState) {
+      parsed.city = browserCity;
+      parsed.state = browserState;
+      parsed.lat = lat;
+      parsed.lng = lng;
+      cityFromBrowser = true;
+      console.log(`City from browser location string: ${parsed.city}, ${parsed.state} (using precise coords ${lat},${lng})`);
+    } else if (lat && lng) {
+      // Last resort: reverse-geocode from coords (only if no parsed location string)
       try {
         const revResp = await fetch(
           `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
@@ -532,10 +558,9 @@ User query: "${query}"`;
         parsed.state = normalizeStateCode(revData.address?.state_code || revData.address?.state || "");
         if (parsed.city) {
           cityFromBrowser = true;
-          // Keep precise browser coords as distance origin
           parsed.lat = lat;
           parsed.lng = lng;
-          console.log(`City from browser location: ${parsed.city}, ${parsed.state} (using precise coords ${lat},${lng})`);
+          console.log(`City from reverse-geocode: ${parsed.city}, ${parsed.state} (coords ${lat},${lng})`);
         }
       } catch { /* leave empty */ }
     }
@@ -1071,9 +1096,14 @@ function cleanName(title: string | undefined, url: string, platform: string): st
     const cleaned = title
       .replace(/\s*\|.*$/i, "")
       .replace(/\s*-\s*(resy|opentable|yelp).*$/i, "")
+      .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "") // "- Atlanta, GA on OpenTable"
+      .replace(/\s+on\s+OpenTable$/i, "")
+      .replace(/\s+on\s+Resy$/i, "")
+      .replace(/[•·|]\s*[A-Za-z\s&]+$/i, "") // trailing bullet sections like "• Sushi • Bar"
       .replace(/^book\s+(your\s+)?/i, "")
       .replace(/\s+reservation(s)?.*$/i, "")
-      .replace(/\s*-\s*\w+,?\s*\w{2}$/i, "") // trailing "- Atlanta, GA"
+      .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "") // trailing "- Atlanta, GA" or "- Buckhead"
+      .replace(/\s*-\s*(Updated|Restaurant)\s.*$/i, "") // "- Updated 2026" or "- Restaurant Name"
       .trim();
     if (cleaned.length > 1) return cleaned;
   }
@@ -1249,8 +1279,15 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
       return new Promise<void>(async (resolve) => {
         await new Promise(wait => setTimeout(wait, i * 100));
         try {
-          const cleanName = r.name.replace(/\s+restaurant$/i, "");
-          const nameQuery = `${cleanName}, ${metroCity}, ${state}`;
+          const cleanedGeoName = r.name
+            .replace(/\s+restaurant$/i, "")
+            .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "")
+            .replace(/\s+on\s+OpenTable$/i, "")
+            .replace(/\s+on\s+Resy$/i, "")
+            .replace(/[•·]\s*[A-Za-z\s&]+$/i, "")
+            .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "")
+            .trim();
+          const nameQuery = `${cleanedGeoName}, ${metroCity}, ${state}`;
           const resp = await fetch(
             `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
             { headers: { "User-Agent": "TableFinder/1.0" } }
@@ -1266,16 +1303,21 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
               const lat = parseFloat(data[0].lat);
               const lng = parseFloat(data[0].lon);
               if (Number.isFinite(lat) && Number.isFinite(lng) && params.lat && params.lng) {
-                r.distanceMiles = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
-                const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
-                if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-                console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                const dist = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
+                if (dist > 200) {
+                  console.log(`  Geocode sanity fail (name fallback) ${r.name}: ${dist} mi — discarding`);
+                } else {
+                  r.distanceMiles = dist;
+                  const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+                  if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+                  console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                }
               }
             }
           }
           // Broader retry: name + state only
           if (!found) {
-            const broaderQuery = `${cleanName}, ${state}`;
+            const broaderQuery = `${cleanedGeoName}, ${state}`;
             console.log(`  [ADDR_NAME_RETRY] Trying broader query: ${broaderQuery}`);
             const resp2 = await fetch(
               `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(broaderQuery)}&format=json&limit=1&addressdetails=1`,
@@ -1289,11 +1331,16 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
                 const lat = parseFloat(data2[0].lat);
                 const lng = parseFloat(data2[0].lon);
                 if (Number.isFinite(lat) && Number.isFinite(lng) && params.lat && params.lng) {
-                  r.distanceMiles = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
-                  const geoAddr2 = data2[0].address;
-                  const geoNeighborhood = geoAddr2?.suburb || geoAddr2?.neighbourhood || geoAddr2?.city_district || "";
-                  if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-                  console.log(`  Geocoded (broader fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                  const dist = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
+                  if (dist > 200) {
+                    console.log(`  Geocode sanity fail (broader fallback) ${r.name}: ${dist} mi — discarding`);
+                  } else {
+                    r.distanceMiles = dist;
+                    const geoAddr2 = data2[0].address;
+                    const geoNeighborhood = geoAddr2?.suburb || geoAddr2?.neighbourhood || geoAddr2?.city_district || "";
+                    if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+                    console.log(`  Geocoded (broader fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                  }
                 }
               } else {
                 console.log(`  [ADDR_NAME_MISS] No results for: ${nameQuery} OR ${broaderQuery}`);
