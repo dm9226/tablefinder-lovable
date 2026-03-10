@@ -1331,11 +1331,16 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
                 const lat = parseFloat(data2[0].lat);
                 const lng = parseFloat(data2[0].lon);
                 if (Number.isFinite(lat) && Number.isFinite(lng) && params.lat && params.lng) {
-                  r.distanceMiles = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
-                  const geoAddr2 = data2[0].address;
-                  const geoNeighborhood = geoAddr2?.suburb || geoAddr2?.neighbourhood || geoAddr2?.city_district || "";
-                  if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-                  console.log(`  Geocoded (broader fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                  const dist = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
+                  if (dist > 200) {
+                    console.log(`  Geocode sanity fail (broader fallback) ${r.name}: ${dist} mi — discarding`);
+                  } else {
+                    r.distanceMiles = dist;
+                    const geoAddr2 = data2[0].address;
+                    const geoNeighborhood = geoAddr2?.suburb || geoAddr2?.neighbourhood || geoAddr2?.city_district || "";
+                    if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+                    console.log(`  Geocoded (broader fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                  }
                 }
               } else {
                 console.log(`  [ADDR_NAME_MISS] No results for: ${nameQuery} OR ${broaderQuery}`);
