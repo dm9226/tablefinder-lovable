@@ -573,7 +573,7 @@ User query: "${query}"`;
   const distinctStates = [...new Set(usableCandidates.map((c: any) => c.stateCode))];
 
   // If user did NOT explicitly include a state, do NOT guess for ambiguous cities.
-  if (!hasExplicitState) {
+  if (!hasExplicitState && !cityFromBrowser) {
     if (distinctStates.length > 1) {
       const options = [...new Set(usableCandidates.map((c: any) => `${parsed.city}, ${c.stateCode}`))].slice(0, 4);
       throw new Error(`Multiple locations found for "${parsed.city}". Please include the state or zip code — e.g. ${options.join(" or ")}.`);
