@@ -105,6 +105,32 @@ const DISH_TO_CUISINE_MAP: Record<string, string[]> = {
   "poke bowl": ["hawaiian", "japanese", "asian"],
 };
 
+// ─── State name → 2-letter code normalization ───
+const STATE_NAME_TO_CODE: Record<string, string> = {
+  alabama:"AL",alaska:"AK",arizona:"AZ",arkansas:"AR",california:"CA",
+  colorado:"CO",connecticut:"CT",delaware:"DE",florida:"FL",georgia:"GA",
+  hawaii:"HI",idaho:"ID",illinois:"IL",indiana:"IN",iowa:"IA",
+  kansas:"KS",kentucky:"KY",louisiana:"LA",maine:"ME",maryland:"MD",
+  massachusetts:"MA",michigan:"MI",minnesota:"MN",mississippi:"MS",missouri:"MO",
+  montana:"MT",nebraska:"NE",nevada:"NV","new hampshire":"NH","new jersey":"NJ",
+  "new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND",
+  ohio:"OH",oklahoma:"OK",oregon:"OR",pennsylvania:"PA","rhode island":"RI",
+  "south carolina":"SC","south dakota":"SD",tennessee:"TN",texas:"TX",utah:"UT",
+  vermont:"VT",virginia:"VA",washington:"WA","west virginia":"WV",
+  wisconsin:"WI",wyoming:"WY","district of columbia":"DC",
+};
+
+function normalizeStateCode(state: string): string {
+  if (!state) return state;
+  const trimmed = state.trim();
+  // Already a 2-letter code
+  if (/^[A-Z]{2}$/.test(trimmed)) return trimmed;
+  if (/^[a-z]{2}$/i.test(trimmed)) return trimmed.toUpperCase();
+  // Look up full name
+  const code = STATE_NAME_TO_CODE[trimmed.toLowerCase()];
+  return code || trimmed;
+}
+
 interface Restaurant {
   id: string;
   name: string;
