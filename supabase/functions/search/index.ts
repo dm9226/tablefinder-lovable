@@ -1408,8 +1408,8 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
           try {
             await new Promise(r2 => setTimeout(r2, 350));
             const cleanName = r.name.replace(/\s*Restaurant\s*/gi, "").replace(/\s*-\s*(Atlanta|Buckhead|Decatur|Perimeter|Brookhaven).*$/i, "").trim();
-            const metroCity = getMetroCityName(city, state);
-            const nameQuery = `${cleanName}, ${metroCity}, ${state}`;
+            const metroCity = getMetroCityName(params.city, params.state);
+            const nameQuery = `${cleanName}, ${metroCity}, ${params.state}`;
             console.log(`  [ADDR_NAME_FALLBACK] Trying: ${nameQuery}`);
             const nameResp = await fetch(
               `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
