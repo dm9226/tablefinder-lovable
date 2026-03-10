@@ -105,6 +105,32 @@ const DISH_TO_CUISINE_MAP: Record<string, string[]> = {
   "poke bowl": ["hawaiian", "japanese", "asian"],
 };
 
+// ─── State name → 2-letter code normalization ───
+const STATE_NAME_TO_CODE: Record<string, string> = {
+  alabama:"AL",alaska:"AK",arizona:"AZ",arkansas:"AR",california:"CA",
+  colorado:"CO",connecticut:"CT",delaware:"DE",florida:"FL",georgia:"GA",
+  hawaii:"HI",idaho:"ID",illinois:"IL",indiana:"IN",iowa:"IA",
+  kansas:"KS",kentucky:"KY",louisiana:"LA",maine:"ME",maryland:"MD",
+  massachusetts:"MA",michigan:"MI",minnesota:"MN",mississippi:"MS",missouri:"MO",
+  montana:"MT",nebraska:"NE",nevada:"NV","new hampshire":"NH","new jersey":"NJ",
+  "new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND",
+  ohio:"OH",oklahoma:"OK",oregon:"OR",pennsylvania:"PA","rhode island":"RI",
+  "south carolina":"SC","south dakota":"SD",tennessee:"TN",texas:"TX",utah:"UT",
+  vermont:"VT",virginia:"VA",washington:"WA","west virginia":"WV",
+  wisconsin:"WI",wyoming:"WY","district of columbia":"DC",
+};
+
+function normalizeStateCode(state: string): string {
+  if (!state) return state;
+  const trimmed = state.trim();
+  // Already a 2-letter code
+  if (/^[A-Z]{2}$/.test(trimmed)) return trimmed;
+  if (/^[a-z]{2}$/i.test(trimmed)) return trimmed.toUpperCase();
+  // Look up full name
+  const code = STATE_NAME_TO_CODE[trimmed.toLowerCase()];
+  return code || trimmed;
+}
+
 interface Restaurant {
   id: string;
   name: string;
@@ -448,6 +474,7 @@ User query: "${query}"`;
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
   parsed.state = INVALID_CITY.has((parsed.state || "").trim().toLowerCase()) ? "" : parsed.state?.trim() || "";
+  parsed.state = normalizeStateCode(parsed.state);
 
   // Handle zip code: geocode to city/state/coords
   const zipCode = (parsed as any).zipCode?.trim() || "";
@@ -463,7 +490,7 @@ User query: "${query}"`;
         // Prefer city/town/village over county — county names like "DeKalb County"
         // don't work well with platform searches (Resy, OpenTable, Yelp)
         let resolvedCity = addr?.city || addr?.town || addr?.village || "";
-        parsed.state = extractStateCode(addr) || parsed.state;
+        parsed.state = normalizeStateCode(extractStateCode(addr) || parsed.state);
         parsed.lat = parseFloat(zipData[0].lat);
         parsed.lng = parseFloat(zipData[0].lon);
 
@@ -502,7 +529,7 @@ User query: "${query}"`;
         );
         const revData = await revResp.json();
         parsed.city = revData.address?.city || revData.address?.town || revData.address?.village || revData.address?.suburb || "";
-        parsed.state = revData.address?.state_code || revData.address?.state || "";
+        parsed.state = normalizeStateCode(revData.address?.state_code || revData.address?.state || "");
         if (parsed.city) {
           cityFromBrowser = true;
           // Keep precise browser coords as distance origin
@@ -1377,7 +1404,36 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
               console.log(`  Geocode retry error for ${r.name}:`, retryErr);
             }
           }
-          // Still failed
+          // Still failed — try name-based geocoding as last resort
+          try {
+            await new Promise(r2 => setTimeout(r2, 350));
+            const cleanName = r.name.replace(/\s*Restaurant\s*/gi, "").replace(/\s*-\s*(Atlanta|Buckhead|Decatur|Perimeter|Brookhaven).*$/i, "").trim();
+            const metroCity = getMetroCityName(params.city, params.state);
+            const nameQuery = `${cleanName}, ${metroCity}, ${params.state}`;
+            console.log(`  [ADDR_NAME_FALLBACK] Trying: ${nameQuery}`);
+            const nameResp = await fetch(
+              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
+              { headers: { "User-Agent": "TableFinder/1.0" } }
+            );
+            if (nameResp.ok) {
+              const nameData = await nameResp.json();
+              if (nameData?.[0]) {
+                const lat3 = parseFloat(nameData[0].lat);
+                const lng3 = parseFloat(nameData[0].lon);
+                if (Number.isFinite(lat3) && Number.isFinite(lng3)) {
+                  r.distanceMiles = +haversine(cityLat, cityLng, lat3, lng3).toFixed(1);
+                  const geoAddr3 = nameData[0].address;
+                  const geoNeighborhood3 = geoAddr3?.suburb || geoAddr3?.neighbourhood || geoAddr3?.city_district || "";
+                  if (geoNeighborhood3) r.neighborhood = geoNeighborhood3;
+                  else if (r._addressCity) r.neighborhood = r._addressCity;
+                  console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                  resolve(); return;
+                }
+              }
+            }
+          } catch (nameFallbackErr) {
+            console.log(`  Name fallback geocode error for ${r.name}:`, nameFallbackErr);
+          }
           if (r._addressCity) r.neighborhood = r._addressCity;
           console.log(`  Geocode miss for ${r.name}: ${addr}`);
         }
