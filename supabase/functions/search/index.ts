@@ -536,10 +536,18 @@ User query: "${query}"`;
     }
   }
 
-  // If city is still empty, try reverse-geocoding from coords — otherwise ask the user
+  // If city is still empty, use browser-provided location directly (no redundant Nominatim call)
   let cityFromBrowser = false;
   if (!parsed.city) {
-    if (lat && lng) {
+    if (browserCity && browserState) {
+      parsed.city = browserCity;
+      parsed.state = browserState;
+      parsed.lat = lat;
+      parsed.lng = lng;
+      cityFromBrowser = true;
+      console.log(`City from browser location string: ${parsed.city}, ${parsed.state} (using precise coords ${lat},${lng})`);
+    } else if (lat && lng) {
+      // Last resort: reverse-geocode from coords (only if no parsed location string)
       try {
         const revResp = await fetch(
           `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
@@ -550,10 +558,9 @@ User query: "${query}"`;
         parsed.state = normalizeStateCode(revData.address?.state_code || revData.address?.state || "");
         if (parsed.city) {
           cityFromBrowser = true;
-          // Keep precise browser coords as distance origin
           parsed.lat = lat;
           parsed.lng = lng;
-          console.log(`City from browser location: ${parsed.city}, ${parsed.state} (using precise coords ${lat},${lng})`);
+          console.log(`City from reverse-geocode: ${parsed.city}, ${parsed.state} (coords ${lat},${lng})`);
         }
       } catch { /* leave empty */ }
     }
