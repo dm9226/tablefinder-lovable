@@ -1270,9 +1270,9 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
                 }
               } else {
                 console.log(`  [ADDR_NAME_MISS] No results for: ${nameQuery} OR ${broaderQuery}`);
+              }
             }
           }
-        } catch (err) {
           console.log(`  Name geocode error for ${r.name}:`, err);
         }
         resolve();
