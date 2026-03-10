@@ -1404,7 +1404,36 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
               console.log(`  Geocode retry error for ${r.name}:`, retryErr);
             }
           }
-          // Still failed
+          // Still failed — try name-based geocoding as last resort
+          try {
+            await new Promise(r2 => setTimeout(r2, 350));
+            const cleanName = r.name.replace(/\s*Restaurant\s*/gi, "").replace(/\s*-\s*(Atlanta|Buckhead|Decatur|Perimeter|Brookhaven).*$/i, "").trim();
+            const metroCity = getMetroCityName(city, state);
+            const nameQuery = `${cleanName}, ${metroCity}, ${state}`;
+            console.log(`  [ADDR_NAME_FALLBACK] Trying: ${nameQuery}`);
+            const nameResp = await fetch(
+              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
+              { headers: { "User-Agent": "TableFinder/1.0" } }
+            );
+            if (nameResp.ok) {
+              const nameData = await nameResp.json();
+              if (nameData?.[0]) {
+                const lat3 = parseFloat(nameData[0].lat);
+                const lng3 = parseFloat(nameData[0].lon);
+                if (Number.isFinite(lat3) && Number.isFinite(lng3)) {
+                  r.distanceMiles = +haversine(cityLat, cityLng, lat3, lng3).toFixed(1);
+                  const geoAddr3 = nameData[0].address;
+                  const geoNeighborhood3 = geoAddr3?.suburb || geoAddr3?.neighbourhood || geoAddr3?.city_district || "";
+                  if (geoNeighborhood3) r.neighborhood = geoNeighborhood3;
+                  else if (r._addressCity) r.neighborhood = r._addressCity;
+                  console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                  resolve(); return;
+                }
+              }
+            }
+          } catch (nameFallbackErr) {
+            console.log(`  Name fallback geocode error for ${r.name}:`, nameFallbackErr);
+          }
           if (r._addressCity) r.neighborhood = r._addressCity;
           console.log(`  Geocode miss for ${r.name}: ${addr}`);
         }
