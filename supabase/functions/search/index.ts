@@ -1453,11 +1453,12 @@ async function verifyAvailability(
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-      // All platforms use markdown-only — no LLM extract (saves 2-4s per OT scrape)
+      // Resy + Yelp: onlyMainContent=true to avoid noise in meal-section parsing
+      // OT: onlyMainContent=false to capture address/location sections for geocoding
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: ["markdown"],
-        onlyMainContent: isYelp,  // false for Resy + OT to capture address sections
+        onlyMainContent: !isOT,  // only OT gets full page (for address extraction)
       };
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
