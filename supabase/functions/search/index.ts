@@ -474,7 +474,25 @@ User query: "${query}"`;
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
   parsed.state = INVALID_CITY.has((parsed.state || "").trim().toLowerCase()) ? "" : parsed.state?.trim() || "";
+
+  // Strip embedded state suffix from city (AI sometimes returns "North Druid Hills, GA")
+  const citySuffix = parsed.city.match(/^(.+),\s*([A-Z]{2})$/);
+  if (citySuffix) {
+    parsed.city = citySuffix[1].trim();
+    if (!parsed.state) parsed.state = citySuffix[2];
+  }
   parsed.state = normalizeStateCode(parsed.state);
+
+  // Parse browser location string for reliable city/state
+  let browserCity = "";
+  let browserState = "";
+  if (location) {
+    const locMatch = location.match(/^(.+),\s*([A-Z]{2})$/);
+    if (locMatch) {
+      browserCity = locMatch[1].trim();
+      browserState = locMatch[2].trim();
+    }
+  }
 
   // Handle zip code: geocode to city/state/coords
   const zipCode = (parsed as any).zipCode?.trim() || "";
