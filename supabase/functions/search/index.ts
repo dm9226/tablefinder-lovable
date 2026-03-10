@@ -490,7 +490,7 @@ User query: "${query}"`;
         // Prefer city/town/village over county — county names like "DeKalb County"
         // don't work well with platform searches (Resy, OpenTable, Yelp)
         let resolvedCity = addr?.city || addr?.town || addr?.village || "";
-        parsed.state = extractStateCode(addr) || parsed.state;
+        parsed.state = normalizeStateCode(extractStateCode(addr) || parsed.state);
         parsed.lat = parseFloat(zipData[0].lat);
         parsed.lng = parseFloat(zipData[0].lon);
 
