@@ -32,7 +32,10 @@ const Index = () => {
           );
           const data = await resp.json();
           const city = data.address?.city || data.address?.town || data.address?.village || "";
-          const state = data.address?.state || "";
+          // Prefer ISO state code (e.g. "US-GA") → extract "GA"; fall back to full state name
+          const isoState = data.address?.["ISO3166-2-lvl4"] || "";
+          const stateAbbr = isoState.includes("-") ? isoState.split("-").pop() : "";
+          const state = stateAbbr || data.address?.state || "";
           setLocation(city ? `${city}, ${state}` : "Location detected");
         } catch {
           setLocation("Location detected");
