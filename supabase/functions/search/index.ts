@@ -1287,7 +1287,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
             .replace(/[•·]\s*[A-Za-z\s&]+$/i, "")
             .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "")
             .trim();
-          const nameQuery = `${cleanName}, ${metroCity}, ${state}`;
+          const nameQuery = `${cleanedGeoName}, ${metroCity}, ${state}`;
           const resp = await fetch(
             `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
             { headers: { "User-Agent": "TableFinder/1.0" } }
