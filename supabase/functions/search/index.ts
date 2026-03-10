@@ -1507,35 +1507,74 @@ async function verifyAvailability(
           r._addressCity = cityMatch ? cityMatch[1].trim() : undefined;
           console.log(`  Address extracted (JSON) for ${r.name}: ${extractedAddr}`);
         } else {
-          // Regex fallback: extract address from markdown
-          // Match patterns like "123 Main St, City, ST 12345" or "123 Main Street, City, State"
-          const addrRegex = /(\d{1,5}\s+[A-Z][A-Za-z\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Rd|Road|Dr(?:ive)?|Ln|Lane|Way|Pl(?:ace)?|Ct|Court|Pkwy|Hwy|Cir(?:cle)?|Ter(?:race)?)[.,]?\s+[A-Z][A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5})/m;
-          const addrMatch = markdown.match(addrRegex);
-          if (addrMatch) {
-            r._address = addrMatch[1].trim();
-            const cityMatch2 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
-            r._addressCity = cityMatch2 ? cityMatch2[1].trim() : undefined;
-            console.log(`  Address extracted (regex) for ${r.name}: ${r._address}`);
-          } else {
-            // Fallback: match address without zip code (e.g. "123 Main St, Atlanta, GA")
-            const addrRegexNoZip = /(\d{1,5}\s+[A-Z][A-Za-z\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Rd|Road|Dr(?:ive)?|Ln|Lane|Way|Pl(?:ace)?|Ct|Court|Pkwy|Parkway|Hwy|Highway|Cir(?:cle)?|Ter(?:race)?)[.,]?\s+[A-Za-z\s]+,\s*[A-Z]{2})\b/m;
-            const addrMatch2 = markdown.match(addrRegexNoZip);
-            if (addrMatch2) {
-              r._address = addrMatch2[1].trim();
-              const cityMatch3 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
-              r._addressCity = cityMatch3 ? cityMatch3[1].trim() : undefined;
-              console.log(`  Address extracted (no-zip regex) for ${r.name}: ${r._address}`);
+          // Pre-normalize markdown for address extraction:
+          // - Collapse line breaks between street and city/state lines
+          // - Replace bullets/middots with spaces
+          // - Remove duplicate whitespace
+          const normalizedMd = markdown
+            .replace(/·/g, " ")           // middots
+            .replace(/•/g, " ")           // bullets
+            .replace(/\|/g, " ")          // pipes
+            .replace(/\n\s*\n/g, "\n")    // collapse double newlines
+            .replace(/\n(?=[A-Z][a-z])/g, ", ")  // join lines where next starts with capital (city after street)
+            .replace(/\s{2,}/g, " ");     // collapse whitespace
+
+          // OT-specific: look for address near "location" or "address" sections
+          let otAddressFound = false;
+          if (isOT) {
+            // Pattern 1: structured block near location/address header
+            const locationSectionRegex = /(?:location|address|find us|where)[:\s]*\n?\s*(\d{1,5}\s+[A-Za-z\s.#']+(?:,\s*[A-Za-z\s]+)?(?:,\s*[A-Z]{2}(?:\s+\d{5})?))/im;
+            const locMatch = normalizedMd.match(locationSectionRegex);
+            if (locMatch) {
+              r._address = locMatch[1].trim();
+              const cityM = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+              r._addressCity = cityM ? cityM[1].trim() : undefined;
+              otAddressFound = true;
+              console.log(`  Address extracted (OT location section) for ${r.name}: ${r._address}`);
+            }
+            
+            // Pattern 2: any street address in normalized text
+            if (!otAddressFound) {
+              const otAddrRegex = /(\d{1,5}\s+[A-Za-z\s.#']+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Rd|Road|Dr(?:ive)?|Ln|Lane|Way|Pl(?:ace)?|Ct|Court|Pkwy|Parkway|Hwy|Highway|Cir(?:cle)?|Ter(?:race)?)[.,]?\s*,?\s*[A-Za-z\s]+,\s*[A-Z]{2}(?:\s+\d{5})?)/m;
+              const otMatch = normalizedMd.match(otAddrRegex);
+              if (otMatch) {
+                r._address = otMatch[1].trim().replace(/,\s*,/g, ",");
+                const cityM = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+                r._addressCity = cityM ? cityM[1].trim() : undefined;
+                otAddressFound = true;
+                console.log(`  Address extracted (OT normalized regex) for ${r.name}: ${r._address}`);
+              }
+            }
+          }
+
+          if (!otAddressFound) {
+            // Regex fallback on normalized markdown (all platforms)
+            const addrRegex = /(\d{1,5}\s+[A-Z][A-Za-z\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Rd|Road|Dr(?:ive)?|Ln|Lane|Way|Pl(?:ace)?|Ct|Court|Pkwy|Hwy|Cir(?:cle)?|Ter(?:race)?)[.,]?\s+[A-Z][A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5})/m;
+            const addrMatch = normalizedMd.match(addrRegex);
+            if (addrMatch) {
+              r._address = addrMatch[1].trim();
+              const cityMatch2 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+              r._addressCity = cityMatch2 ? cityMatch2[1].trim() : undefined;
+              console.log(`  Address extracted (normalized regex+zip) for ${r.name}: ${r._address}`);
             } else {
-              // Broadest fallback: number + any text + City, ST
-              const addrRegexBroad = /(\d{1,5}\s+[A-Za-z\s.#']+,\s*[A-Za-z\s]+,\s*[A-Z]{2}(?:\s+\d{5})?)/m;
-              const addrMatch3 = markdown.match(addrRegexBroad);
-              if (addrMatch3) {
-                r._address = addrMatch3[1].trim();
-                const cityMatch4 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
-                r._addressCity = cityMatch4 ? cityMatch4[1].trim() : undefined;
-                console.log(`  Address extracted (broad regex) for ${r.name}: ${r._address}`);
+              const addrRegexNoZip = /(\d{1,5}\s+[A-Z][A-Za-z\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Rd|Road|Dr(?:ive)?|Ln|Lane|Way|Pl(?:ace)?|Ct|Court|Pkwy|Parkway|Hwy|Highway|Cir(?:cle)?|Ter(?:race)?)[.,]?\s+[A-Za-z\s]+,\s*[A-Z]{2})\b/m;
+              const addrMatch2 = normalizedMd.match(addrRegexNoZip);
+              if (addrMatch2) {
+                r._address = addrMatch2[1].trim();
+                const cityMatch3 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+                r._addressCity = cityMatch3 ? cityMatch3[1].trim() : undefined;
+                console.log(`  Address extracted (normalized no-zip regex) for ${r.name}: ${r._address}`);
               } else {
-                console.log(`  No address extracted for ${r.name} [${r.platform}]`);
+                const addrRegexBroad = /(\d{1,5}\s+[A-Za-z\s.#']+,\s*[A-Za-z\s]+,\s*[A-Z]{2}(?:\s+\d{5})?)/m;
+                const addrMatch3 = normalizedMd.match(addrRegexBroad);
+                if (addrMatch3) {
+                  r._address = addrMatch3[1].trim();
+                  const cityMatch4 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+                  r._addressCity = cityMatch4 ? cityMatch4[1].trim() : undefined;
+                  console.log(`  Address extracted (broad regex) for ${r.name}: ${r._address}`);
+                } else {
+                  console.log(`  [ADDR_MISS] No address pattern found for ${r.name} [${r.platform}]`);
+                }
               }
             }
           }
