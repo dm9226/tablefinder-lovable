@@ -1303,10 +1303,15 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
               const lat = parseFloat(data[0].lat);
               const lng = parseFloat(data[0].lon);
               if (Number.isFinite(lat) && Number.isFinite(lng) && params.lat && params.lng) {
-                r.distanceMiles = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
-                const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
-                if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-                console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                const dist = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
+                if (dist > 200) {
+                  console.log(`  Geocode sanity fail (name fallback) ${r.name}: ${dist} mi — discarding`);
+                } else {
+                  r.distanceMiles = dist;
+                  const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+                  if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+                  console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                }
               }
             }
           }
