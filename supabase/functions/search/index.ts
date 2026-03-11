@@ -1519,6 +1519,39 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
           } catch (nameFallbackErr) {
             console.log(`  Name fallback geocode error for ${r.name}:`, nameFallbackErr);
           }
+          // Structured Nominatim query as last resort (street + city + state params)
+          if (r.distanceMiles == null) {
+            try {
+              await new Promise(r2 => setTimeout(r2, 350));
+              const streetPart = addr.split(",")[0].trim();
+              const structuredUrl = `https://nominatim.openstreetmap.org/search?street=${encodeURIComponent(streetPart)}&city=${encodeURIComponent(metroCity)}&state=${encodeURIComponent(params.state || "")}&format=json&limit=1&addressdetails=1`;
+              console.log(`  [ADDR_STRUCTURED] Trying structured query for ${r.name}: street="${streetPart}" city="${metroCity}"`);
+              const structResp = await fetch(structuredUrl, { headers: { "User-Agent": "TableFinder/1.0" } });
+              if (structResp.ok) {
+                const structData = await structResp.json();
+                if (structData?.[0]) {
+                  const latS = parseFloat(structData[0].lat);
+                  const lngS = parseFloat(structData[0].lon);
+                  if (Number.isFinite(latS) && Number.isFinite(lngS)) {
+                    const distS = +haversine(cityLat, cityLng, latS, lngS).toFixed(1);
+                    if (distS <= 200) {
+                      r.distanceMiles = distS;
+                      const geoAddrS = structData[0].address;
+                      const geoNeighborhoodS = geoAddrS?.suburb || geoAddrS?.neighbourhood || geoAddrS?.city_district || "";
+                      if (geoNeighborhoodS) r.neighborhood = geoNeighborhoodS;
+                      else if (r._addressCity) r.neighborhood = r._addressCity;
+                      console.log(`  Geocoded (structured) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                      resolve(); return;
+                    } else {
+                      console.log(`  Geocode sanity fail (structured) ${r.name}: ${distS} mi — discarding`);
+                    }
+                  }
+                }
+              }
+            } catch (structErr) {
+              console.log(`  Structured geocode error for ${r.name}:`, structErr);
+            }
+          }
           if (r._addressCity) r.neighborhood = r._addressCity;
           console.log(`  Geocode miss for ${r.name}: ${addr}`);
         }
@@ -1675,12 +1708,13 @@ async function verifyAvailability(
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-      // Resy + Yelp: onlyMainContent=true to avoid noise in meal-section parsing
-      // OT: onlyMainContent=false to capture address/location sections for geocoding
+      // Yelp: onlyMainContent=true (no addresses available anyway)
+      // Resy + OT: onlyMainContent=false to capture address/location sections for geocoding
+      // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: ["markdown"],
-        onlyMainContent: !isOT,  // only OT gets full page (for address extraction)
+        onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
       };
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
