@@ -1847,16 +1847,18 @@ async function verifyAvailability(
           const sectionStart = selectTimeIdx !== -1 ? selectTimeIdx : selectTimeLower;
           // Extract section from header to next heading or end (max 500 chars)
           const sectionEnd = markdown.indexOf("\n#", sectionStart + 10);
-          const otSection = markdown.substring(sectionStart, sectionEnd !== -1 ? sectionEnd : sectionStart + 500);
+          const otSection = markdown.substring(sectionStart, sectionEnd !== -1 ? sectionEnd : sectionStart + 2000);
           
-          // Step 2: Extract times from markdown list items ("- 6:30 PM")
-          const otTimeRegex = /^[\s]*[-•*]\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))/gm;
+          // Step 2: Extract times from multiple OT markdown formats
+          // Clean bonus point suffixes first: "+1,000 pts", "+500 pts", etc.
+          const cleanedSection = otSection.replace(/\+\d{1,3}(,\d{3})?\s*pts/gi, '');
+          
+          // Pattern A: list items ("- 6:30 PM", "• 7:00 PM")
+          const otListRegex = /^[\s]*[-•*]\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))/gm;
           let otMatch;
-          while ((otMatch = otTimeRegex.exec(otSection)) !== null) {
-            // Skip if near "Notify me" marker
-            const afterMatch = otSection.substring(otMatch.index, otMatch.index + otMatch[0].length + 30);
+          while ((otMatch = otListRegex.exec(cleanedSection)) !== null) {
+            const afterMatch = cleanedSection.substring(otMatch.index, otMatch.index + otMatch[0].length + 30);
             if (/notify/i.test(afterMatch)) continue;
-            
             const parsed = parseTimeStr(otMatch[1]);
             if (parsed && !seenTimes.has(parsed.time)) {
               seenTimes.add(parsed.time);
@@ -1864,11 +1866,24 @@ async function verifyAvailability(
             }
           }
           
-          // Also try non-list format: standalone times on their own line
+          // Pattern B: link-wrapped times ("[6:30 PM](url)")
+          const otLinkRegex = /\[(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\]\([^)]*\)/gi;
+          let otLinkMatch;
+          while ((otLinkMatch = otLinkRegex.exec(cleanedSection)) !== null) {
+            const afterMatch = cleanedSection.substring(otLinkMatch.index, otLinkMatch.index + otLinkMatch[0].length + 30);
+            if (/notify/i.test(afterMatch)) continue;
+            const parsed = parseTimeStr(otLinkMatch[1]);
+            if (parsed && !seenTimes.has(parsed.time)) {
+              seenTimes.add(parsed.time);
+              foundTimes.push(parsed);
+            }
+          }
+          
+          // Pattern C: standalone times on their own line
           if (foundTimes.length === 0) {
             const otStandaloneRegex = /^\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\s*$/gm;
             let otStandalone;
-            while ((otStandalone = otStandaloneRegex.exec(otSection)) !== null) {
+            while ((otStandalone = otStandaloneRegex.exec(cleanedSection)) !== null) {
               const parsed = parseTimeStr(otStandalone[1]);
               if (parsed && !seenTimes.has(parsed.time)) {
                 seenTimes.add(parsed.time);
