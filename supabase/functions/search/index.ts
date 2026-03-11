@@ -1187,7 +1187,8 @@ async function fetchYelpCandidates(
     const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t));
 
     // Build expanded token set for dish searches: include parent cuisine types
-    const expandedTokens = [...cuisineTokens];
+    const GENERIC_CUISINE_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
+    let expandedTokens = [...cuisineTokens];
     if (params.dishKeyword) {
       const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
       for (const pc of parentCuisines) {
@@ -1197,6 +1198,8 @@ async function fetchYelpCandidates(
       if (params.cuisineType && !expandedTokens.includes(params.cuisineType)) {
         expandedTokens.push(params.cuisineType);
       }
+      // Remove overly generic tokens that cause false positives in dish searches
+      expandedTokens = expandedTokens.filter(t => !GENERIC_CUISINE_TOKENS.has(t));
     }
 
     const filtered = businesses.filter((b: any) => {
