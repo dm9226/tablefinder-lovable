@@ -242,6 +242,8 @@ serve(async (req) => {
     ]);
 
     // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
+    const cityLat = params.lat ?? 0;
+    const cityLng = params.lng ?? 0;
     for (let i = 0; i < verified.length; i++) {
       const e = enrichmentMap.get(i);
       if (!e) continue;
@@ -255,7 +257,22 @@ serve(async (req) => {
       if (e.neighborhood && r.neighborhood === params.city) {
         r.neighborhood = e.neighborhood;
       }
+
+      // AI coordinate fallback: fill distance for restaurants Nominatim missed
+      if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
+        const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
+        if (aiDist <= 200) {
+          r.distanceMiles = aiDist;
+          if (e.neighborhood) r.neighborhood = e.neighborhood;
+          console.log(`  Geocoded (AI) ${r.name}: ${aiDist} mi (${r.neighborhood})`);
+        } else {
+          console.log(`  AI geocode sanity fail for ${r.name}: ${aiDist} mi — discarding`);
+        }
+      }
     }
+    const aiGeocoded = verified.filter(r => r.distanceMiles != null && r.platform !== "yelp").length;
+    const totalNonYelp = verified.filter(r => r.platform !== "yelp").length;
+    console.log(`Final geocoding: ${aiGeocoded}/${totalNonYelp} non-Yelp restaurants have distances`);
 
     // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
@@ -1351,20 +1368,10 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
       }
     }
 
-    // Strategy 4: Name-based lookup (for missing addresses or all previous failures)
-    const nameQuery = `${cleanedName}, ${metroCity}, ${state}`;
-    await new Promise(w => setTimeout(w, 200));
-    const url4 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`;
-    if (await tryGeocode(url4, "name")) return;
-
-    // Strategy 5: Broader name (name + state only)
-    const broaderQuery = `${cleanedName}, ${state}`;
-    await new Promise(w => setTimeout(w, 200));
-    const url5 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(broaderQuery)}&format=json&limit=1&addressdetails=1`;
-    if (await tryGeocode(url5, "name-broad")) return;
-
+    // Strategies 4-5 removed: Nominatim name-based lookups fail >95% of the time.
+    // AI coordinate enrichment now handles restaurants without addresses.
     if (r._addressCity) r.neighborhood = r._addressCity;
-    console.log(`  Geocode miss for ${r.name}`);
+    console.log(`  Nominatim miss for ${r.name} — will use AI coordinates`);
   }
 
   const toGeocode = results.filter(r => r.platform !== "yelp");
@@ -1411,7 +1418,10 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
 - vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")
 
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[] }] }
+- lat: the restaurant's latitude (Google Maps coordinate, decimal degrees)
+- lng: the restaurant's longitude (Google Maps coordinate, decimal degrees)
+
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[], "lat": number, "lng": number }] }
 
 Return an entry for EVERY restaurant:
 
@@ -2112,12 +2122,25 @@ function checkRelevanceInMarkdown(markdown: string, amenities: string[]): boolea
 // ─── Utilities ───
 
 function dedupeByName(results: Restaurant[]): Restaurant[] {
+  // Strip common suffixes/platform noise to normalize names for comparison
+  const STRIP_WORDS = /\b(restaurant|ristorante|trattoria|pizzeria|steakhouse|bar|grill|lounge|cafe|café|bistro|tavern|kitchen|eatery|chophouse|house)\b/gi;
+
+  function normalizeForDedup(name: string, city: string): string {
+    return name
+      .toLowerCase()
+      .replace(/\s*-\s*(atlanta|austin|boston|charlotte|chicago|dallas|denver|houston|los angeles|miami|nashville|new york|phoenix|portland|san francisco|seattle|washington|dc|nyc|la)\b/gi, "")
+      .replace(new RegExp(`\\b${city.toLowerCase()}\\b`, "g"), "")
+      .replace(STRIP_WORDS, "")
+      .replace(/[^a-z0-9]/g, "");
+  }
+
   const kept: Restaurant[] = [];
   const keys: string[] = [];
+  // Infer city from the first result or use empty
+  const city = results[0]?.neighborhood || "";
 
   for (const r of results) {
-    const key = r.name.toLowerCase().replace(/[^a-z0-9]/g, "");
-    // Check exact match OR substring containment (e.g. "thechophouse" vs "thechophouseaugustarestaurant")
+    const key = normalizeForDedup(r.name, city);
     const isDupe = keys.some((existing) =>
       existing === key || existing.startsWith(key) || key.startsWith(existing)
     );
