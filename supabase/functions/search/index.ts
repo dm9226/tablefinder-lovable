@@ -1910,12 +1910,10 @@ async function verifyAvailability(
           console.log(`  ${r.name} [opentable]: no "Select a time" section found, falling through to generic regex (dropdown noise stripped)`);
         }
         
-        // Step 4: Apply tighter OT time window: requested time -1h to +2h
+        // Step 4: Apply ±2h OT time window (same as universal window)
         if (foundTimes.length > 0) {
-          const [rH, rM] = params.time.split(":").map(Number);
-          const reqMins = rH * 60 + (rM || 0);
-          const otWindowStart = Math.max(0, reqMins - 60);    // -1 hour
-          const otWindowEnd = Math.min(1439, reqMins + 120);   // +2 hours
+          const otWindowStart = windowStart;
+          const otWindowEnd = windowEnd;
           
           const otFiltered = foundTimes.filter(t => t.minutes >= otWindowStart && t.minutes <= otWindowEnd);
           
