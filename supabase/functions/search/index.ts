@@ -1800,23 +1800,21 @@ async function verifyAvailability(
       let windowEnd: number;
       let mealLabel: string;
 
+      // Meal label still used for Resy section selection
       if (reqH < 10) {
-        windowStart = 360;
-        windowEnd = 720;
         mealLabel = "breakfast";
       } else if (reqH < 12) {
-        windowStart = 630;
-        windowEnd = 900;
         mealLabel = "brunch";
       } else if (reqH < 16) {
-        windowStart = 660;
-        windowEnd = 960;
         mealLabel = "lunch";
       } else {
-        windowStart = 1080;
-        windowEnd = 1439;
         mealLabel = "dinner";
       }
+
+      // Universal ±2 hour window from requested time
+      const reqMinsForWindow = reqH * 60 + (parseInt(params.time.split(":")[1]) || 0);
+      windowStart = Math.max(0, reqMinsForWindow - 120);    // -2 hours
+      windowEnd = Math.min(1439, reqMinsForWindow + 120);    // +2 hours
 
       const foundTimes: { time: string; minutes: number }[] = [];
       const seenTimes = new Set<string>();
