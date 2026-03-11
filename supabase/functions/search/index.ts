@@ -2122,12 +2122,25 @@ function checkRelevanceInMarkdown(markdown: string, amenities: string[]): boolea
 // ─── Utilities ───
 
 function dedupeByName(results: Restaurant[]): Restaurant[] {
+  // Strip common suffixes/platform noise to normalize names for comparison
+  const STRIP_WORDS = /\b(restaurant|ristorante|trattoria|pizzeria|steakhouse|bar|grill|lounge|cafe|café|bistro|tavern|kitchen|eatery|chophouse|house)\b/gi;
+
+  function normalizeForDedup(name: string, city: string): string {
+    return name
+      .toLowerCase()
+      .replace(/\s*-\s*(atlanta|austin|boston|charlotte|chicago|dallas|denver|houston|los angeles|miami|nashville|new york|phoenix|portland|san francisco|seattle|washington|dc|nyc|la)\b/gi, "")
+      .replace(new RegExp(`\\b${city.toLowerCase()}\\b`, "g"), "")
+      .replace(STRIP_WORDS, "")
+      .replace(/[^a-z0-9]/g, "");
+  }
+
   const kept: Restaurant[] = [];
   const keys: string[] = [];
+  // Infer city from the first result or use empty
+  const city = results[0]?.neighborhood || "";
 
   for (const r of results) {
-    const key = r.name.toLowerCase().replace(/[^a-z0-9]/g, "");
-    // Check exact match OR substring containment (e.g. "thechophouse" vs "thechophouseaugustarestaurant")
+    const key = normalizeForDedup(r.name, city);
     const isDupe = keys.some((existing) =>
       existing === key || existing.startsWith(key) || key.startsWith(existing)
     );
