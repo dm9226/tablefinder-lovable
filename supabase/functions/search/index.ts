@@ -260,7 +260,7 @@ serve(async (req) => {
     // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
     const wasMetroNormalized = metroCity !== (params.city || "");
-    const MAX_DISTANCE_MILES = wasMetroNormalized ? 20 : 12;
+    const MAX_DISTANCE_MILES = wasMetroNormalized ? 30 : 15;
     const nearby = verified.filter((r) => {
       const d = r.distanceMiles;
       if (d === null || d === undefined) return true;
