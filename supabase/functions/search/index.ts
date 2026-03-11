@@ -1411,7 +1411,10 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
 - vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")
 
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[] }] }
+- lat: the restaurant's latitude (Google Maps coordinate, decimal degrees)
+- lng: the restaurant's longitude (Google Maps coordinate, decimal degrees)
+
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[], "lat": number, "lng": number }] }
 
 Return an entry for EVERY restaurant:
 
