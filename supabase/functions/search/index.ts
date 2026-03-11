@@ -2061,13 +2061,11 @@ async function verifyAvailability(
         return r;
       }
 
-      // For OpenTable, if generic regex also found nothing but booking markers exist, trust the link
-      const hasOTBookingMarker = isOT && /\b(make\s+a\s+reservation|select\s+a\s+time|find\s+a\s+table|book\s+a\s+table|reserve\s+a\s+table)\b/i.test(markdown);
-      if (foundTimes.length === 0 && hasOTBookingMarker) {
-        const reqLabel2 = toTwelveHourLabel(params.time);
-        if (reqLabel2) r.timeSlots = [{ time: reqLabel2 }];
-        console.log(`✓ Verified ${r.name} [opentable] — booking markers, using requested time ${reqLabel2}`);
-        return r;
+      // OpenTable: Do NOT fabricate fallback times from booking markers.
+      // If real slots exist but are outside window, or parser found nothing, reject.
+      if (isOT && foundTimes.length === 0) {
+        console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback)`);
+        return null;
       }
 
       if (foundTimes.length > 0) {
