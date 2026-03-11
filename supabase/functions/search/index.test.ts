@@ -460,31 +460,41 @@ function printSummary(results: QueryResult[]) {
 // Run a subset to stay within timeout. Adjust BATCH_SIZE and QUERY_LIMIT as needed.
 
 const BATCH_SIZE = 2; // parallel queries per batch
-const QUERY_LIMIT = parseInt(Deno.env.get("TEST_QUERY_LIMIT") || "50"); // how many to run
 
-Deno.test({
-  name: "Comprehensive search test suite",
-  sanitizeOps: false,
-  sanitizeResources: false,
-}, async () => {
-  const queries = TEST_QUERIES.slice(0, QUERY_LIMIT);
-  console.log(`\nRunning ${queries.length} queries in batches of ${BATCH_SIZE}...\n`);
+// Split into 5 test groups of 10 to stay within timeout
+const GROUPS: [string, number, number][] = [
+  ["Batch 1: Cuisine searches (#1-10)", 0, 10],
+  ["Batch 2: Dish searches (#11-18) + Time (#19-20)", 10, 20],
+  ["Batch 3: Time (#21-24) + Location (#25-30)", 20, 30],
+  ["Batch 4: Party size (#31-34) + Amenity (#35-40)", 30, 40],
+  ["Batch 5: Vague (#41-46) + Edge cases (#47-50)", 40, 50],
+];
 
-  const results = await runBatch(queries, BATCH_SIZE);
-  printSummary(results);
+for (const [name, start, end] of GROUPS) {
+  Deno.test({
+    name,
+    sanitizeOps: false,
+    sanitizeResources: false,
+  }, async () => {
+    const queries = TEST_QUERIES.slice(start, end);
+    console.log(`\nRunning ${queries.length} queries in batches of ${BATCH_SIZE}...\n`);
 
-  // Assert no errors
-  const errors = results.filter((r) => r.error);
-  assertEquals(errors.length, 0, `${errors.length} queries had errors: ${errors.map((e) => `#${e.id}: ${e.error}`).join(", ")}`);
+    const results = await runBatch(queries, BATCH_SIZE);
+    printSummary(results);
 
-  // Assert critical criteria pass rate
-  const criticalCriteria = ["response_structure", "query_parsing", "time_slot_format", "no_fabricated_slots"];
-  for (const criterion of criticalCriteria) {
-    const entries = results.flatMap((r) => r.validations.filter((v) => v.criterion === criterion));
-    const failures = entries.filter((v) => !v.passed);
-    assert(
-      failures.length === 0,
-      `Critical criterion "${criterion}" failed ${failures.length}/${entries.length} times`
-    );
-  }
-});
+    // Assert no errors
+    const errors = results.filter((r) => r.error);
+    assertEquals(errors.length, 0, `${errors.length} queries had errors: ${errors.map((e) => `#${e.id}: ${e.error}`).join(", ")}`);
+
+    // Assert critical criteria pass rate
+    const criticalCriteria = ["response_structure", "query_parsing", "time_slot_format", "no_fabricated_slots"];
+    for (const criterion of criticalCriteria) {
+      const entries = results.flatMap((r) => r.validations.filter((v) => v.criterion === criterion));
+      const failures = entries.filter((v) => !v.passed);
+      assert(
+        failures.length === 0,
+        `Critical criterion "${criterion}" failed ${failures.length}/${entries.length} times`
+      );
+    }
+  });
+}
