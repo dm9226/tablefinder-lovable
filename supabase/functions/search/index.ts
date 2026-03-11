@@ -1454,6 +1454,36 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
               console.log(`  Geocode retry error for ${r.name}:`, retryErr);
             }
           }
+          // Try stripping zip code and retry
+          const noZip = addr.replace(/\s+\d{5}(-\d{4})?$/, "").trim();
+          if (noZip !== addr && noZip !== simplified) {
+            try {
+              await new Promise(r2 => setTimeout(r2, 350));
+              console.log(`  Geocode retry (no-zip) for ${r.name}: ${noZip}`);
+              const zipResp = await fetch(
+                `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(noZip)}&format=json&limit=1&addressdetails=1`,
+                { headers: { "User-Agent": "TableFinder/1.0" } }
+              );
+              if (zipResp.ok) {
+                const zipData = await zipResp.json();
+                if (zipData?.[0]) {
+                  const latZ = parseFloat(zipData[0].lat);
+                  const lngZ = parseFloat(zipData[0].lon);
+                  if (Number.isFinite(latZ) && Number.isFinite(lngZ)) {
+                    r.distanceMiles = +haversine(cityLat, cityLng, latZ, lngZ).toFixed(1);
+                    const geoAddrZ = zipData[0].address;
+                    const geoNeighborhoodZ = geoAddrZ?.suburb || geoAddrZ?.neighbourhood || geoAddrZ?.city_district || "";
+                    if (geoNeighborhoodZ) r.neighborhood = geoNeighborhoodZ;
+                    else if (r._addressCity) r.neighborhood = r._addressCity;
+                    console.log(`  Geocoded (no-zip) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                    resolve(); return;
+                  }
+                }
+              }
+            } catch (zipErr) {
+              console.log(`  Geocode no-zip retry error for ${r.name}:`, zipErr);
+            }
+          }
           // Still failed — try name-based geocoding as last resort
           try {
             await new Promise(r2 => setTimeout(r2, 350));
