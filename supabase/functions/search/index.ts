@@ -1838,79 +1838,116 @@ async function verifyAvailability(
       };
 
       // ── OPENTABLE-SPECIFIC: Parse "Select a time" section ──
-      if (isOT) {
-        // Step 1: Find the "Select a time" section
-        const selectTimeIdx = markdown.indexOf("### Select a time");
-        const selectTimeLower = markdown.toLowerCase().indexOf("select a time");
+      // Helper: parse OT slots from markdown content
+      const parseOTSlots = (md: string): { time: string; minutes: number }[] => {
+        const slots: { time: string; minutes: number }[] = [];
+        const seen = new Set<string>();
+        
+        const selectTimeIdx = md.indexOf("### Select a time");
+        const selectTimeLower = md.toLowerCase().indexOf("select a time");
         
         if (selectTimeIdx !== -1 || selectTimeLower !== -1) {
           const sectionStart = selectTimeIdx !== -1 ? selectTimeIdx : selectTimeLower;
-          // Extract section from header to next heading or end (max 500 chars)
-          const sectionEnd = markdown.indexOf("\n#", sectionStart + 10);
-          const otSection = markdown.substring(sectionStart, sectionEnd !== -1 ? sectionEnd : sectionStart + 2000);
+          const sectionEnd = md.indexOf("\n#", sectionStart + 10);
+          const otSection = md.substring(sectionStart, sectionEnd !== -1 ? sectionEnd : sectionStart + 2000);
           
-          // Step 2: Extract times from multiple OT markdown formats
-          // Clean bonus point suffixes first: "+1,000 pts", "+500 pts", etc.
           const cleanedSection = otSection.replace(/\+\d{1,3}(,\d{3})?\s*pts/gi, '');
           
-          // Pattern A: list items ("- 6:30 PM", "• 7:00 PM")
+          // Pattern A: list items
           const otListRegex = /^[\s]*[-•*]\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))/gm;
           let otMatch;
           while ((otMatch = otListRegex.exec(cleanedSection)) !== null) {
             const afterMatch = cleanedSection.substring(otMatch.index, otMatch.index + otMatch[0].length + 30);
             if (/notify/i.test(afterMatch)) continue;
             const parsed = parseTimeStr(otMatch[1]);
-            if (parsed && !seenTimes.has(parsed.time)) {
-              seenTimes.add(parsed.time);
-              foundTimes.push(parsed);
-            }
+            if (parsed && !seen.has(parsed.time)) { seen.add(parsed.time); slots.push(parsed); }
           }
           
-          // Pattern B: link-wrapped times ("[6:30 PM](url)")
+          // Pattern B: link-wrapped times
           const otLinkRegex = /\[(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\]\([^)]*\)/gi;
           let otLinkMatch;
           while ((otLinkMatch = otLinkRegex.exec(cleanedSection)) !== null) {
             const afterMatch = cleanedSection.substring(otLinkMatch.index, otLinkMatch.index + otLinkMatch[0].length + 30);
             if (/notify/i.test(afterMatch)) continue;
             const parsed = parseTimeStr(otLinkMatch[1]);
-            if (parsed && !seenTimes.has(parsed.time)) {
-              seenTimes.add(parsed.time);
-              foundTimes.push(parsed);
-            }
+            if (parsed && !seen.has(parsed.time)) { seen.add(parsed.time); slots.push(parsed); }
           }
           
-          // Pattern C: standalone times on their own line
-          if (foundTimes.length === 0) {
+          // Pattern C: standalone times
+          if (slots.length === 0) {
             const otStandaloneRegex = /^\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\s*$/gm;
             let otStandalone;
             while ((otStandalone = otStandaloneRegex.exec(cleanedSection)) !== null) {
               const parsed = parseTimeStr(otStandalone[1]);
-              if (parsed && !seenTimes.has(parsed.time)) {
-                seenTimes.add(parsed.time);
-                foundTimes.push(parsed);
-              }
+              if (parsed && !seen.has(parsed.time)) { seen.add(parsed.time); slots.push(parsed); }
             }
           }
-          
-          if (foundTimes.length > 0) {
-            console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from "Select a time" section: ${foundTimes.map(t=>t.time).join(", ")}`);
+        }
+        return slots;
+      };
+      
+      if (isOT) {
+        // First pass: parse OT slots from initial scrape
+        foundTimes = parseOTSlots(markdown);
+        const hadSelectSection = markdown.toLowerCase().includes("select a time");
+        
+        if (foundTimes.length > 0) {
+          foundTimes.forEach(t => seenTimes.add(t.time));
+          console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from "Select a time" section: ${foundTimes.map(t=>t.time).join(", ")}`);
+        }
+        
+        // Two-pass retry: if no slots AND no "Select a time" section, re-scrape with waitFor
+        if (foundTimes.length === 0 && !hadSelectSection) {
+          console.log(`  ${r.name} [opentable]: no "Select a time" section on first pass — retrying with waitFor: 5000ms`);
+          try {
+            const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${firecrawlKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                url: r.platformUrl,
+                formats: ["markdown"],
+                onlyMainContent: false,
+                waitFor: 5000,
+              }),
+            });
+            
+            if (retryResp.ok) {
+              const retryData = await retryResp.json();
+              const retryMarkdown = extractFirecrawlMarkdown(retryData);
+              if (retryMarkdown) {
+                foundTimes = parseOTSlots(retryMarkdown);
+                if (foundTimes.length > 0) {
+                  foundTimes.forEach(t => seenTimes.add(t.time));
+                  console.log(`  ${r.name} [opentable] RETRY SUCCESS: extracted ${foundTimes.length} times: ${foundTimes.map(t=>t.time).join(", ")}`);
+                  bookingMarkdown = retryMarkdown;
+                } else {
+                  console.log(`  ${r.name} [opentable] RETRY: still no slots after waitFor`);
+                  bookingMarkdown = retryMarkdown;
+                }
+              }
+            } else {
+              console.log(`  ${r.name} [opentable] RETRY: scrape failed (${retryResp.status})`);
+            }
+          } catch (retryErr) {
+            console.log(`  ${r.name} [opentable] RETRY error: ${retryErr}`);
           }
         }
         
-        // Step 3: If OT parser found nothing, strip dropdown noise and try generic regex
-        // The dropdown is a single line with 10+ concatenated times like "12:00 AM12:30 AM..."
+        // Step 3: If still nothing, strip dropdown noise and fall through to generic regex
         if (foundTimes.length === 0) {
-          // Remove lines with 10+ time matches (dropdown noise)
           const lines = bookingMarkdown.split("\n");
           const cleanedLines = lines.filter(line => {
             const timeMatches = line.match(/\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)/g);
             return !timeMatches || timeMatches.length < 10;
           });
           bookingMarkdown = cleanedLines.join("\n");
-          console.log(`  ${r.name} [opentable]: no "Select a time" section found, falling through to generic regex (dropdown noise stripped)`);
+          console.log(`  ${r.name} [opentable]: no slots after retry, falling through to generic regex (dropdown noise stripped)`);
         }
         
-        // Step 4: Apply ±2h OT time window (same as universal window)
+        // Step 4: Apply ±2h OT time window
         if (foundTimes.length > 0) {
           const otWindowStart = windowStart;
           const otWindowEnd = windowEnd;
@@ -1918,7 +1955,6 @@ async function verifyAvailability(
           const otFiltered = foundTimes.filter(t => t.minutes >= otWindowStart && t.minutes <= otWindowEnd);
           
           if (otFiltered.length > 0) {
-            // Sort by proximity, keep top 5
             otFiltered.sort((a, b) => Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes));
             const top5 = otFiltered.slice(0, 5).sort((a, b) => a.minutes - b.minutes);
             r.timeSlots = top5.map(t => ({ time: t.time }));
