@@ -1187,7 +1187,8 @@ async function fetchYelpCandidates(
     const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t));
 
     // Build expanded token set for dish searches: include parent cuisine types
-    const expandedTokens = [...cuisineTokens];
+    const GENERIC_CUISINE_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
+    let expandedTokens = [...cuisineTokens];
     if (params.dishKeyword) {
       const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
       for (const pc of parentCuisines) {
@@ -1197,6 +1198,8 @@ async function fetchYelpCandidates(
       if (params.cuisineType && !expandedTokens.includes(params.cuisineType)) {
         expandedTokens.push(params.cuisineType);
       }
+      // Remove overly generic tokens that cause false positives in dish searches
+      expandedTokens = expandedTokens.filter(t => !GENERIC_CUISINE_TOKENS.has(t));
     }
 
     const filtered = businesses.filter((b: any) => {
@@ -1412,13 +1415,18 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
           const lat = parseFloat(data[0].lat);
           const lng = parseFloat(data[0].lon);
           if (Number.isFinite(lat) && Number.isFinite(lng)) {
-            r.distanceMiles = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
-            // Extract neighborhood from geocoded address
-            const geoAddr = data[0].address;
-            const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
-            if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-            else if (r._addressCity) r.neighborhood = r._addressCity;
-            console.log(`  Geocoded ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+            const dist = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
+            if (dist > 200) {
+              console.log(`  Geocode sanity fail ${r.name}: ${dist} mi — discarding`);
+            } else {
+              r.distanceMiles = dist;
+              // Extract neighborhood from geocoded address
+              const geoAddr = data[0].address;
+              const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+              if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+              else if (r._addressCity) r.neighborhood = r._addressCity;
+              console.log(`  Geocoded ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+            }
           }
         } else {
           // Try stripping suite/unit numbers and retry
@@ -1449,6 +1457,36 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
               }
             } catch (retryErr) {
               console.log(`  Geocode retry error for ${r.name}:`, retryErr);
+            }
+          }
+          // Try stripping zip code and retry
+          const noZip = addr.replace(/\s+\d{5}(-\d{4})?$/, "").trim();
+          if (noZip !== addr && noZip !== simplified) {
+            try {
+              await new Promise(r2 => setTimeout(r2, 350));
+              console.log(`  Geocode retry (no-zip) for ${r.name}: ${noZip}`);
+              const zipResp = await fetch(
+                `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(noZip)}&format=json&limit=1&addressdetails=1`,
+                { headers: { "User-Agent": "TableFinder/1.0" } }
+              );
+              if (zipResp.ok) {
+                const zipData = await zipResp.json();
+                if (zipData?.[0]) {
+                  const latZ = parseFloat(zipData[0].lat);
+                  const lngZ = parseFloat(zipData[0].lon);
+                  if (Number.isFinite(latZ) && Number.isFinite(lngZ)) {
+                    r.distanceMiles = +haversine(cityLat, cityLng, latZ, lngZ).toFixed(1);
+                    const geoAddrZ = zipData[0].address;
+                    const geoNeighborhoodZ = geoAddrZ?.suburb || geoAddrZ?.neighbourhood || geoAddrZ?.city_district || "";
+                    if (geoNeighborhoodZ) r.neighborhood = geoNeighborhoodZ;
+                    else if (r._addressCity) r.neighborhood = r._addressCity;
+                    console.log(`  Geocoded (no-zip) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+                    resolve(); return;
+                  }
+                }
+              }
+            } catch (zipErr) {
+              console.log(`  Geocode no-zip retry error for ${r.name}:`, zipErr);
             }
           }
           // Still failed — try name-based geocoding as last resort
@@ -1752,10 +1790,19 @@ async function verifyAvailability(
                 const addrRegexBroad = /(\d{1,5}\s+[A-Za-z\s.#']+,\s*[A-Za-z\s]+,\s*[A-Z]{2}(?:\s+\d{5})?)/m;
                 const addrMatch3 = normalizedMd.match(addrRegexBroad);
                 if (addrMatch3) {
-                  r._address = addrMatch3[1].trim();
-                  const cityMatch4 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
-                  r._addressCity = cityMatch4 ? cityMatch4[1].trim() : undefined;
-                  console.log(`  Address extracted (broad regex) for ${r.name}: ${r._address}`);
+                  // Validate broad match: require at least 3 words before first comma
+                  // to avoid false positives like "101 Steak, Atlanta, GA"
+                  const broadCandidate = addrMatch3[1].trim();
+                  const preComma = broadCandidate.split(",")[0].trim();
+                  const wordCount = preComma.split(/\s+/).length;
+                  if (wordCount >= 3) {
+                    r._address = broadCandidate;
+                    const cityMatch4 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+                    r._addressCity = cityMatch4 ? cityMatch4[1].trim() : undefined;
+                    console.log(`  Address extracted (broad regex) for ${r.name}: ${r._address}`);
+                  } else {
+                    console.log(`  [ADDR_MISS] Broad regex match rejected (too few words: "${preComma}") for ${r.name} [${r.platform}]`);
+                  }
                 } else {
                   console.log(`  [ADDR_MISS] No address pattern found for ${r.name} [${r.platform}]`);
                 }
@@ -1792,7 +1839,8 @@ async function verifyAvailability(
       const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS_SET.has(t));
       
       // Build expanded check tokens: include parent cuisine types for dish searches
-      const verifyTokens = [...cuisineTokens];
+      const GENERIC_VERIFY_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
+      let verifyTokens = [...cuisineTokens];
       if (params.dishKeyword) {
         const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
         for (const pc of parentCuisines) {
@@ -1801,6 +1849,8 @@ async function verifyAvailability(
         if (params.cuisineType && !verifyTokens.includes(params.cuisineType)) {
           verifyTokens.push(params.cuisineType);
         }
+        // Remove overly generic tokens for dish searches
+        verifyTokens = verifyTokens.filter(t => !GENERIC_VERIFY_TOKENS.has(t));
       }
       
       if (verifyTokens.length > 0) {
@@ -2131,14 +2181,18 @@ async function verifyAvailability(
       // ANY times at all (i.e. the JS widget didn't render into markdown).
       // If we DID find times but none are in the meal window, that's a real rejection.
       if (foundTimes.length === 0 && hasYelpAvailabilityMarker) {
-        console.log(`✓ Verified ${r.name} [yelp] — reservation markers present but no extractable times (trusting marker for ${mealLabel})`);
+        const reqLabel = toTwelveHourLabel(params.time);
+        if (reqLabel) r.timeSlots = [{ time: reqLabel }];
+        console.log(`✓ Verified ${r.name} [yelp] — reservation markers, using requested time ${reqLabel}`);
         return r;
       }
 
       // For OpenTable, if generic regex also found nothing but booking markers exist, trust the link
       const hasOTBookingMarker = isOT && /\b(make\s+a\s+reservation|select\s+a\s+time|find\s+a\s+table|book\s+a\s+table|reserve\s+a\s+table)\b/i.test(markdown);
       if (foundTimes.length === 0 && hasOTBookingMarker) {
-        console.log(`✓ Verified ${r.name} [opentable] — booking markers present but no extractable times (trusting marker)`);
+        const reqLabel2 = toTwelveHourLabel(params.time);
+        if (reqLabel2) r.timeSlots = [{ time: reqLabel2 }];
+        console.log(`✓ Verified ${r.name} [opentable] — booking markers, using requested time ${reqLabel2}`);
         return r;
       }
 
