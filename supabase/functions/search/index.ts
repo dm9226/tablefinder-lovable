@@ -1272,96 +1272,6 @@ function toTwelveHourLabel(time24: string): string {
 // ─── Batch geocode verified results ───
 
 async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams): Promise<void> {
-  // First, for any non-Yelp results missing an address, try name-based geocoding as fallback
-  const missingAddress = results.filter(r => r.platform !== "yelp" && !r._address && !r.distanceMiles);
-  if (missingAddress.length > 0) {
-    const city = params.city || "";
-    const state = params.state || "";
-    const metroCity = getMetroCityName(city, state);
-    const nameGeoPromises = missingAddress.map((r, i) => {
-      return new Promise<void>(async (resolve) => {
-        await new Promise(wait => setTimeout(wait, i * 100));
-        try {
-          const cleanedGeoName = r.name
-            .replace(/\s+restaurant$/i, "")
-            .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "")
-            .replace(/\s+on\s+OpenTable$/i, "")
-            .replace(/\s+on\s+Resy$/i, "")
-            .replace(/[•·]\s*[A-Za-z\s&]+$/i, "")
-            .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "")
-            .trim();
-          const nameQuery = `${cleanedGeoName}, ${metroCity}, ${state}`;
-          const resp = await fetch(
-            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
-            { headers: { "User-Agent": "TableFinder/1.0" } }
-          );
-          let found = false;
-          if (resp.ok) {
-            const data = await resp.json();
-            if (data?.[0]) {
-              found = true;
-              r._address = nameQuery;
-              r._addressCity = metroCity;
-              const geoAddr = data[0].address;
-              const lat = parseFloat(data[0].lat);
-              const lng = parseFloat(data[0].lon);
-              if (Number.isFinite(lat) && Number.isFinite(lng) && params.lat && params.lng) {
-                const dist = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
-                if (dist > 200) {
-                  console.log(`  Geocode sanity fail (name fallback) ${r.name}: ${dist} mi — discarding`);
-                } else {
-                  r.distanceMiles = dist;
-                  const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
-                  if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-                  console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
-                }
-              }
-            }
-          }
-          // Broader retry: name + state only
-          if (!found) {
-            const broaderQuery = `${cleanedGeoName}, ${state}`;
-            console.log(`  [ADDR_NAME_RETRY] Trying broader query: ${broaderQuery}`);
-            const resp2 = await fetch(
-              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(broaderQuery)}&format=json&limit=1&addressdetails=1`,
-              { headers: { "User-Agent": "TableFinder/1.0" } }
-            );
-            if (resp2.ok) {
-              const data2 = await resp2.json();
-              if (data2?.[0]) {
-                r._address = broaderQuery;
-                r._addressCity = data2[0].address?.city || metroCity;
-                const lat = parseFloat(data2[0].lat);
-                const lng = parseFloat(data2[0].lon);
-                if (Number.isFinite(lat) && Number.isFinite(lng) && params.lat && params.lng) {
-                  const dist = +haversine(params.lat, params.lng, lat, lng).toFixed(1);
-                  if (dist > 200) {
-                    console.log(`  Geocode sanity fail (broader fallback) ${r.name}: ${dist} mi — discarding`);
-                  } else {
-                    r.distanceMiles = dist;
-                    const geoAddr2 = data2[0].address;
-                    const geoNeighborhood = geoAddr2?.suburb || geoAddr2?.neighbourhood || geoAddr2?.city_district || "";
-                    if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-                    console.log(`  Geocoded (broader fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
-                  }
-                }
-              } else {
-                console.log(`  [ADDR_NAME_MISS] No results for: ${nameQuery} OR ${broaderQuery}`);
-              }
-            }
-          }
-        } catch (err) {
-          console.log(`  Name geocode error for ${r.name}:`, err);
-        }
-        resolve();
-      });
-    });
-    await Promise.all(nameGeoPromises);
-  }
-
-  const toGeocode = results.filter(r => r.platform !== "yelp" && r._address && !r.distanceMiles);
-  if (toGeocode.length === 0) return;
-
   const cityLat = params.lat || 0;
   const cityLng = params.lng || 0;
   if (!cityLat || !cityLng) {
@@ -1369,199 +1279,107 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
     return;
   }
 
-  console.log(`Geocoding ${toGeocode.length} addresses via Nominatim...`);
+  const metroCity = getMetroCityName(params.city || "", params.state || "");
+  const state = params.state || "";
 
-  // Fire requests in parallel with 300ms stagger to avoid rate limiting
-  const geocodePromises = toGeocode.map((r, i) => {
-    return new Promise<void>(async (resolve) => {
-      // Stagger starts by 300ms
-      await new Promise(wait => setTimeout(wait, i * 100));
+  // Single geocoding helper: tries up to 4 strategies, returns on first success
+  async function geocodeOne(r: Restaurant): Promise<void> {
+    if (r.platform === "yelp") return; // Yelp has API-provided distance
+    if (r.distanceMiles != null) return; // Already geocoded
+
+    const cleanedName = r.name
+      .replace(/\s+restaurant$/i, "")
+      .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "")
+      .replace(/\s+on\s+OpenTable$/i, "")
+      .replace(/\s+on\s+Resy$/i, "")
+      .replace(/[•·]\s*[A-Za-z\s&]+$/i, "")
+      .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "")
+      .replace(/\s*-\s*(Atlanta|Buckhead|Decatur|Perimeter|Brookhaven).*$/i, "")
+      .trim();
+
+    // Helper to attempt a Nominatim query and apply result
+    async function tryGeocode(queryUrl: string, label: string): Promise<boolean> {
       try {
-        const addr = r._address!;
-        const resp = await fetch(
-          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1&addressdetails=1`,
-          { headers: { "User-Agent": "TableFinder/1.0" } }
-        );
-
-        if (resp.status === 429) {
-          // Rate limited — wait and retry once
-          await new Promise(wait => setTimeout(wait, 1000));
-          const retry = await fetch(
-            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1&addressdetails=1`,
-            { headers: { "User-Agent": "TableFinder/1.0" } }
-          );
-          if (!retry.ok) { resolve(); return; }
-          const retryData = await retry.json();
-          if (retryData?.[0]) {
-            const lat = parseFloat(retryData[0].lat);
-            const lng = parseFloat(retryData[0].lon);
-            if (Number.isFinite(lat) && Number.isFinite(lng)) {
-              r.distanceMiles = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
-              // Extract neighborhood from geocoded address
-              const geoAddr = retryData[0].address;
-              const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
-              if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-              else if (r._addressCity) r.neighborhood = r._addressCity;
-              console.log(`  Geocoded (retry) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
-            }
-          }
-          resolve();
-          return;
-        }
-
-        if (!resp.ok) { resolve(); return; }
+        const resp = await fetch(queryUrl, { headers: { "User-Agent": "TableFinder/1.0" } });
+        if (!resp.ok) return false;
         const data = await resp.json();
-        if (data?.[0]) {
-          const lat = parseFloat(data[0].lat);
-          const lng = parseFloat(data[0].lon);
-          if (Number.isFinite(lat) && Number.isFinite(lng)) {
-            const dist = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
-            if (dist > 200) {
-              console.log(`  Geocode sanity fail ${r.name}: ${dist} mi — discarding`);
-            } else {
-              r.distanceMiles = dist;
-              // Extract neighborhood from geocoded address
-              const geoAddr = data[0].address;
-              const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
-              if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-              else if (r._addressCity) r.neighborhood = r._addressCity;
-              console.log(`  Geocoded ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
-            }
-          }
-        } else {
-          // Try stripping suite/unit numbers and retry
-          const simplified = addr.replace(/\b(suite|ste|unit|apt|#)\s*\S+,?\s*/gi, "").replace(/\s+/g, " ").trim();
-          if (simplified !== addr) {
-            console.log(`  Geocode retry (simplified) for ${r.name}: ${simplified}`);
-            try {
-              await new Promise(r2 => setTimeout(r2, 350));
-              const retryResp = await fetch(
-                `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(simplified)}&format=json&limit=1&addressdetails=1`,
-                { headers: { "User-Agent": "TableFinder/1.0" } }
-              );
-              if (retryResp.ok) {
-                const retryData = await retryResp.json();
-                if (retryData?.[0]) {
-                  const lat2 = parseFloat(retryData[0].lat);
-                  const lng2 = parseFloat(retryData[0].lon);
-                  if (Number.isFinite(lat2) && Number.isFinite(lng2)) {
-                    r.distanceMiles = +haversine(cityLat, cityLng, lat2, lng2).toFixed(1);
-                    const geoAddr2 = retryData[0].address;
-                    const geoNeighborhood2 = geoAddr2?.suburb || geoAddr2?.neighbourhood || geoAddr2?.city_district || "";
-                    if (geoNeighborhood2) r.neighborhood = geoNeighborhood2;
-                    else if (r._addressCity) r.neighborhood = r._addressCity;
-                    console.log(`  Geocoded (simplified) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
-                    resolve(); return;
-                  }
-                }
-              }
-            } catch (retryErr) {
-              console.log(`  Geocode retry error for ${r.name}:`, retryErr);
-            }
-          }
-          // Try stripping zip code and retry
-          const noZip = addr.replace(/\s+\d{5}(-\d{4})?$/, "").trim();
-          if (noZip !== addr && noZip !== simplified) {
-            try {
-              await new Promise(r2 => setTimeout(r2, 350));
-              console.log(`  Geocode retry (no-zip) for ${r.name}: ${noZip}`);
-              const zipResp = await fetch(
-                `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(noZip)}&format=json&limit=1&addressdetails=1`,
-                { headers: { "User-Agent": "TableFinder/1.0" } }
-              );
-              if (zipResp.ok) {
-                const zipData = await zipResp.json();
-                if (zipData?.[0]) {
-                  const latZ = parseFloat(zipData[0].lat);
-                  const lngZ = parseFloat(zipData[0].lon);
-                  if (Number.isFinite(latZ) && Number.isFinite(lngZ)) {
-                    r.distanceMiles = +haversine(cityLat, cityLng, latZ, lngZ).toFixed(1);
-                    const geoAddrZ = zipData[0].address;
-                    const geoNeighborhoodZ = geoAddrZ?.suburb || geoAddrZ?.neighbourhood || geoAddrZ?.city_district || "";
-                    if (geoNeighborhoodZ) r.neighborhood = geoNeighborhoodZ;
-                    else if (r._addressCity) r.neighborhood = r._addressCity;
-                    console.log(`  Geocoded (no-zip) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
-                    resolve(); return;
-                  }
-                }
-              }
-            } catch (zipErr) {
-              console.log(`  Geocode no-zip retry error for ${r.name}:`, zipErr);
-            }
-          }
-          // Still failed — try name-based geocoding as last resort
-          try {
-            await new Promise(r2 => setTimeout(r2, 350));
-            const cleanName = r.name.replace(/\s*Restaurant\s*/gi, "").replace(/\s*-\s*(Atlanta|Buckhead|Decatur|Perimeter|Brookhaven).*$/i, "").trim();
-            const metroCity = getMetroCityName(params.city, params.state);
-            const nameQuery = `${cleanName}, ${metroCity}, ${params.state}`;
-            console.log(`  [ADDR_NAME_FALLBACK] Trying: ${nameQuery}`);
-            const nameResp = await fetch(
-              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`,
-              { headers: { "User-Agent": "TableFinder/1.0" } }
-            );
-            if (nameResp.ok) {
-              const nameData = await nameResp.json();
-              if (nameData?.[0]) {
-                const lat3 = parseFloat(nameData[0].lat);
-                const lng3 = parseFloat(nameData[0].lon);
-                if (Number.isFinite(lat3) && Number.isFinite(lng3)) {
-                  r.distanceMiles = +haversine(cityLat, cityLng, lat3, lng3).toFixed(1);
-                  const geoAddr3 = nameData[0].address;
-                  const geoNeighborhood3 = geoAddr3?.suburb || geoAddr3?.neighbourhood || geoAddr3?.city_district || "";
-                  if (geoNeighborhood3) r.neighborhood = geoNeighborhood3;
-                  else if (r._addressCity) r.neighborhood = r._addressCity;
-                  console.log(`  Geocoded (name fallback) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
-                  resolve(); return;
-                }
-              }
-            }
-          } catch (nameFallbackErr) {
-            console.log(`  Name fallback geocode error for ${r.name}:`, nameFallbackErr);
-          }
-          // Structured Nominatim query as last resort (street + city + state params)
-          if (r.distanceMiles == null) {
-            try {
-              await new Promise(r2 => setTimeout(r2, 350));
-              const streetPart = addr.split(",")[0].trim();
-              const structuredUrl = `https://nominatim.openstreetmap.org/search?street=${encodeURIComponent(streetPart)}&city=${encodeURIComponent(metroCity)}&state=${encodeURIComponent(params.state || "")}&format=json&limit=1&addressdetails=1`;
-              console.log(`  [ADDR_STRUCTURED] Trying structured query for ${r.name}: street="${streetPart}" city="${metroCity}"`);
-              const structResp = await fetch(structuredUrl, { headers: { "User-Agent": "TableFinder/1.0" } });
-              if (structResp.ok) {
-                const structData = await structResp.json();
-                if (structData?.[0]) {
-                  const latS = parseFloat(structData[0].lat);
-                  const lngS = parseFloat(structData[0].lon);
-                  if (Number.isFinite(latS) && Number.isFinite(lngS)) {
-                    const distS = +haversine(cityLat, cityLng, latS, lngS).toFixed(1);
-                    if (distS <= 200) {
-                      r.distanceMiles = distS;
-                      const geoAddrS = structData[0].address;
-                      const geoNeighborhoodS = geoAddrS?.suburb || geoAddrS?.neighbourhood || geoAddrS?.city_district || "";
-                      if (geoNeighborhoodS) r.neighborhood = geoNeighborhoodS;
-                      else if (r._addressCity) r.neighborhood = r._addressCity;
-                      console.log(`  Geocoded (structured) ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
-                      resolve(); return;
-                    } else {
-                      console.log(`  Geocode sanity fail (structured) ${r.name}: ${distS} mi — discarding`);
-                    }
-                  }
-                }
-              }
-            } catch (structErr) {
-              console.log(`  Structured geocode error for ${r.name}:`, structErr);
-            }
-          }
-          if (r._addressCity) r.neighborhood = r._addressCity;
-          console.log(`  Geocode miss for ${r.name}: ${addr}`);
+        if (!data?.[0]) return false;
+        const lat = parseFloat(data[0].lat);
+        const lng = parseFloat(data[0].lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+        const dist = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
+        if (dist > 200) {
+          console.log(`  Geocode sanity fail (${label}) ${r.name}: ${dist} mi — discarding`);
+          return false;
         }
-      } catch (err) {
-        console.log(`  Geocode error for ${r.name}:`, err);
-        if (r._addressCity) r.neighborhood = r._addressCity;
+        r.distanceMiles = dist;
+        const geoAddr = data[0].address;
+        const neighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+        if (neighborhood) r.neighborhood = neighborhood;
+        else if (r._addressCity) r.neighborhood = r._addressCity;
+        console.log(`  Geocoded (${label}) ${r.name}: ${dist} mi (${r.neighborhood})`);
+        return true;
+      } catch {
+        return false;
       }
+    }
+
+    // Strategy 1: Direct address lookup
+    if (r._address) {
+      const addr = r._address;
+      const url1 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1&addressdetails=1`;
+      if (await tryGeocode(url1, "direct")) return;
+
+      // Strategy 2: Simplified address (strip suite/unit + zip)
+      const simplified = addr
+        .replace(/\b(suite|ste|unit|apt|#)\s*\S+,?\s*/gi, "")
+        .replace(/\s+\d{5}(-\d{4})?$/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (simplified !== addr) {
+        await new Promise(w => setTimeout(w, 200));
+        const url2 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(simplified)}&format=json&limit=1&addressdetails=1`;
+        if (await tryGeocode(url2, "simplified")) return;
+      }
+
+      // Strategy 3: Structured query (street + city + state params)
+      const streetPart = addr.split(",")[0].trim();
+      if (streetPart.length > 3) {
+        await new Promise(w => setTimeout(w, 200));
+        const url3 = `https://nominatim.openstreetmap.org/search?street=${encodeURIComponent(streetPart)}&city=${encodeURIComponent(metroCity)}&state=${encodeURIComponent(state)}&format=json&limit=1&addressdetails=1`;
+        if (await tryGeocode(url3, "structured")) return;
+      }
+    }
+
+    // Strategy 4: Name-based lookup (for missing addresses or all previous failures)
+    const nameQuery = `${cleanedName}, ${metroCity}, ${state}`;
+    await new Promise(w => setTimeout(w, 200));
+    const url4 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`;
+    if (await tryGeocode(url4, "name")) return;
+
+    // Strategy 5: Broader name (name + state only)
+    const broaderQuery = `${cleanedName}, ${state}`;
+    await new Promise(w => setTimeout(w, 200));
+    const url5 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(broaderQuery)}&format=json&limit=1&addressdetails=1`;
+    if (await tryGeocode(url5, "name-broad")) return;
+
+    if (r._addressCity) r.neighborhood = r._addressCity;
+    console.log(`  Geocode miss for ${r.name}`);
+  }
+
+  const toGeocode = results.filter(r => r.platform !== "yelp");
+  if (toGeocode.length === 0) return;
+
+  console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim...`);
+
+  // Fire in parallel with 100ms stagger
+  const geocodePromises = toGeocode.map((r, i) =>
+    new Promise<void>(async (resolve) => {
+      await new Promise(w => setTimeout(w, i * 100));
+      await geocodeOne(r);
       resolve();
-    });
-  });
+    })
+  );
 
   await Promise.all(geocodePromises);
   const geocoded = toGeocode.filter(r => r.distanceMiles != null).length;
