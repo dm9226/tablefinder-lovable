@@ -1368,20 +1368,10 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
       }
     }
 
-    // Strategy 4: Name-based lookup (for missing addresses or all previous failures)
-    const nameQuery = `${cleanedName}, ${metroCity}, ${state}`;
-    await new Promise(w => setTimeout(w, 200));
-    const url4 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nameQuery)}&format=json&limit=1&addressdetails=1`;
-    if (await tryGeocode(url4, "name")) return;
-
-    // Strategy 5: Broader name (name + state only)
-    const broaderQuery = `${cleanedName}, ${state}`;
-    await new Promise(w => setTimeout(w, 200));
-    const url5 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(broaderQuery)}&format=json&limit=1&addressdetails=1`;
-    if (await tryGeocode(url5, "name-broad")) return;
-
+    // Strategies 4-5 removed: Nominatim name-based lookups fail >95% of the time.
+    // AI coordinate enrichment now handles restaurants without addresses.
     if (r._addressCity) r.neighborhood = r._addressCity;
-    console.log(`  Geocode miss for ${r.name}`);
+    console.log(`  Nominatim miss for ${r.name} — will use AI coordinates`);
   }
 
   const toGeocode = results.filter(r => r.platform !== "yelp");
