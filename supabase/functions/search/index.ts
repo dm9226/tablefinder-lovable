@@ -1752,10 +1752,19 @@ async function verifyAvailability(
                 const addrRegexBroad = /(\d{1,5}\s+[A-Za-z\s.#']+,\s*[A-Za-z\s]+,\s*[A-Z]{2}(?:\s+\d{5})?)/m;
                 const addrMatch3 = normalizedMd.match(addrRegexBroad);
                 if (addrMatch3) {
-                  r._address = addrMatch3[1].trim();
-                  const cityMatch4 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
-                  r._addressCity = cityMatch4 ? cityMatch4[1].trim() : undefined;
-                  console.log(`  Address extracted (broad regex) for ${r.name}: ${r._address}`);
+                  // Validate broad match: require at least 3 words before first comma
+                  // to avoid false positives like "101 Steak, Atlanta, GA"
+                  const broadCandidate = addrMatch3[1].trim();
+                  const preComma = broadCandidate.split(",")[0].trim();
+                  const wordCount = preComma.split(/\s+/).length;
+                  if (wordCount >= 3) {
+                    r._address = broadCandidate;
+                    const cityMatch4 = r._address.match(/,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*[A-Z]{2}/);
+                    r._addressCity = cityMatch4 ? cityMatch4[1].trim() : undefined;
+                    console.log(`  Address extracted (broad regex) for ${r.name}: ${r._address}`);
+                  } else {
+                    console.log(`  [ADDR_MISS] Broad regex match rejected (too few words: "${preComma}") for ${r.name} [${r.platform}]`);
+                  }
                 } else {
                   console.log(`  [ADDR_MISS] No address pattern found for ${r.name} [${r.platform}]`);
                 }
