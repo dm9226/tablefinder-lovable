@@ -1804,7 +1804,8 @@ async function verifyAvailability(
       const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS_SET.has(t));
       
       // Build expanded check tokens: include parent cuisine types for dish searches
-      const verifyTokens = [...cuisineTokens];
+      const GENERIC_VERIFY_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
+      let verifyTokens = [...cuisineTokens];
       if (params.dishKeyword) {
         const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
         for (const pc of parentCuisines) {
@@ -1813,6 +1814,8 @@ async function verifyAvailability(
         if (params.cuisineType && !verifyTokens.includes(params.cuisineType)) {
           verifyTokens.push(params.cuisineType);
         }
+        // Remove overly generic tokens for dish searches
+        verifyTokens = verifyTokens.filter(t => !GENERIC_VERIFY_TOKENS.has(t));
       }
       
       if (verifyTokens.length > 0) {
