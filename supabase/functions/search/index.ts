@@ -242,6 +242,8 @@ serve(async (req) => {
     ]);
 
     // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
+    const cityLat = params.lat ?? 0;
+    const cityLng = params.lng ?? 0;
     for (let i = 0; i < verified.length; i++) {
       const e = enrichmentMap.get(i);
       if (!e) continue;
@@ -255,7 +257,22 @@ serve(async (req) => {
       if (e.neighborhood && r.neighborhood === params.city) {
         r.neighborhood = e.neighborhood;
       }
+
+      // AI coordinate fallback: fill distance for restaurants Nominatim missed
+      if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
+        const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
+        if (aiDist <= 200) {
+          r.distanceMiles = aiDist;
+          if (e.neighborhood) r.neighborhood = e.neighborhood;
+          console.log(`  Geocoded (AI) ${r.name}: ${aiDist} mi (${r.neighborhood})`);
+        } else {
+          console.log(`  AI geocode sanity fail for ${r.name}: ${aiDist} mi — discarding`);
+        }
+      }
     }
+    const aiGeocoded = verified.filter(r => r.distanceMiles != null && r.platform !== "yelp").length;
+    const totalNonYelp = verified.filter(r => r.platform !== "yelp").length;
+    console.log(`Final geocoding: ${aiGeocoded}/${totalNonYelp} non-Yelp restaurants have distances`);
 
     // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
