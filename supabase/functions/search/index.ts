@@ -1800,23 +1800,21 @@ async function verifyAvailability(
       let windowEnd: number;
       let mealLabel: string;
 
+      // Meal label still used for Resy section selection
       if (reqH < 10) {
-        windowStart = 360;
-        windowEnd = 720;
         mealLabel = "breakfast";
       } else if (reqH < 12) {
-        windowStart = 630;
-        windowEnd = 900;
         mealLabel = "brunch";
       } else if (reqH < 16) {
-        windowStart = 660;
-        windowEnd = 960;
         mealLabel = "lunch";
       } else {
-        windowStart = 1080;
-        windowEnd = 1439;
         mealLabel = "dinner";
       }
+
+      // Universal ±2 hour window from requested time
+      const reqMinsForWindow = reqH * 60 + (parseInt(params.time.split(":")[1]) || 0);
+      windowStart = Math.max(0, reqMinsForWindow - 120);    // -2 hours
+      windowEnd = Math.min(1439, reqMinsForWindow + 120);    // +2 hours
 
       const foundTimes: { time: string; minutes: number }[] = [];
       const seenTimes = new Set<string>();
@@ -1849,16 +1847,18 @@ async function verifyAvailability(
           const sectionStart = selectTimeIdx !== -1 ? selectTimeIdx : selectTimeLower;
           // Extract section from header to next heading or end (max 500 chars)
           const sectionEnd = markdown.indexOf("\n#", sectionStart + 10);
-          const otSection = markdown.substring(sectionStart, sectionEnd !== -1 ? sectionEnd : sectionStart + 500);
+          const otSection = markdown.substring(sectionStart, sectionEnd !== -1 ? sectionEnd : sectionStart + 2000);
           
-          // Step 2: Extract times from markdown list items ("- 6:30 PM")
-          const otTimeRegex = /^[\s]*[-•*]\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))/gm;
+          // Step 2: Extract times from multiple OT markdown formats
+          // Clean bonus point suffixes first: "+1,000 pts", "+500 pts", etc.
+          const cleanedSection = otSection.replace(/\+\d{1,3}(,\d{3})?\s*pts/gi, '');
+          
+          // Pattern A: list items ("- 6:30 PM", "• 7:00 PM")
+          const otListRegex = /^[\s]*[-•*]\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))/gm;
           let otMatch;
-          while ((otMatch = otTimeRegex.exec(otSection)) !== null) {
-            // Skip if near "Notify me" marker
-            const afterMatch = otSection.substring(otMatch.index, otMatch.index + otMatch[0].length + 30);
+          while ((otMatch = otListRegex.exec(cleanedSection)) !== null) {
+            const afterMatch = cleanedSection.substring(otMatch.index, otMatch.index + otMatch[0].length + 30);
             if (/notify/i.test(afterMatch)) continue;
-            
             const parsed = parseTimeStr(otMatch[1]);
             if (parsed && !seenTimes.has(parsed.time)) {
               seenTimes.add(parsed.time);
@@ -1866,11 +1866,24 @@ async function verifyAvailability(
             }
           }
           
-          // Also try non-list format: standalone times on their own line
+          // Pattern B: link-wrapped times ("[6:30 PM](url)")
+          const otLinkRegex = /\[(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\]\([^)]*\)/gi;
+          let otLinkMatch;
+          while ((otLinkMatch = otLinkRegex.exec(cleanedSection)) !== null) {
+            const afterMatch = cleanedSection.substring(otLinkMatch.index, otLinkMatch.index + otLinkMatch[0].length + 30);
+            if (/notify/i.test(afterMatch)) continue;
+            const parsed = parseTimeStr(otLinkMatch[1]);
+            if (parsed && !seenTimes.has(parsed.time)) {
+              seenTimes.add(parsed.time);
+              foundTimes.push(parsed);
+            }
+          }
+          
+          // Pattern C: standalone times on their own line
           if (foundTimes.length === 0) {
             const otStandaloneRegex = /^\s*(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\s*$/gm;
             let otStandalone;
-            while ((otStandalone = otStandaloneRegex.exec(otSection)) !== null) {
+            while ((otStandalone = otStandaloneRegex.exec(cleanedSection)) !== null) {
               const parsed = parseTimeStr(otStandalone[1]);
               if (parsed && !seenTimes.has(parsed.time)) {
                 seenTimes.add(parsed.time);
@@ -1897,12 +1910,10 @@ async function verifyAvailability(
           console.log(`  ${r.name} [opentable]: no "Select a time" section found, falling through to generic regex (dropdown noise stripped)`);
         }
         
-        // Step 4: Apply tighter OT time window: requested time -1h to +2h
+        // Step 4: Apply ±2h OT time window (same as universal window)
         if (foundTimes.length > 0) {
-          const [rH, rM] = params.time.split(":").map(Number);
-          const reqMins = rH * 60 + (rM || 0);
-          const otWindowStart = Math.max(0, reqMins - 60);    // -1 hour
-          const otWindowEnd = Math.min(1439, reqMins + 120);   // +2 hours
+          const otWindowStart = windowStart;
+          const otWindowEnd = windowEnd;
           
           const otFiltered = foundTimes.filter(t => t.minutes >= otWindowStart && t.minutes <= otWindowEnd);
           
@@ -2050,13 +2061,11 @@ async function verifyAvailability(
         return r;
       }
 
-      // For OpenTable, if generic regex also found nothing but booking markers exist, trust the link
-      const hasOTBookingMarker = isOT && /\b(make\s+a\s+reservation|select\s+a\s+time|find\s+a\s+table|book\s+a\s+table|reserve\s+a\s+table)\b/i.test(markdown);
-      if (foundTimes.length === 0 && hasOTBookingMarker) {
-        const reqLabel2 = toTwelveHourLabel(params.time);
-        if (reqLabel2) r.timeSlots = [{ time: reqLabel2 }];
-        console.log(`✓ Verified ${r.name} [opentable] — booking markers, using requested time ${reqLabel2}`);
-        return r;
+      // OpenTable: Do NOT fabricate fallback times from booking markers.
+      // If real slots exist but are outside window, or parser found nothing, reject.
+      if (isOT && foundTimes.length === 0) {
+        console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback)`);
+        return null;
       }
 
       if (foundTimes.length > 0) {
