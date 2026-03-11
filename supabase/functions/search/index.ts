@@ -2140,14 +2140,18 @@ async function verifyAvailability(
       // ANY times at all (i.e. the JS widget didn't render into markdown).
       // If we DID find times but none are in the meal window, that's a real rejection.
       if (foundTimes.length === 0 && hasYelpAvailabilityMarker) {
-        console.log(`✓ Verified ${r.name} [yelp] — reservation markers present but no extractable times (trusting marker for ${mealLabel})`);
+        const reqLabel = toTwelveHourLabel(params.time);
+        if (reqLabel) r.timeSlots = [{ time: reqLabel }];
+        console.log(`✓ Verified ${r.name} [yelp] — reservation markers, using requested time ${reqLabel}`);
         return r;
       }
 
       // For OpenTable, if generic regex also found nothing but booking markers exist, trust the link
       const hasOTBookingMarker = isOT && /\b(make\s+a\s+reservation|select\s+a\s+time|find\s+a\s+table|book\s+a\s+table|reserve\s+a\s+table)\b/i.test(markdown);
       if (foundTimes.length === 0 && hasOTBookingMarker) {
-        console.log(`✓ Verified ${r.name} [opentable] — booking markers present but no extractable times (trusting marker)`);
+        const reqLabel2 = toTwelveHourLabel(params.time);
+        if (reqLabel2) r.timeSlots = [{ time: reqLabel2 }];
+        console.log(`✓ Verified ${r.name} [opentable] — booking markers, using requested time ${reqLabel2}`);
         return r;
       }
 
