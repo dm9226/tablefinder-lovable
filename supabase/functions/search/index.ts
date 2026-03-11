@@ -1675,12 +1675,13 @@ async function verifyAvailability(
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-      // Resy + Yelp: onlyMainContent=true to avoid noise in meal-section parsing
-      // OT: onlyMainContent=false to capture address/location sections for geocoding
+      // Yelp: onlyMainContent=true (no addresses available anyway)
+      // Resy + OT: onlyMainContent=false to capture address/location sections for geocoding
+      // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
       const scrapePayload: Record<string, unknown> = {
         url: r.platformUrl,
         formats: ["markdown"],
-        onlyMainContent: !isOT,  // only OT gets full page (for address extraction)
+        onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
       };
 
       const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
