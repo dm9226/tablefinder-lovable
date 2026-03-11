@@ -1415,13 +1415,18 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
           const lat = parseFloat(data[0].lat);
           const lng = parseFloat(data[0].lon);
           if (Number.isFinite(lat) && Number.isFinite(lng)) {
-            r.distanceMiles = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
-            // Extract neighborhood from geocoded address
-            const geoAddr = data[0].address;
-            const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
-            if (geoNeighborhood) r.neighborhood = geoNeighborhood;
-            else if (r._addressCity) r.neighborhood = r._addressCity;
-            console.log(`  Geocoded ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+            const dist = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
+            if (dist > 200) {
+              console.log(`  Geocode sanity fail ${r.name}: ${dist} mi — discarding`);
+            } else {
+              r.distanceMiles = dist;
+              // Extract neighborhood from geocoded address
+              const geoAddr = data[0].address;
+              const geoNeighborhood = geoAddr?.suburb || geoAddr?.neighbourhood || geoAddr?.city_district || "";
+              if (geoNeighborhood) r.neighborhood = geoNeighborhood;
+              else if (r._addressCity) r.neighborhood = r._addressCity;
+              console.log(`  Geocoded ${r.name}: ${r.distanceMiles} mi (${r.neighborhood})`);
+            }
           }
         } else {
           // Try stripping suite/unit numbers and retry
