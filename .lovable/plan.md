@@ -1,81 +1,86 @@
 
 
-## Analysis of Most Recent "Italian" Search Results
+## Comprehensive Test Plan and Fix for Distance/Geocoding Failures
 
-### Issues Found
+### Evidence from 3 Most Recent Searches
 
-**1. Geocoding: 9/17 restaurants have null distances (53% failure)**
+| Search | Verified | Geocoded | Rate | Misses |
+|--------|----------|----------|------|--------|
+| Italian | 20/24 | 8/17 | 47% | Nino's (×2 dupe!), Storico Fresco, Indaco, Crispina, Amalfi, Casa Nuova, Fresca, Gianni |
+| Sushi | 15/24 | 5/10 | 50% | Chirori, Brush Sushi, Ishin Omakase, Eight Sushi, Banana Leaf |
+| Steak | 7/25 | 6/7 | 86% | High Note Rooftop |
 
-The logs show these misses:
-- **4 OT with no address extracted**: Storico Fresco, Indaco, Amalfi Cucina, Crispina — `[ADDR_MISS] No address pattern found`
-- **1 Resy with no address**: Casa Nuova — `[ADDR_MISS] No address pattern found`
-- **All 9 misses then fail name-based Nominatim lookups** (Strategies 4-5). Nominatim simply does not index restaurant names — it's a geographic database, not a business directory. This means every restaurant that fails address extraction is guaranteed to have null distance.
+**Overall geocoding success: 19/34 = 56%**. Nearly half of all Resy/OT results have no distance.
 
-The fundamental problem: **Nominatim name-based fallback is nearly useless for restaurants**. It works for landmarks but not businesses. Every patch adding more Nominatim retry strategies is wasted effort.
+### Root Causes (Confirmed from Logs)
 
-**2. Duplicate Nino's**
+**1. Address extraction still failing for ~40% of OT pages**
+- `[ADDR_SUMMARY] opentable: 2/6 have addresses (4 missing)` (sushi search)
+- `[ADDR_SUMMARY] opentable: 6/10 have addresses (4 missing)` (italian search)
+- The regex patterns don't match OT's markdown format for many restaurants
 
-"Nino's Italian Restaurant" (Resy) and "Nino's - Atlanta Restaurant" (OT) both appear. The dedup key comparison (`startsWith`) doesn't catch this because `ninositalianrestaurant` and `ninosatlantarestaurant` aren't substrings of each other.
+**2. Nominatim cannot geocode restaurant names**
+- Every `[ADDR_MISS]` restaurant then tries name-based Nominatim lookups (Strategies 4-5)
+- These fail ~95% of the time because Nominatim is not a business directory
+- Each failed attempt adds 200-600ms of wasted latency
 
-**3. Yelp results likely present but sorted to end**
+**3. Duplicate Nino's still appearing**
+- "Nino's Italian Restaurant" (Resy) and "Nino's - Atlanta Restaurant" (OT) both pass dedup because `ninositalianrestaurant` doesn't start with `ninosatlantarestaurant`
 
-D'Italia and Il Porto Di Venezia were verified successfully. They have Yelp API-provided distances, so they should appear in the sorted results. The response was truncated in the network log — they're probably there but at the bottom (the response shows 17 results, which aligns with 15 Resy/OT + 2 Yelp).
+**4. Yelp distances are working** (API-provided) but 0/N have addresses (expected and fine)
 
-**4. Fresca Trattoria address extracted but geocode MISSED**
+### The Fix: AI-Powered Coordinate Enrichment
 
-Logs show `Address extracted (broad regex): 1227 Rockbridge Rd SW, Atlanta, GA 30087` — but then `Geocode miss for Fresca Trattoria Restaurant`. This means Nominatim's direct lookup AND simplified AND structured query all failed for a valid address. Likely the address itself is slightly wrong or Nominatim doesn't have it indexed.
+The only reliable fix is to stop depending on Nominatim for name-based lookups. The AI enrichment call already runs for every result via Gemini. We simply add `lat` and `lng` to the enrichment prompt.
 
----
+#### Changes to `supabase/functions/search/index.ts`
 
-### Root Cause Summary
+**Change 1: Add coordinates to AI enrichment prompt** (~lines 1408-1418)
 
-The core problem is **relying on Nominatim for restaurant geocoding**. Nominatim:
-- Cannot find businesses by name (it's OSM-based, not a business index)
-- Fails on ~10-20% of valid street addresses
-- Rate-limits at 1 req/sec, adding latency
+Update the enrichment prompt to request `lat` and `lng` (Google Maps coordinates) for each restaurant. Gemini has access to Google's knowledge graph and can reliably provide coordinates for any real restaurant.
 
-Every "fix" so far has added another Nominatim retry layer, but the service fundamentally cannot do what we need. The 5-strategy waterfall adds up to 1 second per restaurant with zero improvement for name lookups.
+Add to the JSON schema: `"lat": number, "lng": number`
 
-### Proposed Fix Plan
+**Change 2: Use AI coordinates as geocoding fallback** (~lines 244-258)
 
-**Fix 1: Use AI enrichment for coordinates (replace Nominatim name lookups)**
+After merging AI enrichment, for any restaurant still missing `distanceMiles`, calculate it from AI-provided lat/lng using haversine. This replaces the unreliable Nominatim name-based strategies 4 and 5.
 
-The AI enrichment call already runs for every result. It contacts Gemini which has Google Maps data. Instead of asking only for rating/description/neighborhood, also ask for **latitude and longitude**. This gives us Google-quality geocoding for FREE — no extra API call, no rate limits.
-
-For restaurants where address extraction succeeds, keep the direct Nominatim lookup (Strategy 1-2 only — remove Strategies 3-5). For everything else, use the AI-provided coordinates.
-
-This turns the geocoding from "fail 53% of the time" to "fail ~0% of the time" since Gemini/Google Maps knows every restaurant.
-
-**Fix 2: Improve dedup with fuzzy matching**
-
-Normalize restaurant names more aggressively before comparison:
-- Strip common suffixes: "restaurant", "atlanta", city names, state codes
-- Use a shared core name extraction (e.g., "ninos" matches "ninos")
-
-**Fix 3: Remove dead Nominatim strategies 3-5**
-
-The structured query, name-based, and broad name-based strategies have never successfully geocoded a restaurant that address strategies 1-2 missed. Remove them to reduce latency and code complexity.
-
-### Technical Approach
-
-**AI enrichment prompt change** (in `enrichWithAI`):
-```
-Add to JSON output: "lat": number, "lng": number
-(Google Maps coordinates for the restaurant)
+```text
+// After AI merge loop:
+for (const r of verified) {
+  if (r.distanceMiles != null || r.platform === "yelp") continue;
+  const e = enrichmentMap.get(indexOf(r));
+  if (e?.lat && e?.lng) {
+    r.distanceMiles = haversine(cityLat, cityLng, e.lat, e.lng);
+    if (e.neighborhood) r.neighborhood = e.neighborhood;
+  }
+}
 ```
 
-**Geocoding flow after change**:
-```
-1. Address extracted? → Nominatim direct lookup (keep)
-2. Nominatim failed or no address? → Use AI-provided lat/lng + haversine
-```
+**Change 3: Remove Nominatim strategies 4 and 5** (~lines 1354-1364)
 
-**Dedup improvement** (in `dedupeByName`):
-```
-Strip: restaurant, ristorante, trattoria, pizzeria, city names, state codes
-Compare: Levenshtein similarity > 0.8 OR shared prefix > 60% of shorter name
-```
+Remove the name-based and broad-name Nominatim lookups entirely. They succeed <5% of the time, add 400ms+ latency each, and are now replaced by AI coordinates.
+
+**Change 4: Fix deduplication** (~lines 2114-2130)
+
+Improve `dedupeByName` to strip common suffixes before comparison:
+- Strip: "restaurant", "ristorante", "trattoria", "pizzeria", city names, state codes, platform suffixes like "- Atlanta"
+- This catches "Nino's Italian Restaurant" vs "Nino's - Atlanta Restaurant" → both normalize to "ninos"
+
+**Change 5: Reorder geocoding and enrichment** (~lines 238-258)
+
+Currently geocoding and AI enrichment run in parallel, which is good for speed. But AI coordinates can't be used as fallback until enrichment finishes. The fix:
+1. Keep parallel execution (no latency change)
+2. After both complete, apply AI coordinates to any restaurant still missing distance
+3. Then apply distance filtering
+
+### Expected Impact
+
+- **Geocoding**: 56% → ~95%+ (AI knows virtually every restaurant)
+- **Latency**: Reduced by ~1-2s (removing 2 failed Nominatim calls per miss × 200ms each)
+- **Duplicates**: Nino's-type dupes eliminated
+- **No new API calls**: Uses existing Gemini enrichment call (just adds 2 fields to prompt)
 
 ### Files Changed
-- `supabase/functions/search/index.ts` — modify `enrichWithAI` prompt, simplify `geocodeVerifiedResults`, improve `dedupeByName`
+- `supabase/functions/search/index.ts` only
 
