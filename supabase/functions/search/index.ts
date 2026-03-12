@@ -523,6 +523,35 @@ User query: "${query}"`;
   parsed.cuisineType = (parsed.cuisineType || "").trim().toLowerCase();
   parsed.dishKeyword = (parsed.dishKeyword || "").trim().toLowerCase();
   
+  // ─── Post-parse amenity correction ───
+  // Fix misparsing like "rooftop bar" → cuisine="bar", dish="rooftop"
+  // or "rooftop restaurant" → dish="rooftop"
+  const AMENITY_TERMS_SET = new Set(["rooftop", "patio", "outdoor", "waterfront", "live music", "private dining", "happy hour"]);
+  const VENUE_TYPE_CUISINE = new Set(["bar", "lounge", "pub", "club", "restaurant", "dining"]);
+  
+  // If dishKeyword is an amenity term, it was misparsed — clear it
+  if (AMENITY_TERMS_SET.has(parsed.dishKeyword)) {
+    console.log(`Amenity correction: clearing dishKeyword "${parsed.dishKeyword}" (amenity, not a dish)`);
+    parsed.dishKeyword = "";
+  }
+  
+  // If cuisineType is a generic venue type (bar, lounge) and query mentions an amenity,
+  // clear cuisineType so discovery searches broadly with the amenity term
+  if (VENUE_TYPE_CUISINE.has(parsed.cuisineType)) {
+    const qLower = query.toLowerCase();
+    for (const amenity of AMENITY_TERMS_SET) {
+      if (qLower.includes(amenity)) {
+        console.log(`Amenity correction: clearing cuisineType "${parsed.cuisineType}" — amenity "${amenity}" drives discovery`);
+        parsed.cuisineType = "";
+        // Put the venue type into cuisine so it still appears in search terms
+        if (!parsed.cuisine.toLowerCase().includes(amenity)) {
+          parsed.cuisine = `${amenity} ${parsed.cuisine}`.trim();
+        }
+        break;
+      }
+    }
+  }
+  
   // Post-parse cleanup: if user explicitly used a category term (e.g. "steakhouse"),
   // clear dishKeyword so we use strict category matching, not loose dish matching
   const CATEGORY_ROOTS: Record<string, string> = {
@@ -546,6 +575,8 @@ User query: "${query}"`;
     }
   }
   
+  console.log(`Intent classification — cuisineType: "${parsed.cuisineType}", dishKeyword: "${parsed.dishKeyword}"`);
+
   console.log(`Intent classification — cuisineType: "${parsed.cuisineType}", dishKeyword: "${parsed.dishKeyword}"`);
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
@@ -1623,7 +1654,7 @@ async function verifyAvailability(
         onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
       };
 
-      const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+      let resp = await fetch(`${FIRECRAWL_API}/scrape`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${firecrawlKey}`,
@@ -1631,6 +1662,20 @@ async function verifyAvailability(
         },
         body: JSON.stringify(scrapePayload),
       });
+
+      // Retry once on 408 (scrape timeout) with a shorter timeout
+      if (resp.status === 408) {
+        const errBody408 = await resp.text().catch(() => "(no body)");
+        console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
+        resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${firecrawlKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
+        });
+      }
 
       if (!resp.ok) {
         const errBody = await resp.text().catch(() => "(no body)");
@@ -2237,7 +2282,11 @@ function checkRelevanceInMarkdown(markdown: string, amenities: string[]): boolea
   const lower = markdown.toLowerCase();
   // Restaurant page must mention at least ONE synonym for each required amenity
   return amenities.every((amenity) => {
-    const synonyms = AMENITY_KEYWORDS[amenity] || [amenity];
+    // For "rooftop", use STRICT synonyms only — don't match generic outdoor/patio terms
+    const STRICT_ROOFTOP = ["rooftop", "roof top", "roof deck", "rooftop bar", "rooftop dining",
+      "rooftop patio", "rooftop terrace", "rooftop lounge", "rooftop restaurant",
+      "sky bar", "sky deck", "sky lounge"];
+    const synonyms = amenity === "rooftop" ? STRICT_ROOFTOP : (AMENITY_KEYWORDS[amenity] || [amenity]);
     return synonyms.some((syn) => lower.includes(syn));
   });
 }
