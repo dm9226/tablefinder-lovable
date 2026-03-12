@@ -264,9 +264,20 @@ serve(async (req) => {
     }
 
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
+    // If we're past 110s, skip enrichment to ensure we return in time
+    const elapsed = Date.now() - startTime;
+    const skipEnrichment = elapsed > 110_000;
+    if (skipEnrichment) {
+      console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
+    }
+
+    const enrichmentPromise = skipEnrichment 
+      ? Promise.resolve(new Map<number, any>()) 
+      : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
+
     const [, enrichmentMap] = await Promise.all([
       geocodeVerifiedResults(verified, params),
-      enrichWithAI(verified, LOVABLE_API_KEY, params),
+      enrichmentPromise,
     ]);
 
     // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
