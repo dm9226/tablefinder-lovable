@@ -169,6 +169,12 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  // Global timeout: return partial results before the hard 150s edge function limit
+  const GLOBAL_TIMEOUT_MS = 120_000;
+  const globalAbort = new AbortController();
+  const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
+  const startTime = Date.now();
+
   try {
     const { query, lat, lng, location } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
@@ -197,9 +203,27 @@ serve(async (req) => {
     const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter];
     if (YELP_API_KEY) adapters.push(yelpAdapter);
 
-    const discovered = await Promise.all(
-      adapters.map(a => a.discover(params, keys, amenityTerms))
-    );
+    // Discovery with early termination: if it takes >40s, use whatever we have
+    const DISCOVERY_TIMEOUT_MS = 40_000;
+    const discoveryPromises = adapters.map(a => a.discover(params, keys, amenityTerms));
+    const discoveryTimer = new Promise<null>(resolve => setTimeout(() => resolve(null), DISCOVERY_TIMEOUT_MS));
+    
+    let discovered: Restaurant[][] = [];
+    const raceResult = await Promise.race([
+      Promise.all(discoveryPromises).then(r => ({ type: "complete" as const, results: r })),
+      discoveryTimer.then(() => ({ type: "timeout" as const, results: null })),
+    ]);
+
+    if (raceResult.type === "complete") {
+      discovered = raceResult.results;
+    } else {
+      console.warn(`Discovery timeout after ${DISCOVERY_TIMEOUT_MS}ms — using partial results`);
+      // Collect whatever has resolved so far
+      discovered = await Promise.all(
+        discoveryPromises.map(p => Promise.race([p, Promise.resolve([] as Restaurant[])]))
+      );
+    }
+
     const allCandidates = dedupeByName(discovered.flat());
 
     // Log counts per platform
@@ -208,12 +232,16 @@ serve(async (req) => {
 
     // Log ALL discovered candidate URLs per platform for diagnostics
     for (const platform of ["resy", "opentable", "yelp"] as const) {
-      const urls = allCandidates.filter(c => c.platform === platform).map(c => c.bookingUrl || c.name);
+      const urls = allCandidates.filter(c => c.platform === platform).map(c => (c as any).bookingUrl || c.name);
       console.log(`[DISCOVERY] ${platform} (${urls.length}): ${urls.join(" | ")}`);
     }
 
     // Step 3: Select candidates with round-robin balance, then verify per-adapter
-    const selected = selectCandidatesForVerification(allCandidates, 24);
+    // Use fewer candidates for vague queries to avoid timeouts
+    const isVagueQuery = !params.cuisineType && !params.dishKeyword;
+    const maxCandidates = isVagueQuery ? 18 : 24;
+    console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
+    const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
@@ -236,9 +264,20 @@ serve(async (req) => {
     }
 
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
+    // If we're past 110s, skip enrichment to ensure we return in time
+    const elapsed = Date.now() - startTime;
+    const skipEnrichment = elapsed > 110_000;
+    if (skipEnrichment) {
+      console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
+    }
+
+    const enrichmentPromise = skipEnrichment 
+      ? Promise.resolve(new Map<number, any>()) 
+      : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
+
     const [, enrichmentMap] = await Promise.all([
       geocodeVerifiedResults(verified, params),
-      enrichWithAI(verified, LOVABLE_API_KEY, params),
+      enrichmentPromise,
     ]);
 
     // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
@@ -293,11 +332,31 @@ serve(async (req) => {
     // Clean transient fields before returning
     const finalResults = cleanTransientFields(sorted);
 
-    return new Response(
-      JSON.stringify({ results: finalResults, params, cached: false }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    clearTimeout(globalTimer);
+    try {
+      const responseBody = JSON.stringify({ results: finalResults, params, cached: false });
+      return new Response(responseBody, {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    } catch (jsonErr) {
+      console.error("JSON.stringify failed:", jsonErr);
+      return new Response(
+        JSON.stringify({ results: [], params, cached: false, error: "Response serialization failed" }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
   } catch (e) {
+    clearTimeout(globalTimer);
+
+    // If global timeout fired, return empty results gracefully
+    if (globalAbort.signal.aborted) {
+      console.error("Global timeout reached (120s) — returning empty results");
+      return new Response(
+        JSON.stringify({ results: [], params: {}, cached: false, error: "Search timed out. Please try a more specific query." }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const message = e instanceof Error ? e.message : "Search failed";
     const isInputError =
       message.includes("Please include") ||
@@ -1397,12 +1456,18 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 // AI provides: rating, reviewCount, cuisine, priceRange, description, vibeTags
 // Coordinates and neighborhoods come from geocoding extracted addresses (not AI)
 
-async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams): Promise<Map<number, any>> {
+async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams, amenityTerms: string[] = []): Promise<Map<number, any>> {
   const emptyMap = new Map<number, any>();
   if (results.length === 0) return emptyMap;
 
   const metroCity = getMetroCityName(params.city || "", params.state || "");
   const list = results.map((r, i) => `${i}. ${r.name} (${r.platform})`).join("\n");
+
+  // Build amenity instruction if relevant
+  const amenityInstruction = amenityTerms.length > 0
+    ? `\n- amenities: list any known venue features/amenities this restaurant has (e.g. "rooftop", "patio", "outdoor seating", "waterfront", "live music", "private dining", "happy hour", "bottomless brunch"). Be thorough — include ALL applicable amenities you know about for each restaurant.`
+    : "";
+  const amenityJsonField = amenityTerms.length > 0 ? `, "amenities": string[]` : "";
 
   try {
     const resp = await fetch(AI_GATEWAY, {
@@ -1416,12 +1481,12 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
 - index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, priceRange ($-$$$$)
 - neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. "Buckhead", "Midtown", "Vinings", "Sandy Springs") — NOT the search city "${params.city}"
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
-- vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")
+- vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")${amenityInstruction}
 
 - lat: the restaurant's latitude (Google Maps coordinate, decimal degrees)
 - lng: the restaurant's longitude (Google Maps coordinate, decimal degrees)
 
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[], "lat": number, "lng": number }] }
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[], "lat": number, "lng": number${amenityJsonField} }] }
 
 Return an entry for EVERY restaurant:
 
@@ -1441,7 +1506,20 @@ ${list}`,
     const enrichments = parsed.restaurants || [];
     const eMap = new Map<number, any>();
     for (const e of enrichments) {
-      if (typeof e.index === "number") eMap.set(e.index, e);
+      if (typeof e.index === "number") {
+        // Merge amenities into vibeTags so they're visible in results
+        if (Array.isArray(e.amenities) && e.amenities.length > 0) {
+          const existing = new Set((e.vibeTags || []).map((t: string) => t.toLowerCase()));
+          for (const amenity of e.amenities) {
+            const lower = amenity.toLowerCase();
+            if (!existing.has(lower)) {
+              e.vibeTags = [...(e.vibeTags || []), amenity];
+              existing.add(lower);
+            }
+          }
+        }
+        eMap.set(e.index, e);
+      }
     }
 
     return eMap;
