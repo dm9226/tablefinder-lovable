@@ -2282,7 +2282,11 @@ function checkRelevanceInMarkdown(markdown: string, amenities: string[]): boolea
   const lower = markdown.toLowerCase();
   // Restaurant page must mention at least ONE synonym for each required amenity
   return amenities.every((amenity) => {
-    const synonyms = AMENITY_KEYWORDS[amenity] || [amenity];
+    // For "rooftop", use STRICT synonyms only — don't match generic outdoor/patio terms
+    const STRICT_ROOFTOP = ["rooftop", "roof top", "roof deck", "rooftop bar", "rooftop dining",
+      "rooftop patio", "rooftop terrace", "rooftop lounge", "rooftop restaurant",
+      "sky bar", "sky deck", "sky lounge"];
+    const synonyms = amenity === "rooftop" ? STRICT_ROOFTOP : (AMENITY_KEYWORDS[amenity] || [amenity]);
     return synonyms.some((syn) => lower.includes(syn));
   });
 }
