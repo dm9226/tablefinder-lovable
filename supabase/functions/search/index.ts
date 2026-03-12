@@ -1816,7 +1816,7 @@ async function verifyAvailability(
       windowStart = Math.max(0, reqMinsForWindow - 120);    // -2 hours
       windowEnd = Math.min(1439, reqMinsForWindow + 120);    // +2 hours
 
-      const foundTimes: { time: string; minutes: number }[] = [];
+      let foundTimes: { time: string; minutes: number }[] = [];
       const seenTimes = new Set<string>();
       const [reqHour, reqMin] = params.time.split(":").map(Number);
       const requestedMinutes = reqHour * 60 + (reqMin || 0);
