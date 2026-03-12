@@ -1456,12 +1456,18 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 // AI provides: rating, reviewCount, cuisine, priceRange, description, vibeTags
 // Coordinates and neighborhoods come from geocoding extracted addresses (not AI)
 
-async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams): Promise<Map<number, any>> {
+async function enrichWithAI(results: Restaurant[], apiKey: string, params: SearchParams, amenityTerms: string[] = []): Promise<Map<number, any>> {
   const emptyMap = new Map<number, any>();
   if (results.length === 0) return emptyMap;
 
   const metroCity = getMetroCityName(params.city || "", params.state || "");
   const list = results.map((r, i) => `${i}. ${r.name} (${r.platform})`).join("\n");
+
+  // Build amenity instruction if relevant
+  const amenityInstruction = amenityTerms.length > 0
+    ? `\n- amenities: list any known venue features/amenities this restaurant has (e.g. "rooftop", "patio", "outdoor seating", "waterfront", "live music", "private dining", "happy hour", "bottomless brunch"). Be thorough — include ALL applicable amenities you know about for each restaurant.`
+    : "";
+  const amenityJsonField = amenityTerms.length > 0 ? `, "amenities": string[]` : "";
 
   try {
     const resp = await fetch(AI_GATEWAY, {
@@ -1475,12 +1481,12 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
 - index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, priceRange ($-$$$$)
 - neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. "Buckhead", "Midtown", "Vinings", "Sandy Springs") — NOT the search city "${params.city}"
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
-- vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")
+- vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")${amenityInstruction}
 
 - lat: the restaurant's latitude (Google Maps coordinate, decimal degrees)
 - lng: the restaurant's longitude (Google Maps coordinate, decimal degrees)
 
-Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[], "lat": number, "lng": number }] }
+Return JSON: { "restaurants": [{ "index": number, "rating": number, "reviewCount": number, "cuisine": string, "neighborhood": string, "priceRange": string, "description": string, "vibeTags": string[], "lat": number, "lng": number${amenityJsonField} }] }
 
 Return an entry for EVERY restaurant:
 
@@ -1500,7 +1506,20 @@ ${list}`,
     const enrichments = parsed.restaurants || [];
     const eMap = new Map<number, any>();
     for (const e of enrichments) {
-      if (typeof e.index === "number") eMap.set(e.index, e);
+      if (typeof e.index === "number") {
+        // Merge amenities into vibeTags so they're visible in results
+        if (Array.isArray(e.amenities) && e.amenities.length > 0) {
+          const existing = new Set((e.vibeTags || []).map((t: string) => t.toLowerCase()));
+          for (const amenity of e.amenities) {
+            const lower = amenity.toLowerCase();
+            if (!existing.has(lower)) {
+              e.vibeTags = [...(e.vibeTags || []), amenity];
+              existing.add(lower);
+            }
+          }
+        }
+        eMap.set(e.index, e);
+      }
     }
 
     return eMap;
