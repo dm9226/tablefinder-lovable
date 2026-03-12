@@ -1654,7 +1654,7 @@ async function verifyAvailability(
         onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
       };
 
-      const resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+      let resp = await fetch(`${FIRECRAWL_API}/scrape`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${firecrawlKey}`,
@@ -1662,6 +1662,20 @@ async function verifyAvailability(
         },
         body: JSON.stringify(scrapePayload),
       });
+
+      // Retry once on 408 (scrape timeout) with a shorter timeout
+      if (resp.status === 408) {
+        const errBody408 = await resp.text().catch(() => "(no body)");
+        console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
+        resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${firecrawlKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
+        });
+      }
 
       if (!resp.ok) {
         const errBody = await resp.text().catch(() => "(no body)");
