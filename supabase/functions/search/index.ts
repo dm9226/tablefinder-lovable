@@ -169,6 +169,12 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  // Global timeout: return partial results before the hard 150s edge function limit
+  const GLOBAL_TIMEOUT_MS = 120_000;
+  const globalAbort = new AbortController();
+  const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
+  const startTime = Date.now();
+
   try {
     const { query, lat, lng, location } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
@@ -197,9 +203,27 @@ serve(async (req) => {
     const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter];
     if (YELP_API_KEY) adapters.push(yelpAdapter);
 
-    const discovered = await Promise.all(
-      adapters.map(a => a.discover(params, keys, amenityTerms))
-    );
+    // Discovery with early termination: if it takes >40s, use whatever we have
+    const DISCOVERY_TIMEOUT_MS = 40_000;
+    const discoveryPromises = adapters.map(a => a.discover(params, keys, amenityTerms));
+    const discoveryTimer = new Promise<null>(resolve => setTimeout(() => resolve(null), DISCOVERY_TIMEOUT_MS));
+    
+    let discovered: Restaurant[][] = [];
+    const raceResult = await Promise.race([
+      Promise.all(discoveryPromises).then(r => ({ type: "complete" as const, results: r })),
+      discoveryTimer.then(() => ({ type: "timeout" as const, results: null })),
+    ]);
+
+    if (raceResult.type === "complete") {
+      discovered = raceResult.results;
+    } else {
+      console.warn(`Discovery timeout after ${DISCOVERY_TIMEOUT_MS}ms — using partial results`);
+      // Collect whatever has resolved so far
+      discovered = await Promise.all(
+        discoveryPromises.map(p => Promise.race([p, Promise.resolve([] as Restaurant[])]))
+      );
+    }
+
     const allCandidates = dedupeByName(discovered.flat());
 
     // Log counts per platform
@@ -208,12 +232,16 @@ serve(async (req) => {
 
     // Log ALL discovered candidate URLs per platform for diagnostics
     for (const platform of ["resy", "opentable", "yelp"] as const) {
-      const urls = allCandidates.filter(c => c.platform === platform).map(c => c.bookingUrl || c.name);
+      const urls = allCandidates.filter(c => c.platform === platform).map(c => (c as any).bookingUrl || c.name);
       console.log(`[DISCOVERY] ${platform} (${urls.length}): ${urls.join(" | ")}`);
     }
 
     // Step 3: Select candidates with round-robin balance, then verify per-adapter
-    const selected = selectCandidatesForVerification(allCandidates, 24);
+    // Use fewer candidates for vague queries to avoid timeouts
+    const isVagueQuery = !params.cuisineType && !params.dishKeyword;
+    const maxCandidates = isVagueQuery ? 18 : 24;
+    console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
+    const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
