@@ -523,6 +523,35 @@ User query: "${query}"`;
   parsed.cuisineType = (parsed.cuisineType || "").trim().toLowerCase();
   parsed.dishKeyword = (parsed.dishKeyword || "").trim().toLowerCase();
   
+  // ─── Post-parse amenity correction ───
+  // Fix misparsing like "rooftop bar" → cuisine="bar", dish="rooftop"
+  // or "rooftop restaurant" → dish="rooftop"
+  const AMENITY_TERMS_SET = new Set(["rooftop", "patio", "outdoor", "waterfront", "live music", "private dining", "happy hour"]);
+  const VENUE_TYPE_CUISINE = new Set(["bar", "lounge", "pub", "club", "restaurant", "dining"]);
+  
+  // If dishKeyword is an amenity term, it was misparsed — clear it
+  if (AMENITY_TERMS_SET.has(parsed.dishKeyword)) {
+    console.log(`Amenity correction: clearing dishKeyword "${parsed.dishKeyword}" (amenity, not a dish)`);
+    parsed.dishKeyword = "";
+  }
+  
+  // If cuisineType is a generic venue type (bar, lounge) and query mentions an amenity,
+  // clear cuisineType so discovery searches broadly with the amenity term
+  if (VENUE_TYPE_CUISINE.has(parsed.cuisineType)) {
+    const qLower = query.toLowerCase();
+    for (const amenity of AMENITY_TERMS_SET) {
+      if (qLower.includes(amenity)) {
+        console.log(`Amenity correction: clearing cuisineType "${parsed.cuisineType}" — amenity "${amenity}" drives discovery`);
+        parsed.cuisineType = "";
+        // Put the venue type into cuisine so it still appears in search terms
+        if (!parsed.cuisine.toLowerCase().includes(amenity)) {
+          parsed.cuisine = `${amenity} ${parsed.cuisine}`.trim();
+        }
+        break;
+      }
+    }
+  }
+  
   // Post-parse cleanup: if user explicitly used a category term (e.g. "steakhouse"),
   // clear dishKeyword so we use strict category matching, not loose dish matching
   const CATEGORY_ROOTS: Record<string, string> = {
@@ -546,6 +575,8 @@ User query: "${query}"`;
     }
   }
   
+  console.log(`Intent classification — cuisineType: "${parsed.cuisineType}", dishKeyword: "${parsed.dishKeyword}"`);
+
   console.log(`Intent classification — cuisineType: "${parsed.cuisineType}", dishKeyword: "${parsed.dishKeyword}"`);
   const INVALID_CITY = new Set(["unknown", "n/a", "none", "unspecified", ""]);
   parsed.city = INVALID_CITY.has((parsed.city || "").trim().toLowerCase()) ? "" : parsed.city?.trim() || "";
