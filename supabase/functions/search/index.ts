@@ -332,11 +332,31 @@ serve(async (req) => {
     // Clean transient fields before returning
     const finalResults = cleanTransientFields(sorted);
 
-    return new Response(
-      JSON.stringify({ results: finalResults, params, cached: false }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    clearTimeout(globalTimer);
+    try {
+      const responseBody = JSON.stringify({ results: finalResults, params, cached: false });
+      return new Response(responseBody, {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    } catch (jsonErr) {
+      console.error("JSON.stringify failed:", jsonErr);
+      return new Response(
+        JSON.stringify({ results: [], params, cached: false, error: "Response serialization failed" }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
   } catch (e) {
+    clearTimeout(globalTimer);
+
+    // If global timeout fired, return empty results gracefully
+    if (globalAbort.signal.aborted) {
+      console.error("Global timeout reached (120s) — returning empty results");
+      return new Response(
+        JSON.stringify({ results: [], params: {}, cached: false, error: "Search timed out. Please try a more specific query." }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const message = e instanceof Error ? e.message : "Search failed";
     const isInputError =
       message.includes("Please include") ||
