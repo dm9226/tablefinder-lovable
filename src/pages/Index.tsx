@@ -14,6 +14,8 @@ const Index = () => {
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [locationDenied, setLocationDenied] = useState(false);
+  const [searchMeta, setSearchMeta] = useState<SearchMeta | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const requestLocation = useCallback(() => {
     if (!navigator.geolocation) {
