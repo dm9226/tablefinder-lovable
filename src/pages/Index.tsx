@@ -129,6 +129,8 @@ const Index = () => {
           isLoading={isLoading}
           location={location}
           locationLoading={locationLoading}
+          locationDenied={locationDenied}
+          onRequestLocation={requestLocation}
         />
       </section>
 

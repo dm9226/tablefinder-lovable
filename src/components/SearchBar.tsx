@@ -1,11 +1,14 @@
 import { useState, useRef, useEffect } from "react";
-import { Search, MapPin, Loader2 } from "lucide-react";
+import { Search, MapPin, Loader2, AlertTriangle } from "lucide-react";
+import { toast } from "sonner";
 
 interface SearchBarProps {
   onSearch: (query: string) => void;
   isLoading: boolean;
   location: string | null;
   locationLoading: boolean;
+  locationDenied: boolean;
+  onRequestLocation: () => void;
 }
 
 const SUGGESTIONS = [
@@ -16,7 +19,7 @@ const SUGGESTIONS = [
   "Steakhouse this weekend",
 ];
 
-export function SearchBar({ onSearch, isLoading, location, locationLoading }: SearchBarProps) {
+export function SearchBar({ onSearch, isLoading, location, locationLoading, locationDenied, onRequestLocation }: SearchBarProps) {
   const [query, setQuery] = useState("");
   const [placeholder, setPlaceholder] = useState(SUGGESTIONS[0]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -32,9 +35,14 @@ export function SearchBar({ onSearch, isLoading, location, locationLoading }: Se
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (query.trim() && !isLoading) {
-      onSearch(query.trim());
+    if (!query.trim() || isLoading) return;
+
+    // Warn if no location and query doesn't seem to include a city
+    if (!location && locationDenied) {
+      toast.warning("Enable location or include a city in your search for better results.");
     }
+
+    onSearch(query.trim());
   };
 
   return (
@@ -67,17 +75,28 @@ export function SearchBar({ onSearch, isLoading, location, locationLoading }: Se
       </div>
 
       <div className="flex items-center justify-center mt-3 gap-2">
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-body">
-          <MapPin className="h-3.5 w-3.5" />
-          {locationLoading ? (
-            <span className="flex items-center gap-1">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Detecting location…
-            </span>
-          ) : (
-            location || "Location not available"
-          )}
-        </div>
+        {locationDenied && !location ? (
+          <button
+            type="button"
+            onClick={onRequestLocation}
+            className="flex items-center gap-1.5 text-xs font-body text-destructive hover:text-destructive/80 transition-colors bg-destructive/10 px-3 py-1.5 rounded-full"
+          >
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Enable location for better results
+          </button>
+        ) : (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-body">
+            <MapPin className="h-3.5 w-3.5" />
+            {locationLoading ? (
+              <span className="flex items-center gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Detecting location…
+              </span>
+            ) : (
+              location || "Location not available"
+            )}
+          </div>
+        )}
       </div>
     </form>
   );
