@@ -13,26 +13,27 @@ const Index = () => {
   const [location, setLocation] = useState<string | null>(null);
   const [locationLoading, setLocationLoading] = useState(true);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [searchMeta, setSearchMeta] = useState<SearchMeta | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const [locationDenied, setLocationDenied] = useState(false);
 
-  // Auto-detect location on mount
-  useEffect(() => {
+  const requestLocation = useCallback(() => {
     if (!navigator.geolocation) {
       setLocationLoading(false);
+      setLocationDenied(true);
       return;
     }
+    setLocationLoading(true);
+    setLocationDenied(false);
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const { latitude, longitude } = pos.coords;
         setCoords({ lat: latitude, lng: longitude });
+        setLocationDenied(false);
         try {
           const resp = await fetch(
             `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
           );
           const data = await resp.json();
           const city = data.address?.city || data.address?.town || data.address?.village || "";
-          // Prefer ISO state code (e.g. "US-GA") → extract "GA"; fall back to full state name
           const isoState = data.address?.["ISO3166-2-lvl4"] || "";
           const stateAbbr = isoState.includes("-") ? isoState.split("-").pop() : "";
           const state = stateAbbr || data.address?.state || "";
@@ -43,10 +44,16 @@ const Index = () => {
         setLocationLoading(false);
       },
       () => {
+        setLocationDenied(true);
         setLocationLoading(false);
       }
     );
   }, []);
+
+  // Auto-detect location on mount
+  useEffect(() => {
+    requestLocation();
+  }, [requestLocation]);
 
   const cancelSearch = useCallback(() => {
     abortRef.current?.abort();
