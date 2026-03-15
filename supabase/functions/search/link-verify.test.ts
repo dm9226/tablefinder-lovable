@@ -191,8 +191,8 @@ async function verifySlots(restaurant: any): Promise<SlotVerifyResult> {
     const md = data?.data?.markdown || data?.markdown || "";
     const rescrapedSlots = extractTimesFromMarkdown(md);
 
-    const matchedSlots = originalSlots.filter((os) =>
-      rescrapedSlots.some((rs) => rs === os)
+    const matchedSlots = originalSlots.filter((os: string) =>
+      rescrapedSlots.some((rs: string) => rs === os)
     );
 
     const matchRatio = originalSlots.length > 0 ? matchedSlots.length / originalSlots.length : 0;
