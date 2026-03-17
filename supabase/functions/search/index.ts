@@ -694,7 +694,7 @@ User query: "${query}"`;
       } catch { /* leave empty */ }
     }
     if (!parsed.city) {
-      throw new Error("Please include a city, state, or zip code in your search (e.g. 'rooftop dining Friday Decatur GA' or 'sushi tonight 30030') so we can find the right location.");
+      throw new Error("Please include a city or postcode in your search (e.g. 'rooftop dining Friday Decatur GA', 'sushi tonight 30030', or 'Italian London') so we can find the right location.");
     }
   }
 
