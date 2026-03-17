@@ -621,7 +621,11 @@ User query: "${query}"`;
 
   // Handle zip code: geocode to city/state/coords
   const zipCode = (parsed as any).zipCode?.trim() || "";
-  if (zipCode && /^\d{5}$/.test(zipCode) && !parsed.city) {
+  const isUKPostcode = /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(zipCode);
+  const isUSZip = /^\d{5}$/.test(zipCode);
+  if (zipCode && (isUSZip || isUKPostcode) && !parsed.city) {
+    const zipCountry = isUKPostcode ? "gb" : "us";
+    if (isUKPostcode) parsed.country = "gb";
     try {
       const zipResp = await fetch(
         `https://nominatim.openstreetmap.org/search?postalcode=${zipCode}&country=us&format=json&limit=1&addressdetails=1`,
