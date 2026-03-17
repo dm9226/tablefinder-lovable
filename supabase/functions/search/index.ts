@@ -1098,15 +1098,19 @@ function getResyCitySlug(params: SearchParams): string {
   const city = (params.city || "").trim().toLowerCase();
   const state = (params.state || "").trim().toLowerCase();
   const key = state ? `${city}|${state}` : city;
+  const isUK = params.country === "gb";
 
-  // Check metro mapping first — append state suffix to match Resy's URL format (e.g. "atlanta" → "atlanta-ga")
+  // Check metro mapping first
   const metroSlug = RESY_METRO_MAP[key];
   if (metroSlug) {
+    // UK cities don't use state suffix (Resy uses "london" not "london-england")
+    if (isUK) return metroSlug;
     return state ? `${metroSlug}-${state}` : metroSlug;
   }
 
-  // Fallback: slugify city-state
+  // Fallback: slugify city (+ state for US only)
   const slugCity = slugify(params.city || "");
+  if (isUK) return slugCity;
   const slugState = slugify(params.state || "");
   return slugState ? `${slugCity}-${slugState}` : slugCity;
 }
