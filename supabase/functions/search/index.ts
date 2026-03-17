@@ -1067,6 +1067,31 @@ const RESY_METRO_MAP: Record<string, string> = {
   "franklin|tn": "nashville",
   // Austin metro
   "round rock|tx": "austin",
+  // ─── UK metro areas ───
+  // London neighborhoods/boroughs → london
+  "shoreditch|england": "london",
+  "soho|england": "london",
+  "mayfair|england": "london",
+  "covent garden|england": "london",
+  "chelsea|england": "london",
+  "kensington|england": "london",
+  "notting hill|england": "london",
+  "brixton|england": "london",
+  "hackney|england": "london",
+  "islington|england": "london",
+  "camden|england": "london",
+  "fitzrovia|england": "london",
+  "marylebone|england": "london",
+  "clerkenwell|england": "london",
+  "bermondsey|england": "london",
+  "peckham|england": "london",
+  "dalston|england": "london",
+  "whitechapel|england": "london",
+  "city of london|england": "london",
+  "westminster|england": "london",
+  "fulham|england": "london",
+  "battersea|england": "london",
+  "richmond|england": "london",
 };
 
 function getResyCitySlug(params: SearchParams): string {
