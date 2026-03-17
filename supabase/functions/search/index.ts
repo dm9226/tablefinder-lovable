@@ -1592,9 +1592,9 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
         model: "google/gemini-2.5-flash",
         messages: [{
           role: "user",
-          content: `For each restaurant in the ${metroCity || params.city}, ${params.state} metro area, provide:
-- index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, priceRange ($-$$$$)
-- neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. "Buckhead", "Midtown", "Vinings", "Sandy Springs") — NOT the search city "${params.city}"
+          content: `For each restaurant in the ${metroCity || params.city}, ${params.country === "gb" ? "UK" : params.state} metro area, provide:
+- index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, priceRange (${params.country === "gb" ? "£-££££" : "$-$$$$"})
+- neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. ${params.country === "gb" ? '"Soho", "Shoreditch", "Mayfair", "Covent Garden"' : '"Buckhead", "Midtown", "Vinings", "Sandy Springs"'}) — NOT the search city "${params.city}"
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
 - vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")${amenityInstruction}
 
