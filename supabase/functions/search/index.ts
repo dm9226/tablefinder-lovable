@@ -684,7 +684,7 @@ User query: "${query}"`;
         );
         const revData = await revResp.json();
         parsed.city = revData.address?.city || revData.address?.town || revData.address?.village || revData.address?.suburb || "";
-        parsed.state = normalizeStateCode(revData.address?.state_code || revData.address?.state || "");
+        parsed.state = normalizeStateCode(revData.address?.state_code || revData.address?.state || "", parsed.country);
         if (parsed.city) {
           cityFromBrowser = true;
           parsed.lat = lat;
