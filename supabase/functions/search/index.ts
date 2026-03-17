@@ -875,7 +875,10 @@ async function searchFirecrawl(
   const state = params.state || "";
   // Use metro city name for OT/Yelp Firecrawl queries — tiny CDPs return no results
   const metroCityName = getMetroCityName(city, state);
-  const cityState = state ? `${metroCityName} ${state}` : metroCityName;
+  // For UK, use "City UK" instead of "City STATE_CODE"
+  const cityState = params.country === "gb" 
+    ? `${metroCityName} UK` 
+    : (state ? `${metroCityName} ${state}` : metroCityName);
   const resyCitySlug = getResyCitySlug(params);
 
   // Build amenity search suffix for dedicated discovery queries
