@@ -1317,13 +1317,22 @@ async function fetchYelpCandidates(
     const yelpCity = getMetroCityName(params.city, params.state);
     const yelpState = params.state;
     
+    // For UK, use "City, UK" format for Yelp location
+    const yelpLocation = params.country === "gb" 
+      ? `${yelpCity}, UK` 
+      : `${yelpCity}, ${yelpState}`;
+    
     const sp = new URLSearchParams({
       term: `${yelpCuisine}${amenitySuffix} restaurants`.trim(),
-      location: `${yelpCity}, ${yelpState}`,
+      location: yelpLocation,
       limit: "20",
       sort_by: "best_match",
       attributes: "reservation",
     });
+    // Add locale for UK Yelp
+    if (params.country === "gb") {
+      sp.set("locale", "en_GB");
+    }
     if (params.lat && params.lng) {
       sp.set("latitude", String(params.lat));
       sp.set("longitude", String(params.lng));
