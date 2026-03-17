@@ -462,8 +462,9 @@ Return JSON:
 - time: HH:MM (24h)
 - partySize: number (default 2)
 - city: major city string (empty if zip code provided instead)
-- state: 2-letter state code (empty if zip code provided instead)
-- zipCode: string (5-digit US zip code if provided, "" otherwise)
+- state: 2-letter US state code OR UK region (e.g. "England", "Scotland") (empty if zip code provided instead)
+- country: "us" or "gb" (default "us")
+- zipCode: string (5-digit US zip code or UK postcode if provided, "" otherwise)
 
 User query: "${query}"`;
 
