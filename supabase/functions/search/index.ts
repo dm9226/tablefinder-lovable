@@ -600,7 +600,7 @@ User query: "${query}"`;
     parsed.city = citySuffix[1].trim();
     if (!parsed.state) parsed.state = citySuffix[2];
   }
-  parsed.state = normalizeStateCode(parsed.state);
+  parsed.state = normalizeStateCode(parsed.state, parsed.country);
 
   // Parse browser location string for reliable city/state
   let browserCity = "";
