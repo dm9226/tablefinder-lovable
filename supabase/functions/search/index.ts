@@ -528,6 +528,8 @@ User query: "${query}"`;
   if (!toolCall) throw new Error("Failed to parse search query");
 
   const parsed = JSON.parse(toolCall.function.arguments) as SearchParams;
+  parsed.country = ((parsed as any).country || "us").toLowerCase().trim();
+  if (parsed.country !== "gb") parsed.country = "us"; // Only us and gb supported
   
   // Normalize cuisineType and dishKeyword
   parsed.cuisineType = (parsed.cuisineType || "").trim().toLowerCase();
