@@ -1958,7 +1958,15 @@ async function verifyAvailability(
 
         let hasMatch: boolean;
 
-        if (isDishSearch) {
+        // Yelp candidates: trust API category metadata as first-class relevance signal.
+        // The Yelp Fusion API already matched these candidates by category during discovery,
+        // and Yelp reservation pages often lack sufficient cuisine text in scraped markdown.
+        if (r.platform === "yelp" && r._yelpCategories) {
+          hasMatch = verifyTokens.some((token) => tokenMatches(r._yelpCategories!, token));
+          if (hasMatch) {
+            console.log(`  ✓ ${r.name} [yelp] — cuisine relevance passed via Yelp API categories`);
+          }
+        } else if (isDishSearch) {
           // Dish search: keep current loose matching — any mention passes
           hasMatch = verifyTokens.some((token) => tokenMatches(pageText, token));
         } else {
