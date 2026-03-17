@@ -1359,9 +1359,11 @@ async function fetchYelpCandidates(
         headers: { Authorization: `Bearer ${yelpKey}` },
       });
       if (resp2.ok) {
-        const broader = ((await resp2.json()).businesses || []).filter((b: any) =>
-          b.transactions?.includes("restaurant_reservation")
-        );
+        const broaderRaw = (await resp2.json()).businesses || [];
+        // For UK, don't filter by restaurant_reservation (US-only transaction type)
+        const broader = params.country === "gb"
+          ? broaderRaw
+          : broaderRaw.filter((b: any) => b.transactions?.includes("restaurant_reservation"));
         const seen = new Set(businesses.map((b: any) => b.id));
         for (const b of broader) {
           if (!seen.has(b.id)) { businesses.push(b); seen.add(b.id); }
