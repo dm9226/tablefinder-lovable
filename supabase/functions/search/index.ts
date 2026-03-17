@@ -151,6 +151,7 @@ interface Restaurant {
   distanceMiles?: number | null;
   _address?: string; // transient: extracted from scraped page for geocoding
   _addressCity?: string; // transient: city from extracted address
+  _yelpCategories?: string; // transient: Yelp API category text for cuisine relevance bypass
 }
 
 // ─── Provider Adapter Interface ───
@@ -1430,6 +1431,7 @@ async function fetchYelpCandidates(
         platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${b.alias}`, params),
         timeSlots: [],
         distanceMiles: b.distance ? +(b.distance / 1609.34).toFixed(1) : null,
+        _yelpCategories: (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`).join(" ").toLowerCase(),
       }));
   } catch (err) {
     console.error("Yelp error:", err);
@@ -1956,7 +1958,15 @@ async function verifyAvailability(
 
         let hasMatch: boolean;
 
-        if (isDishSearch) {
+        // Yelp candidates: trust API category metadata as first-class relevance signal.
+        // The Yelp Fusion API already matched these candidates by category during discovery,
+        // and Yelp reservation pages often lack sufficient cuisine text in scraped markdown.
+        if (r.platform === "yelp" && r._yelpCategories) {
+          hasMatch = verifyTokens.some((token) => tokenMatches(r._yelpCategories!, token));
+          if (hasMatch) {
+            console.log(`  ✓ ${r.name} [yelp] — cuisine relevance passed via Yelp API categories`);
+          }
+        } else if (isDishSearch) {
           // Dish search: keep current loose matching — any mention passes
           hasMatch = verifyTokens.some((token) => tokenMatches(pageText, token));
         } else {
