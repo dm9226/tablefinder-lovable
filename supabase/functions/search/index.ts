@@ -606,10 +606,16 @@ User query: "${query}"`;
   let browserCity = "";
   let browserState = "";
   if (location) {
+    // US format: "City, ST"  UK format: "City, England" or "London, UK"
     const locMatch = location.match(/^(.+),\s*([A-Z]{2})$/);
+    const locMatchUK = location.match(/^(.+),\s*(England|Scotland|Wales|Northern Ireland|UK)$/i);
     if (locMatch) {
       browserCity = locMatch[1].trim();
       browserState = locMatch[2].trim();
+    } else if (locMatchUK) {
+      browserCity = locMatchUK[1].trim();
+      browserState = locMatchUK[2].trim();
+      if (parsed.country === "us") parsed.country = "gb"; // auto-detect UK from browser
     }
   }
 
