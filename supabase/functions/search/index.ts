@@ -1330,8 +1330,11 @@ async function fetchYelpCandidates(
       location: yelpLocation,
       limit: "20",
       sort_by: "best_match",
-      attributes: "reservation",
     });
+    // attributes=reservation is US-only; skip for UK searches
+    if (params.country !== "gb") {
+      sp.set("attributes", "reservation");
+    }
     // Add locale for UK Yelp
     if (params.country === "gb") {
       sp.set("locale", "en_GB");
