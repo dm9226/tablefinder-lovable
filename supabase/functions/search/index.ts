@@ -1234,8 +1234,14 @@ function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp", raw: strin
       return `https://resy.com/cities/${citySlug}/venues/${venueMatch[2]}`;
     }
     if (platform === "opentable") {
+      const host = u.hostname.toLowerCase();
       const m = p.match(/^\/r\/[^/?#]+/i);
-      return m ? `https://www.opentable.com${m[0]}` : null;
+      if (!m) return null;
+      // Normalize to the correct domain
+      if (host.includes("opentable.co.uk")) {
+        return `https://www.opentable.co.uk${m[0]}`;
+      }
+      return `https://www.opentable.com${m[0]}`;
     }
     // Yelp: only reservation pages count as valid booking URLs
     const resMatch = p.match(/^\/reservations\/[^/?#]+/i);
