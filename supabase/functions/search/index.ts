@@ -1431,6 +1431,7 @@ async function fetchYelpCandidates(
         platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${b.alias}`, params),
         timeSlots: [],
         distanceMiles: b.distance ? +(b.distance / 1609.34).toFixed(1) : null,
+        _yelpCategories: (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`).join(" ").toLowerCase(),
       }));
   } catch (err) {
     console.error("Yelp error:", err);
