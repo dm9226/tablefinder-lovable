@@ -151,6 +151,7 @@ interface Restaurant {
   distanceMiles?: number | null;
   _address?: string; // transient: extracted from scraped page for geocoding
   _addressCity?: string; // transient: city from extracted address
+  _yelpCategories?: string; // transient: Yelp API category text for cuisine relevance bypass
 }
 
 // ─── Provider Adapter Interface ───
