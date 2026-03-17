@@ -699,7 +699,7 @@ User query: "${query}"`;
   }
 
   // Skip city geocoding if zip code already resolved coordinates
-  const resolvedViaZip = zipCode && /^\d{5}$/.test(zipCode) && parsed.lat && parsed.lng;
+  const resolvedViaZip = zipCode && (isUSZip || isUKPostcode) && parsed.lat && parsed.lng;
 
   const hasExplicitState = hasExplicitStateInQuery(query);
 
