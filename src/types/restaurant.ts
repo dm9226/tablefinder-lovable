@@ -39,6 +39,7 @@ export interface SearchMeta {
   partySize: number;
   city: string;
   state?: string;
+  country?: string;
 }
 
 export interface SearchState {
