@@ -1155,6 +1155,7 @@ function isPlatformCandidateUrlValid(
   try {
     const u = new URL(rawUrl);
     const p = u.pathname.toLowerCase();
+    const host = u.hostname.toLowerCase();
 
     if (platform === "resy") {
       const m = p.match(/^\/cities\/([^/]+)\/venues\/([^/?#]+)/i);
@@ -1165,7 +1166,11 @@ function isPlatformCandidateUrlValid(
     }
 
     if (platform === "opentable") {
-      return /^\/r\/[^/?#]+/i.test(p);
+      // Accept both opentable.com and opentable.co.uk
+      if (host.includes("opentable.co.uk") || host.includes("opentable.com")) {
+        return /^\/r\/[^/?#]+/i.test(p);
+      }
+      return false;
     }
 
     // Yelp candidates from web search are low-confidence by default, keep only reservation pages.
