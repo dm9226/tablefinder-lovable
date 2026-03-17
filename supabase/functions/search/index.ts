@@ -429,7 +429,12 @@ Rules:
 - If no meal or time is mentioned, default to "19:00"
 - IMPORTANT: "brunch" is BOTH a meal time AND a cuisine/experience. When the user says "brunch", set time to "10:30" AND set cuisine to "brunch" (so results include brunch-specific restaurants and menus). Same for "breakfast" — set cuisine to "breakfast" in addition to the time.
 - If the user says something like "brunch Italian", set cuisine to "brunch italian" to capture both the meal style and food preference.
-- If the user provides a US zip code (5-digit number), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
+- If the user provides a US zip code (5-digit number) or UK postcode (e.g. "SW1A 1AA", "EC2R 8AH", "M1 1AA"), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
+- COUNTRY DETECTION: Detect whether the user is searching in the US or UK.
+  - Return country: "gb" for UK cities (London, Manchester, Edinburgh, Birmingham, Liverpool, Glasgow, Bristol, Leeds, Sheffield, Oxford, Cambridge, Brighton, Cardiff, Belfast, Newcastle, Nottingham, Bath, York, etc.) or UK postcodes.
+  - Return country: "us" for US cities, US state codes, or US zip codes.
+  - Default to "us" if ambiguous.
+  - For UK searches, use "state" for the country/region (e.g. "England", "Scotland", "Wales", "Northern Ireland").
 
 IMPORTANT — Cuisine type vs. dish keyword classification:
 You MUST distinguish between a CUISINE TYPE (broad restaurant category) and a DISH KEYWORD (specific menu item or ingredient).
