@@ -707,8 +707,9 @@ User query: "${query}"`;
   let cityGeoResults: any[] = [];
   if (!resolvedViaZip) {
     try {
+      const countryCode = parsed.country === "gb" ? "gb" : "us";
       const geoCheck = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=12&addressdetails=1&countrycodes=us`,
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=12&addressdetails=1&countrycodes=${countryCode}`,
         { headers: { "User-Agent": "TableFinder/1.0" } }
       );
       cityGeoResults = await geoCheck.json();
