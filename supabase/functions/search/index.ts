@@ -732,7 +732,7 @@ User query: "${query}"`;
         type: `${r.class || ""}/${r.type || ""}`.toLowerCase(),
       };
     })
-    .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && !!c.stateCode)
+    .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && (!!c.stateCode || parsed.country === "gb"))
     .filter((c: any) => {
       // Prefer true locality matches; avoid county-only matches when possible.
       if (!c.localityNorm) return false;
