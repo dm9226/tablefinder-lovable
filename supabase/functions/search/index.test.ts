@@ -463,11 +463,16 @@ const BATCH_SIZE = 2; // parallel queries per batch
 
 // Split into 5 test groups of 10 to stay within timeout
 const GROUPS: [string, number, number][] = [
-  ["Batch 1: Cuisine searches (#1-10)", 0, 10],
-  ["Batch 2: Dish searches (#11-18) + Time (#19-20)", 10, 20],
-  ["Batch 3: Time (#21-24) + Location (#25-30)", 20, 30],
-  ["Batch 4: Party size (#31-34) + Amenity (#35-40)", 30, 40],
-  ["Batch 5: Vague (#41-46) + Edge cases (#47-50)", 40, 50],
+  ["Batch 1: Cuisine searches (#1-5)", 0, 5],
+  ["Batch 2: Cuisine searches (#6-10)", 5, 10],
+  ["Batch 3: Dish searches (#11-15)", 10, 15],
+  ["Batch 4: Dish searches (#16-18) + Time (#19-20)", 15, 20],
+  ["Batch 5: Time (#21-24) + Location (#25)", 20, 25],
+  ["Batch 6: Location (#26-30)", 25, 30],
+  ["Batch 7: Party size (#31-34) + Amenity (#35)", 30, 35],
+  ["Batch 8: Amenity (#36-40)", 35, 40],
+  ["Batch 9: Vague (#41-45)", 40, 45],
+  ["Batch 10: Vague (#46) + Edge cases (#47-50)", 45, 50],
 ];
 
 for (const [name, start, end] of GROUPS) {
