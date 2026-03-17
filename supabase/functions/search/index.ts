@@ -906,15 +906,18 @@ async function searchFirecrawl(
         ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${amenitySuffix} restaurant`] : []),
       ]
     : platform === "opentable"
-    ? [
-        `site:opentable.com/r ${cityState} best rated${cuisine} restaurant`,
-        `site:opentable.com/r ${cityState} top${cuisine} restaurant reservation`,
-        // Dish-aware: add parent cuisine type query for better OT recall
-        ...(needsCuisineTypeQuery ? [
-          `site:opentable.com/r ${cityState}${cuisineTypeSuffix} restaurant reservation`,
-        ] : []),
-        ...(amenitySuffix ? [`site:opentable.com/r ${cityState}${amenitySuffix} restaurant reservation`] : []),
-      ]
+    ? (() => {
+        const isUK = params.country === "gb";
+        const otSite = isUK ? "site:opentable.co.uk/r" : "site:opentable.com/r";
+        return [
+          `${otSite} ${cityState} best rated${cuisine} restaurant`,
+          `${otSite} ${cityState} top${cuisine} restaurant reservation`,
+          ...(needsCuisineTypeQuery ? [
+            `${otSite} ${cityState}${cuisineTypeSuffix} restaurant reservation`,
+          ] : []),
+          ...(amenitySuffix ? [`${otSite} ${cityState}${amenitySuffix} restaurant reservation`] : []),
+        ];
+      })()
     : [
         `site:yelp.com/reservations ${cityState} best${cuisine}`,
         `site:yelp.com/biz ${cityState} top rated${cuisine} reservation`,
