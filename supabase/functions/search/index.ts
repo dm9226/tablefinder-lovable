@@ -628,7 +628,7 @@ User query: "${query}"`;
     if (isUKPostcode) parsed.country = "gb";
     try {
       const zipResp = await fetch(
-        `https://nominatim.openstreetmap.org/search?postalcode=${zipCode}&country=us&format=json&limit=1&addressdetails=1`,
+        `https://nominatim.openstreetmap.org/search?postalcode=${encodeURIComponent(zipCode)}&country=${zipCountry}&format=json&limit=1&addressdetails=1`,
         { headers: { "User-Agent": "TableFinder/1.0" } }
       );
       const zipData = await zipResp.json();
