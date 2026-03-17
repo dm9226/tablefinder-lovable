@@ -755,7 +755,13 @@ User query: "${query}"`;
   const distinctStates = [...new Set(usableCandidates.map((c: any) => c.stateCode))];
 
   // If user did NOT explicitly include a state, do NOT guess for ambiguous cities.
-  if (!hasExplicitState && !cityFromBrowser) {
+  // UK cities are generally unambiguous within GB, so skip disambiguation for UK.
+  if (parsed.country === "gb") {
+    // For UK, just take the first result's state code
+    if (distinctStates.length >= 1 && !parsed.state) {
+      parsed.state = distinctStates[0];
+    }
+  } else if (!hasExplicitState && !cityFromBrowser) {
     if (distinctStates.length > 1) {
       const options = [...new Set(usableCandidates.map((c: any) => `${parsed.city}, ${c.stateCode}`))].slice(0, 4);
       throw new Error(`Multiple locations found for "${parsed.city}". Please include the state or zip code — e.g. ${options.join(" or ")}.`);
