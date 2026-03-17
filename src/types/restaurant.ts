@@ -28,6 +28,7 @@ export interface SearchParams {
   partySize: number;
   city: string;
   state?: string;
+  country?: string;
   lat?: number;
   lng?: number;
 }
@@ -38,6 +39,7 @@ export interface SearchMeta {
   partySize: number;
   city: string;
   state?: string;
+  country?: string;
 }
 
 export interface SearchState {

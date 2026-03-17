@@ -19,6 +19,7 @@ interface SearchParams {
   partySize: number;
   city: string;
   state: string;
+  country: string;       // "us" or "gb" — defaults to "us"
   lat?: number;
   lng?: number;
 }
@@ -120,9 +121,11 @@ const STATE_NAME_TO_CODE: Record<string, string> = {
   wisconsin:"WI",wyoming:"WY","district of columbia":"DC",
 };
 
-function normalizeStateCode(state: string): string {
+function normalizeStateCode(state: string, country?: string): string {
   if (!state) return state;
   const trimmed = state.trim();
+  // For UK, pass through region names as-is (e.g. "England", "Scotland", "London")
+  if (country === "gb") return trimmed;
   // Already a 2-letter code
   if (/^[A-Z]{2}$/.test(trimmed)) return trimmed;
   if (/^[a-z]{2}$/i.test(trimmed)) return trimmed.toUpperCase();
@@ -426,7 +429,12 @@ Rules:
 - If no meal or time is mentioned, default to "19:00"
 - IMPORTANT: "brunch" is BOTH a meal time AND a cuisine/experience. When the user says "brunch", set time to "10:30" AND set cuisine to "brunch" (so results include brunch-specific restaurants and menus). Same for "breakfast" — set cuisine to "breakfast" in addition to the time.
 - If the user says something like "brunch Italian", set cuisine to "brunch italian" to capture both the meal style and food preference.
-- If the user provides a US zip code (5-digit number), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
+- If the user provides a US zip code (5-digit number) or UK postcode (e.g. "SW1A 1AA", "EC2R 8AH", "M1 1AA"), put it in the "zipCode" field and leave city/state empty. We will geocode it separately.
+- COUNTRY DETECTION: Detect whether the user is searching in the US or UK.
+  - Return country: "gb" for UK cities (London, Manchester, Edinburgh, Birmingham, Liverpool, Glasgow, Bristol, Leeds, Sheffield, Oxford, Cambridge, Brighton, Cardiff, Belfast, Newcastle, Nottingham, Bath, York, etc.) or UK postcodes.
+  - Return country: "us" for US cities, US state codes, or US zip codes.
+  - Default to "us" if ambiguous.
+  - For UK searches, use "state" for the country/region (e.g. "England", "Scotland", "Wales", "Northern Ireland").
 
 IMPORTANT — Cuisine type vs. dish keyword classification:
 You MUST distinguish between a CUISINE TYPE (broad restaurant category) and a DISH KEYWORD (specific menu item or ingredient).
@@ -454,8 +462,9 @@ Return JSON:
 - time: HH:MM (24h)
 - partySize: number (default 2)
 - city: major city string (empty if zip code provided instead)
-- state: 2-letter state code (empty if zip code provided instead)
-- zipCode: string (5-digit US zip code if provided, "" otherwise)
+- state: 2-letter US state code OR UK region (e.g. "England", "Scotland") (empty if zip code provided instead)
+- country: "us" or "gb" (default "us")
+- zipCode: string (5-digit US zip code or UK postcode if provided, "" otherwise)
 
 User query: "${query}"`;
 
@@ -476,6 +485,7 @@ User query: "${query}"`;
             date: { type: "string" },
             time: { type: "string" }, partySize: { type: "number" },
             city: { type: "string" }, state: { type: "string" },
+            country: { type: "string", description: "Country code: 'us' or 'gb'. Default 'us'." },
             zipCode: { type: "string" },
           },
           required: ["cuisine", "cuisineType", "dishKeyword", "date", "time", "partySize", "city", "state"],
@@ -518,6 +528,8 @@ User query: "${query}"`;
   if (!toolCall) throw new Error("Failed to parse search query");
 
   const parsed = JSON.parse(toolCall.function.arguments) as SearchParams;
+  parsed.country = ((parsed as any).country || "us").toLowerCase().trim();
+  if (parsed.country !== "gb") parsed.country = "us"; // Only us and gb supported
   
   // Normalize cuisineType and dishKeyword
   parsed.cuisineType = (parsed.cuisineType || "").trim().toLowerCase();
@@ -588,25 +600,35 @@ User query: "${query}"`;
     parsed.city = citySuffix[1].trim();
     if (!parsed.state) parsed.state = citySuffix[2];
   }
-  parsed.state = normalizeStateCode(parsed.state);
+  parsed.state = normalizeStateCode(parsed.state, parsed.country);
 
   // Parse browser location string for reliable city/state
   let browserCity = "";
   let browserState = "";
   if (location) {
+    // US format: "City, ST"  UK format: "City, England" or "London, UK"
     const locMatch = location.match(/^(.+),\s*([A-Z]{2})$/);
+    const locMatchUK = location.match(/^(.+),\s*(England|Scotland|Wales|Northern Ireland|UK)$/i);
     if (locMatch) {
       browserCity = locMatch[1].trim();
       browserState = locMatch[2].trim();
+    } else if (locMatchUK) {
+      browserCity = locMatchUK[1].trim();
+      browserState = locMatchUK[2].trim();
+      if (parsed.country === "us") parsed.country = "gb"; // auto-detect UK from browser
     }
   }
 
   // Handle zip code: geocode to city/state/coords
   const zipCode = (parsed as any).zipCode?.trim() || "";
-  if (zipCode && /^\d{5}$/.test(zipCode) && !parsed.city) {
+  const isUKPostcode = /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(zipCode);
+  const isUSZip = /^\d{5}$/.test(zipCode);
+  if (zipCode && (isUSZip || isUKPostcode) && !parsed.city) {
+    const zipCountry = isUKPostcode ? "gb" : "us";
+    if (isUKPostcode) parsed.country = "gb";
     try {
       const zipResp = await fetch(
-        `https://nominatim.openstreetmap.org/search?postalcode=${zipCode}&country=us&format=json&limit=1&addressdetails=1`,
+        `https://nominatim.openstreetmap.org/search?postalcode=${encodeURIComponent(zipCode)}&country=${zipCountry}&format=json&limit=1&addressdetails=1`,
         { headers: { "User-Agent": "TableFinder/1.0" } }
       );
       const zipData = await zipResp.json();
@@ -615,7 +637,7 @@ User query: "${query}"`;
         // Prefer city/town/village over county — county names like "DeKalb County"
         // don't work well with platform searches (Resy, OpenTable, Yelp)
         let resolvedCity = addr?.city || addr?.town || addr?.village || "";
-        parsed.state = normalizeStateCode(extractStateCode(addr) || parsed.state);
+        parsed.state = normalizeStateCode(extractStateCode(addr) || addr?.state || parsed.state, parsed.country);
         parsed.lat = parseFloat(zipData[0].lat);
         parsed.lng = parseFloat(zipData[0].lon);
 
@@ -662,7 +684,7 @@ User query: "${query}"`;
         );
         const revData = await revResp.json();
         parsed.city = revData.address?.city || revData.address?.town || revData.address?.village || revData.address?.suburb || "";
-        parsed.state = normalizeStateCode(revData.address?.state_code || revData.address?.state || "");
+        parsed.state = normalizeStateCode(revData.address?.state_code || revData.address?.state || "", parsed.country);
         if (parsed.city) {
           cityFromBrowser = true;
           parsed.lat = lat;
@@ -672,12 +694,12 @@ User query: "${query}"`;
       } catch { /* leave empty */ }
     }
     if (!parsed.city) {
-      throw new Error("Please include a city, state, or zip code in your search (e.g. 'rooftop dining Friday Decatur GA' or 'sushi tonight 30030') so we can find the right location.");
+      throw new Error("Please include a city or postcode in your search (e.g. 'rooftop dining Friday Decatur GA', 'sushi tonight 30030', or 'Italian London') so we can find the right location.");
     }
   }
 
   // Skip city geocoding if zip code already resolved coordinates
-  const resolvedViaZip = zipCode && /^\d{5}$/.test(zipCode) && parsed.lat && parsed.lng;
+  const resolvedViaZip = zipCode && (isUSZip || isUKPostcode) && parsed.lat && parsed.lng;
 
   const hasExplicitState = hasExplicitStateInQuery(query);
 
@@ -685,8 +707,9 @@ User query: "${query}"`;
   let cityGeoResults: any[] = [];
   if (!resolvedViaZip) {
     try {
+      const countryCode = parsed.country === "gb" ? "gb" : "us";
       const geoCheck = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=12&addressdetails=1&countrycodes=us`,
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsed.city)}&format=json&limit=12&addressdetails=1&countrycodes=${countryCode}`,
         { headers: { "User-Agent": "TableFinder/1.0" } }
       );
       cityGeoResults = await geoCheck.json();
@@ -709,7 +732,7 @@ User query: "${query}"`;
         type: `${r.class || ""}/${r.type || ""}`.toLowerCase(),
       };
     })
-    .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && !!c.stateCode)
+    .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && (!!c.stateCode || parsed.country === "gb"))
     .filter((c: any) => {
       // Prefer true locality matches; avoid county-only matches when possible.
       if (!c.localityNorm) return false;
@@ -727,12 +750,18 @@ User query: "${query}"`;
           localityNorm: normalizePlaceToken(extractLocalityName(r.address)),
           type: `${r.class || ""}/${r.type || ""}`.toLowerCase(),
         }))
-        .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && !!c.stateCode);
+        .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && (!!c.stateCode || parsed.country === "gb"));
 
   const distinctStates = [...new Set(usableCandidates.map((c: any) => c.stateCode))];
 
   // If user did NOT explicitly include a state, do NOT guess for ambiguous cities.
-  if (!hasExplicitState && !cityFromBrowser) {
+  // UK cities are generally unambiguous within GB, so skip disambiguation for UK.
+  if (parsed.country === "gb") {
+    // For UK, just take the first result's state code
+    if (distinctStates.length >= 1 && !parsed.state) {
+      parsed.state = distinctStates[0];
+    }
+  } else if (!hasExplicitState && !cityFromBrowser) {
     if (distinctStates.length > 1) {
       const options = [...new Set(usableCandidates.map((c: any) => `${parsed.city}, ${c.stateCode}`))].slice(0, 4);
       throw new Error(`Multiple locations found for "${parsed.city}". Please include the state or zip code — e.g. ${options.join(" or ")}.`);
@@ -846,7 +875,10 @@ async function searchFirecrawl(
   const state = params.state || "";
   // Use metro city name for OT/Yelp Firecrawl queries — tiny CDPs return no results
   const metroCityName = getMetroCityName(city, state);
-  const cityState = state ? `${metroCityName} ${state}` : metroCityName;
+  // For UK, use "City UK" instead of "City STATE_CODE"
+  const cityState = params.country === "gb" 
+    ? `${metroCityName} UK` 
+    : (state ? `${metroCityName} ${state}` : metroCityName);
   const resyCitySlug = getResyCitySlug(params);
 
   // Build amenity search suffix for dedicated discovery queries
@@ -877,15 +909,18 @@ async function searchFirecrawl(
         ...(amenitySuffix ? [`site:resy.com/cities/${resyCitySlug}/venues/ ${resyMetroName}${amenitySuffix} restaurant`] : []),
       ]
     : platform === "opentable"
-    ? [
-        `site:opentable.com/r ${cityState} best rated${cuisine} restaurant`,
-        `site:opentable.com/r ${cityState} top${cuisine} restaurant reservation`,
-        // Dish-aware: add parent cuisine type query for better OT recall
-        ...(needsCuisineTypeQuery ? [
-          `site:opentable.com/r ${cityState}${cuisineTypeSuffix} restaurant reservation`,
-        ] : []),
-        ...(amenitySuffix ? [`site:opentable.com/r ${cityState}${amenitySuffix} restaurant reservation`] : []),
-      ]
+    ? (() => {
+        const isUK = params.country === "gb";
+        const otSite = isUK ? "site:opentable.co.uk/r" : "site:opentable.com/r";
+        return [
+          `${otSite} ${cityState} best rated${cuisine} restaurant`,
+          `${otSite} ${cityState} top${cuisine} restaurant reservation`,
+          ...(needsCuisineTypeQuery ? [
+            `${otSite} ${cityState}${cuisineTypeSuffix} restaurant reservation`,
+          ] : []),
+          ...(amenitySuffix ? [`${otSite} ${cityState}${amenitySuffix} restaurant reservation`] : []),
+        ];
+      })()
     : [
         `site:yelp.com/reservations ${cityState} best${cuisine}`,
         `site:yelp.com/biz ${cityState} top rated${cuisine} reservation`,
@@ -1038,21 +1073,50 @@ const RESY_METRO_MAP: Record<string, string> = {
   "franklin|tn": "nashville",
   // Austin metro
   "round rock|tx": "austin",
+  // ─── UK metro areas ───
+  // London neighborhoods/boroughs → london
+  "shoreditch|england": "london",
+  "soho|england": "london",
+  "mayfair|england": "london",
+  "covent garden|england": "london",
+  "chelsea|england": "london",
+  "kensington|england": "london",
+  "notting hill|england": "london",
+  "brixton|england": "london",
+  "hackney|england": "london",
+  "islington|england": "london",
+  "camden|england": "london",
+  "fitzrovia|england": "london",
+  "marylebone|england": "london",
+  "clerkenwell|england": "london",
+  "bermondsey|england": "london",
+  "peckham|england": "london",
+  "dalston|england": "london",
+  "whitechapel|england": "london",
+  "city of london|england": "london",
+  "westminster|england": "london",
+  "fulham|england": "london",
+  "battersea|england": "london",
+  "richmond|england": "london",
 };
 
 function getResyCitySlug(params: SearchParams): string {
   const city = (params.city || "").trim().toLowerCase();
   const state = (params.state || "").trim().toLowerCase();
   const key = state ? `${city}|${state}` : city;
+  const isUK = params.country === "gb";
 
-  // Check metro mapping first — append state suffix to match Resy's URL format (e.g. "atlanta" → "atlanta-ga")
+  // Check metro mapping first
   const metroSlug = RESY_METRO_MAP[key];
   if (metroSlug) {
+    // UK cities don't use state suffix (Resy uses "london" not "london-england")
+    if (isUK) return metroSlug;
     return state ? `${metroSlug}-${state}` : metroSlug;
   }
 
-  // Fallback: slugify city-state
+  // Fallback: slugify city (+ state for US only)
   const slugCity = slugify(params.city || "");
+  if (isUK) return slugCity;
   const slugState = slugify(params.state || "");
   return slugState ? `${slugCity}-${slugState}` : slugCity;
 }
@@ -1094,6 +1158,7 @@ function isPlatformCandidateUrlValid(
   try {
     const u = new URL(rawUrl);
     const p = u.pathname.toLowerCase();
+    const host = u.hostname.toLowerCase();
 
     if (platform === "resy") {
       const m = p.match(/^\/cities\/([^/]+)\/venues\/([^/?#]+)/i);
@@ -1104,7 +1169,11 @@ function isPlatformCandidateUrlValid(
     }
 
     if (platform === "opentable") {
-      return /^\/r\/[^/?#]+/i.test(p);
+      // Accept both opentable.com and opentable.co.uk
+      if (host.includes("opentable.co.uk") || host.includes("opentable.com")) {
+        return /^\/r\/[^/?#]+/i.test(p);
+      }
+      return false;
     }
 
     // Yelp candidates from web search are low-confidence by default, keep only reservation pages.
@@ -1168,8 +1237,14 @@ function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp", raw: strin
       return `https://resy.com/cities/${citySlug}/venues/${venueMatch[2]}`;
     }
     if (platform === "opentable") {
+      const host = u.hostname.toLowerCase();
       const m = p.match(/^\/r\/[^/?#]+/i);
-      return m ? `https://www.opentable.com${m[0]}` : null;
+      if (!m) return null;
+      // Normalize to the correct domain
+      if (host.includes("opentable.co.uk")) {
+        return `https://www.opentable.co.uk${m[0]}`;
+      }
+      return `https://www.opentable.com${m[0]}`;
     }
     // Yelp: only reservation pages count as valid booking URLs
     const resMatch = p.match(/^\/reservations\/[^/?#]+/i);
@@ -1245,13 +1320,22 @@ async function fetchYelpCandidates(
     const yelpCity = getMetroCityName(params.city, params.state);
     const yelpState = params.state;
     
+    // For UK, use "City, UK" format for Yelp location
+    const yelpLocation = params.country === "gb" 
+      ? `${yelpCity}, UK` 
+      : `${yelpCity}, ${yelpState}`;
+    
     const sp = new URLSearchParams({
       term: `${yelpCuisine}${amenitySuffix} restaurants`.trim(),
-      location: `${yelpCity}, ${yelpState}`,
+      location: yelpLocation,
       limit: "20",
       sort_by: "best_match",
       attributes: "reservation",
     });
+    // Add locale for UK Yelp
+    if (params.country === "gb") {
+      sp.set("locale", "en_GB");
+    }
     if (params.lat && params.lng) {
       sp.set("latitude", String(params.lat));
       sp.set("longitude", String(params.lng));
@@ -1508,9 +1592,9 @@ async function enrichWithAI(results: Restaurant[], apiKey: string, params: Searc
         model: "google/gemini-2.5-flash",
         messages: [{
           role: "user",
-          content: `For each restaurant in the ${metroCity || params.city}, ${params.state} metro area, provide:
-- index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, priceRange ($-$$$$)
-- neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. "Buckhead", "Midtown", "Vinings", "Sandy Springs") — NOT the search city "${params.city}"
+          content: `For each restaurant in the ${metroCity || params.city}, ${params.country === "gb" ? "UK" : params.state} metro area, provide:
+- index, rating (Google Maps /5), reviewCount (approximate total Google reviews), cuisine type, priceRange (${params.country === "gb" ? "£-££££" : "$-$$$$"})
+- neighborhood: the ACTUAL neighborhood or suburb where the restaurant is physically located (e.g. ${params.country === "gb" ? '"Soho", "Shoreditch", "Mayfair", "Covent Garden"' : '"Buckhead", "Midtown", "Vinings", "Sandy Springs"'}) — NOT the search city "${params.city}"
 - description: ONE sentence (max 15 words) describing the restaurant's signature appeal or what it's known for
 - vibeTags: 1-3 short tags describing the vibe/ambiance (e.g. "Date Night", "Casual", "Upscale", "Family-Friendly", "Trendy", "Cozy", "Lively", "Intimate", "Hip", "Classic")${amenityInstruction}
 
