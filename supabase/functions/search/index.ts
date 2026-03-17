@@ -121,9 +121,11 @@ const STATE_NAME_TO_CODE: Record<string, string> = {
   wisconsin:"WI",wyoming:"WY","district of columbia":"DC",
 };
 
-function normalizeStateCode(state: string): string {
+function normalizeStateCode(state: string, country?: string): string {
   if (!state) return state;
   const trimmed = state.trim();
+  // For UK, pass through region names as-is (e.g. "England", "Scotland", "London")
+  if (country === "gb") return trimmed;
   // Already a 2-letter code
   if (/^[A-Z]{2}$/.test(trimmed)) return trimmed;
   if (/^[a-z]{2}$/i.test(trimmed)) return trimmed.toUpperCase();
