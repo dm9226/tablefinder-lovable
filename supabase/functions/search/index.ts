@@ -750,7 +750,7 @@ User query: "${query}"`;
           localityNorm: normalizePlaceToken(extractLocalityName(r.address)),
           type: `${r.class || ""}/${r.type || ""}`.toLowerCase(),
         }))
-        .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && !!c.stateCode);
+        .filter((c: any) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && (!!c.stateCode || parsed.country === "gb"));
 
   const distinctStates = [...new Set(usableCandidates.map((c: any) => c.stateCode))];
 
