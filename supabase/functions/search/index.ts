@@ -19,6 +19,7 @@ interface SearchParams {
   partySize: number;
   city: string;
   state: string;
+  country: string;       // "us" or "gb" — defaults to "us"
   lat?: number;
   lng?: number;
 }
