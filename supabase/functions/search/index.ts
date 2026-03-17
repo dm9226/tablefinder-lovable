@@ -485,6 +485,7 @@ User query: "${query}"`;
             date: { type: "string" },
             time: { type: "string" }, partySize: { type: "number" },
             city: { type: "string" }, state: { type: "string" },
+            country: { type: "string", description: "Country code: 'us' or 'gb'. Default 'us'." },
             zipCode: { type: "string" },
           },
           required: ["cuisine", "cuisineType", "dishKeyword", "date", "time", "partySize", "city", "state"],
