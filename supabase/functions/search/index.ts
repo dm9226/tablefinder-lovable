@@ -249,13 +249,31 @@ serve(async (req) => {
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
-    const verified = (await Promise.all(
+    let verified = (await Promise.all(
       adapters.map(a => a.verify(
         selected.filter(c => c.platform === a.platform),
         params, keys, amenityTerms
       ))
     )).flat();
     console.log(`Verified available: ${verified.length}/${selected.length}`);
+
+    // Yelp fallback: if zero Yelp results survived but untested candidates exist, try more
+    const yelpVerified = verified.filter(r => r.platform === "yelp").length;
+    if (yelpVerified === 0) {
+      const selectedIds = new Set(selected.map(r => r.name + r.platform));
+      const untestedYelp = allCandidates.filter(c => c.platform === "yelp" && !selectedIds.has(c.name + c.platform));
+      if (untestedYelp.length > 0) {
+        const fallbackBatch = untestedYelp.slice(0, 4);
+        console.log(`[YELP_FALLBACK] Zero Yelp survived — retrying ${fallbackBatch.length} additional candidates`);
+        const fallbackVerified = await verifyAvailability(fallbackBatch, params, keys.firecrawlKey, amenityTerms);
+        if (fallbackVerified.length > 0) {
+          console.log(`[YELP_FALLBACK] Recovered ${fallbackVerified.length} Yelp results`);
+          verified = [...verified, ...fallbackVerified];
+        } else {
+          console.log(`[YELP_FALLBACK] No additional Yelp results survived`);
+        }
+      }
+    }
 
     // Diagnostic: address extraction summary per platform
     for (const platform of ["resy", "opentable", "yelp"] as const) {
