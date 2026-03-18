@@ -2358,6 +2358,7 @@ async function verifyAvailability(
             }),
             signal: yelpRetryAbort.signal,
           });
+          clearTimeout(yelpRetryTimer);
 
           if (retryResp.ok) {
             const retryData = await retryResp.json();
@@ -2396,9 +2397,12 @@ async function verifyAvailability(
             console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
             await retryResp.text().catch(() => {});
           }
-        } catch (retryErr) {
-          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr}`);
+        } catch (retryErr: any) {
+          clearTimeout(yelpRetryTimer);
+          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
         }
+      } else if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
+        console.log(`  ${r.name} [yelp]: skipping retry — ${yelpRetryElapsed}ms elapsed (>80s budget)`);
       }
 
       // C. Filter times to those within the meal window
