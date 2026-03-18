@@ -249,13 +249,31 @@ serve(async (req) => {
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
-    const verified = (await Promise.all(
+    let verified = (await Promise.all(
       adapters.map(a => a.verify(
         selected.filter(c => c.platform === a.platform),
         params, keys, amenityTerms
       ))
     )).flat();
     console.log(`Verified available: ${verified.length}/${selected.length}`);
+
+    // Yelp fallback: if zero Yelp results survived but untested candidates exist, try more
+    const yelpVerified = verified.filter(r => r.platform === "yelp").length;
+    if (yelpVerified === 0) {
+      const selectedIds = new Set(selected.map(r => r.name + r.platform));
+      const untestedYelp = allCandidates.filter(c => c.platform === "yelp" && !selectedIds.has(c.name + c.platform));
+      if (untestedYelp.length > 0) {
+        const fallbackBatch = untestedYelp.slice(0, 4);
+        console.log(`[YELP_FALLBACK] Zero Yelp survived — retrying ${fallbackBatch.length} additional candidates`);
+        const fallbackVerified = await verifyAvailability(fallbackBatch, params, keys.firecrawlKey, amenityTerms);
+        if (fallbackVerified.length > 0) {
+          console.log(`[YELP_FALLBACK] Recovered ${fallbackVerified.length} Yelp results`);
+          verified = [...verified, ...fallbackVerified];
+        } else {
+          console.log(`[YELP_FALLBACK] No additional Yelp results survived`);
+        }
+      }
+    }
 
     // Diagnostic: address extraction summary per platform
     for (const platform of ["resy", "opentable", "yelp"] as const) {
@@ -1743,6 +1761,7 @@ async function verifyAvailability(
         url: r.platformUrl,
         formats: ["markdown"],
         onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
+        ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
       };
 
       let resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -2286,6 +2305,66 @@ async function verifyAvailability(
               foundTimes.push({ time: formatted, minutes: totalMin });
             }
           }
+        }
+      }
+
+      // ── YELP TWO-PASS RETRY: if first scrape (waitFor:3000) found no slots, retry with waitFor:5000 ──
+      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker) {
+        console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms`);
+        try {
+          const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${firecrawlKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              url: r.platformUrl,
+              formats: ["markdown"],
+              onlyMainContent: true,
+              waitFor: 5000,
+            }),
+          });
+
+          if (retryResp.ok) {
+            const retryData = await retryResp.json();
+            const retryMarkdown = extractFirecrawlMarkdown(retryData);
+            if (retryMarkdown) {
+              bookingMarkdown = retryMarkdown;
+              // Re-parse times from retry markdown
+              const retryTimeRegex = /\b(\d{1,2}):(\d{2})\s?(am|pm)\b/gi;
+              let retryMatch;
+              while ((retryMatch = retryTimeRegex.exec(retryMarkdown)) !== null) {
+                const ctxStart = Math.max(0, retryMatch.index - 60);
+                const ctxEnd = Math.min(retryMarkdown.length, retryMatch.index + retryMatch[0].length + 60);
+                const context = retryMarkdown.substring(ctxStart, ctxEnd).toLowerCase();
+                if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) continue;
+                const rawH = parseInt(retryMatch[1]);
+                const m = parseInt(retryMatch[2]);
+                const ampm = retryMatch[3].toLowerCase();
+                let h24 = rawH;
+                if (ampm === "pm" && rawH !== 12) h24 += 12;
+                if (ampm === "am" && rawH === 12) h24 = 0;
+                const totalMin = h24 * 60 + m;
+                const displayH = h24 % 12 || 12;
+                const displayAmpm = h24 >= 12 ? "PM" : "AM";
+                const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${displayAmpm}`;
+                if (seenTimes.has(formatted)) continue;
+                seenTimes.add(formatted);
+                foundTimes.push({ time: formatted, minutes: totalMin });
+              }
+              if (foundTimes.length > 0) {
+                console.log(`  ${r.name} [yelp] RETRY SUCCESS: extracted ${foundTimes.length} times: ${foundTimes.map(t=>t.time).join(", ")}`);
+              } else {
+                console.log(`  ${r.name} [yelp] RETRY: still no slots after waitFor:5000`);
+              }
+            }
+          } else {
+            console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
+            await retryResp.text().catch(() => {});
+          }
+        } catch (retryErr) {
+          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr}`);
         }
       }
 
