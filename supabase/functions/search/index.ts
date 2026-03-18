@@ -1713,8 +1713,9 @@ function selectCandidatesForVerification(
   let assigned = 0;
   for (const platform of platformOrder) {
     const raw = Math.round((buckets[platform].length / total) * maxCandidates);
-    // Cap quota to actual bucket size
-    quotas[platform] = Math.min(raw, buckets[platform].length);
+    // Cap quota to actual bucket size; Yelp capped at 6 due to waitFor latency cost
+    const platformCap = platform === "yelp" ? Math.min(raw, 6) : raw;
+    quotas[platform] = Math.min(platformCap, buckets[platform].length);
     assigned += quotas[platform];
   }
   // Distribute any remaining slots (due to rounding or capped buckets) round-robin
