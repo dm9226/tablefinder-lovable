@@ -1744,7 +1744,8 @@ async function verifyAvailability(
   candidates: Restaurant[],
   params: SearchParams,
   firecrawlKey: string,
-  amenityTerms: string[] = []
+  amenityTerms: string[] = [],
+  globalStartTime?: number
 ): Promise<Restaurant[]> {
   if (candidates.length === 0) return [];
 
