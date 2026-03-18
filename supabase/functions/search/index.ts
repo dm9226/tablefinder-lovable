@@ -2356,6 +2356,7 @@ async function verifyAvailability(
               onlyMainContent: true,
               waitFor: 5000,
             }),
+            signal: yelpRetryAbort.signal,
           });
 
           if (retryResp.ok) {
