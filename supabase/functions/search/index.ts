@@ -2573,7 +2573,7 @@ const opentableAdapter: ProviderAdapter = {
     return normalizeCandidates("opentable", raw, params);
   },
   async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
 
