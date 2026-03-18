@@ -158,6 +158,7 @@ interface Restaurant {
 interface ApiKeys {
   firecrawlKey: string;
   yelpKey?: string;
+  _startTime?: number;
 }
 
 interface ProviderAdapter {
@@ -203,7 +204,7 @@ serve(async (req) => {
       console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
     }
 
-    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, yelpKey: YELP_API_KEY };
+    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, yelpKey: YELP_API_KEY, _startTime: startTime };
     const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter];
     if (YELP_API_KEY) adapters.push(yelpAdapter);
 
@@ -258,14 +259,16 @@ serve(async (req) => {
     console.log(`Verified available: ${verified.length}/${selected.length}`);
 
     // Yelp fallback: if zero Yelp results survived but untested candidates exist, try more
+    // Skip if we're past 90s to prevent overall timeout
     const yelpVerified = verified.filter(r => r.platform === "yelp").length;
-    if (yelpVerified === 0) {
+    const fallbackElapsed = Date.now() - startTime;
+    if (yelpVerified === 0 && fallbackElapsed < 90_000) {
       const selectedIds = new Set(selected.map(r => r.name + r.platform));
       const untestedYelp = allCandidates.filter(c => c.platform === "yelp" && !selectedIds.has(c.name + c.platform));
       if (untestedYelp.length > 0) {
         const fallbackBatch = untestedYelp.slice(0, 4);
-        console.log(`[YELP_FALLBACK] Zero Yelp survived — retrying ${fallbackBatch.length} additional candidates`);
-        const fallbackVerified = await verifyAvailability(fallbackBatch, params, keys.firecrawlKey, amenityTerms);
+        console.log(`[YELP_FALLBACK] Zero Yelp survived — retrying ${fallbackBatch.length} additional candidates (elapsed: ${fallbackElapsed}ms)`);
+        const fallbackVerified = await verifyAvailability(fallbackBatch, params, keys.firecrawlKey, amenityTerms, startTime);
         if (fallbackVerified.length > 0) {
           console.log(`[YELP_FALLBACK] Recovered ${fallbackVerified.length} Yelp results`);
           verified = [...verified, ...fallbackVerified];
@@ -273,6 +276,8 @@ serve(async (req) => {
           console.log(`[YELP_FALLBACK] No additional Yelp results survived`);
         }
       }
+    } else if (yelpVerified === 0 && fallbackElapsed >= 90_000) {
+      console.log(`[YELP_FALLBACK] Skipped — ${fallbackElapsed}ms elapsed (>90s budget)`);
     }
 
     // Diagnostic: address extraction summary per platform
@@ -1713,8 +1718,9 @@ function selectCandidatesForVerification(
   let assigned = 0;
   for (const platform of platformOrder) {
     const raw = Math.round((buckets[platform].length / total) * maxCandidates);
-    // Cap quota to actual bucket size
-    quotas[platform] = Math.min(raw, buckets[platform].length);
+    // Cap quota to actual bucket size; Yelp capped at 6 due to waitFor latency cost
+    const platformCap = platform === "yelp" ? Math.min(raw, 6) : raw;
+    quotas[platform] = Math.min(platformCap, buckets[platform].length);
     assigned += quotas[platform];
   }
   // Distribute any remaining slots (due to rounding or capped buckets) round-robin
@@ -1743,7 +1749,8 @@ async function verifyAvailability(
   candidates: Restaurant[],
   params: SearchParams,
   firecrawlKey: string,
-  amenityTerms: string[] = []
+  amenityTerms: string[] = [],
+  globalStartTime?: number
 ): Promise<Restaurant[]> {
   if (candidates.length === 0) return [];
 
@@ -1764,27 +1771,53 @@ async function verifyAvailability(
         ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
       };
 
-      let resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${firecrawlKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(scrapePayload),
-      });
-
-      // Retry once on 408 (scrape timeout) with a shorter timeout
-      if (resp.status === 408) {
-        const errBody408 = await resp.text().catch(() => "(no body)");
-        console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
+      // Per-scrape timeout: 25s max to prevent a single hung request from consuming the entire budget
+      const scrapeAbort = new AbortController();
+      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
+      let resp: Response;
+      try {
         resp = await fetch(`${FIRECRAWL_API}/scrape`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${firecrawlKey}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
+          body: JSON.stringify(scrapePayload),
+          signal: scrapeAbort.signal,
         });
+      } catch (fetchErr: any) {
+        clearTimeout(scrapeTimer);
+        if (fetchErr.name === "AbortError") {
+          console.log(`Scrape timeout (25s abort) for ${r.name} [${r.platform}]`);
+        } else {
+          console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+        }
+        return null;
+      }
+      clearTimeout(scrapeTimer);
+
+      // Retry once on 408 (scrape timeout) with a shorter timeout
+      if (resp.status === 408) {
+        const errBody408 = await resp.text().catch(() => "(no body)");
+        console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
+        const retryAbort = new AbortController();
+        const retryTimer = setTimeout(() => retryAbort.abort(), 20_000);
+        try {
+          resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${firecrawlKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
+            signal: retryAbort.signal,
+          });
+        } catch (retryFetchErr: any) {
+          clearTimeout(retryTimer);
+          console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}]: ${retryFetchErr.name === "AbortError" ? "timeout" : retryFetchErr}`);
+          return null;
+        }
+        clearTimeout(retryTimer);
       }
 
       if (!resp.ok) {
@@ -2141,6 +2174,8 @@ async function verifyAvailability(
         if (foundTimes.length === 0 && !hadSelectSection) {
           console.log(`  ${r.name} [opentable]: no "Select a time" section on first pass — retrying with waitFor: 5000ms`);
           try {
+            const otRetryAbort = new AbortController();
+            const otRetryTimer = setTimeout(() => otRetryAbort.abort(), 25_000);
             const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
               method: "POST",
               headers: {
@@ -2153,7 +2188,9 @@ async function verifyAvailability(
                 onlyMainContent: false,
                 waitFor: 5000,
               }),
+              signal: otRetryAbort.signal,
             });
+            clearTimeout(otRetryTimer);
             
             if (retryResp.ok) {
               const retryData = await retryResp.json();
@@ -2172,8 +2209,8 @@ async function verifyAvailability(
             } else {
               console.log(`  ${r.name} [opentable] RETRY: scrape failed (${retryResp.status})`);
             }
-          } catch (retryErr) {
-            console.log(`  ${r.name} [opentable] RETRY error: ${retryErr}`);
+          } catch (retryErr: any) {
+            console.log(`  ${r.name} [opentable] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
           }
         }
         
@@ -2309,8 +2346,12 @@ async function verifyAvailability(
       }
 
       // ── YELP TWO-PASS RETRY: if first scrape (waitFor:3000) found no slots, retry with waitFor:5000 ──
-      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker) {
-        console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms`);
+      // Skip retry if we're past 80s elapsed to prevent overall timeout
+      const yelpRetryElapsed = globalStartTime ? Date.now() - globalStartTime : 0;
+      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
+        console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms (elapsed: ${yelpRetryElapsed}ms)`);
+        const yelpRetryAbort = new AbortController();
+        const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
         try {
           const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
             method: "POST",
@@ -2324,7 +2365,9 @@ async function verifyAvailability(
               onlyMainContent: true,
               waitFor: 5000,
             }),
+            signal: yelpRetryAbort.signal,
           });
+          clearTimeout(yelpRetryTimer);
 
           if (retryResp.ok) {
             const retryData = await retryResp.json();
@@ -2363,9 +2406,12 @@ async function verifyAvailability(
             console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
             await retryResp.text().catch(() => {});
           }
-        } catch (retryErr) {
-          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr}`);
+        } catch (retryErr: any) {
+          clearTimeout(yelpRetryTimer);
+          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
         }
+      } else if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
+        console.log(`  ${r.name} [yelp]: skipping retry — ${yelpRetryElapsed}ms elapsed (>80s budget)`);
       }
 
       // C. Filter times to those within the meal window
@@ -2525,7 +2571,7 @@ const resyAdapter: ProviderAdapter = {
     return normalizeCandidates("resy", raw, params);
   },
   async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
 
@@ -2536,7 +2582,7 @@ const opentableAdapter: ProviderAdapter = {
     return normalizeCandidates("opentable", raw, params);
   },
   async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
 
@@ -2547,6 +2593,6 @@ const yelpAdapter: ProviderAdapter = {
     return fetchYelpCandidates(params, keys.yelpKey, amenityTerms);
   },
   async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
