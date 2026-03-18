@@ -2584,6 +2584,6 @@ const yelpAdapter: ProviderAdapter = {
     return fetchYelpCandidates(params, keys.yelpKey, amenityTerms);
   },
   async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
