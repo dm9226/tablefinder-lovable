@@ -2562,7 +2562,7 @@ const resyAdapter: ProviderAdapter = {
     return normalizeCandidates("resy", raw, params);
   },
   async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
 
