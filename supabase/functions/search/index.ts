@@ -1766,27 +1766,53 @@ async function verifyAvailability(
         ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
       };
 
-      let resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${firecrawlKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(scrapePayload),
-      });
-
-      // Retry once on 408 (scrape timeout) with a shorter timeout
-      if (resp.status === 408) {
-        const errBody408 = await resp.text().catch(() => "(no body)");
-        console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
+      // Per-scrape timeout: 25s max to prevent a single hung request from consuming the entire budget
+      const scrapeAbort = new AbortController();
+      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
+      let resp: Response;
+      try {
         resp = await fetch(`${FIRECRAWL_API}/scrape`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${firecrawlKey}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
+          body: JSON.stringify(scrapePayload),
+          signal: scrapeAbort.signal,
         });
+      } catch (fetchErr: any) {
+        clearTimeout(scrapeTimer);
+        if (fetchErr.name === "AbortError") {
+          console.log(`Scrape timeout (25s abort) for ${r.name} [${r.platform}]`);
+        } else {
+          console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+        }
+        return null;
+      }
+      clearTimeout(scrapeTimer);
+
+      // Retry once on 408 (scrape timeout) with a shorter timeout
+      if (resp.status === 408) {
+        const errBody408 = await resp.text().catch(() => "(no body)");
+        console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
+        const retryAbort = new AbortController();
+        const retryTimer = setTimeout(() => retryAbort.abort(), 20_000);
+        try {
+          resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${firecrawlKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
+            signal: retryAbort.signal,
+          });
+        } catch (retryFetchErr: any) {
+          clearTimeout(retryTimer);
+          console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}]: ${retryFetchErr.name === "AbortError" ? "timeout" : retryFetchErr}`);
+          return null;
+        }
+        clearTimeout(retryTimer);
       }
 
       if (!resp.ok) {
