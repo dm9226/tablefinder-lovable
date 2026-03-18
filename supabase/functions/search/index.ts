@@ -1743,6 +1743,7 @@ async function verifyAvailability(
         url: r.platformUrl,
         formats: ["markdown"],
         onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
+        ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
       };
 
       let resp = await fetch(`${FIRECRAWL_API}/scrape`, {
