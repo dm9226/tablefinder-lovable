@@ -259,14 +259,16 @@ serve(async (req) => {
     console.log(`Verified available: ${verified.length}/${selected.length}`);
 
     // Yelp fallback: if zero Yelp results survived but untested candidates exist, try more
+    // Skip if we're past 90s to prevent overall timeout
     const yelpVerified = verified.filter(r => r.platform === "yelp").length;
-    if (yelpVerified === 0) {
+    const fallbackElapsed = Date.now() - startTime;
+    if (yelpVerified === 0 && fallbackElapsed < 90_000) {
       const selectedIds = new Set(selected.map(r => r.name + r.platform));
       const untestedYelp = allCandidates.filter(c => c.platform === "yelp" && !selectedIds.has(c.name + c.platform));
       if (untestedYelp.length > 0) {
         const fallbackBatch = untestedYelp.slice(0, 4);
-        console.log(`[YELP_FALLBACK] Zero Yelp survived — retrying ${fallbackBatch.length} additional candidates`);
-        const fallbackVerified = await verifyAvailability(fallbackBatch, params, keys.firecrawlKey, amenityTerms);
+        console.log(`[YELP_FALLBACK] Zero Yelp survived — retrying ${fallbackBatch.length} additional candidates (elapsed: ${fallbackElapsed}ms)`);
+        const fallbackVerified = await verifyAvailability(fallbackBatch, params, keys.firecrawlKey, amenityTerms, startTime);
         if (fallbackVerified.length > 0) {
           console.log(`[YELP_FALLBACK] Recovered ${fallbackVerified.length} Yelp results`);
           verified = [...verified, ...fallbackVerified];
@@ -274,6 +276,8 @@ serve(async (req) => {
           console.log(`[YELP_FALLBACK] No additional Yelp results survived`);
         }
       }
+    } else if (yelpVerified === 0 && fallbackElapsed >= 90_000) {
+      console.log(`[YELP_FALLBACK] Skipped — ${fallbackElapsed}ms elapsed (>90s budget)`);
     }
 
     // Diagnostic: address extraction summary per platform
