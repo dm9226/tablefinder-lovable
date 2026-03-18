@@ -2337,8 +2337,12 @@ async function verifyAvailability(
       }
 
       // ── YELP TWO-PASS RETRY: if first scrape (waitFor:3000) found no slots, retry with waitFor:5000 ──
-      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker) {
-        console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms`);
+      // Skip retry if we're past 80s elapsed to prevent overall timeout
+      const yelpRetryElapsed = globalStartTime ? Date.now() - globalStartTime : 0;
+      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
+        console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms (elapsed: ${yelpRetryElapsed}ms)`);
+        const yelpRetryAbort = new AbortController();
+        const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
         try {
           const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
             method: "POST",
