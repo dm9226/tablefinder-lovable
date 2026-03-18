@@ -204,7 +204,7 @@ serve(async (req) => {
       console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
     }
 
-    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, yelpKey: YELP_API_KEY };
+    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, yelpKey: YELP_API_KEY, _startTime: startTime };
     const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter];
     if (YELP_API_KEY) adapters.push(yelpAdapter);
 
