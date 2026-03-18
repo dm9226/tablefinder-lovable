@@ -2174,6 +2174,8 @@ async function verifyAvailability(
         if (foundTimes.length === 0 && !hadSelectSection) {
           console.log(`  ${r.name} [opentable]: no "Select a time" section on first pass — retrying with waitFor: 5000ms`);
           try {
+            const otRetryAbort = new AbortController();
+            const otRetryTimer = setTimeout(() => otRetryAbort.abort(), 25_000);
             const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
               method: "POST",
               headers: {
@@ -2186,7 +2188,9 @@ async function verifyAvailability(
                 onlyMainContent: false,
                 waitFor: 5000,
               }),
+              signal: otRetryAbort.signal,
             });
+            clearTimeout(otRetryTimer);
             
             if (retryResp.ok) {
               const retryData = await retryResp.json();
@@ -2205,8 +2209,8 @@ async function verifyAvailability(
             } else {
               console.log(`  ${r.name} [opentable] RETRY: scrape failed (${retryResp.status})`);
             }
-          } catch (retryErr) {
-            console.log(`  ${r.name} [opentable] RETRY error: ${retryErr}`);
+          } catch (retryErr: any) {
+            console.log(`  ${r.name} [opentable] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
           }
         }
         
