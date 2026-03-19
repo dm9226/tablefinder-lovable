@@ -15,6 +15,11 @@ const Index = () => {
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [locationDenied, setLocationDenied] = useState(false);
   const [searchMeta, setSearchMeta] = useState<SearchMeta | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [isExtending, setIsExtending] = useState(false);
+  const [remainingCandidates, setRemainingCandidates] = useState<Restaurant[]>([]);
+  const [lastQuery, setLastQuery] = useState<string>("");
+  const [lastParams, setLastParams] = useState<any>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const requestLocation = useCallback(() => {
@@ -52,7 +57,6 @@ const Index = () => {
     );
   }, []);
 
-  // Auto-detect location on mount
   useEffect(() => {
     requestLocation();
   }, [requestLocation]);
@@ -60,6 +64,7 @@ const Index = () => {
   const cancelSearch = useCallback(() => {
     abortRef.current?.abort();
     setIsLoading(false);
+    setIsExtending(false);
     toast.info("Search cancelled");
   }, []);
 
@@ -73,6 +78,10 @@ const Index = () => {
       setError(null);
       setHasSearched(true);
       setResults([]);
+      setHasMore(false);
+      setRemainingCandidates([]);
+      setLastQuery(query);
+      setLastParams(null);
 
       try {
         const { data, error: fnError } = await supabase.functions.invoke("search", {
@@ -98,7 +107,10 @@ const Index = () => {
         setResults(data?.results || []);
         if (data?.params) {
           setSearchMeta(data.params as SearchMeta);
+          setLastParams(data.params);
         }
+        setHasMore(!!data?.hasMore);
+        setRemainingCandidates(data?.remainingCandidates || []);
       } catch (err: any) {
         if (controller.signal.aborted) return;
         console.error("Search error:", err);
@@ -112,9 +124,42 @@ const Index = () => {
     [coords, location]
   );
 
+  const handleExtendedSearch = useCallback(async () => {
+    if (remainingCandidates.length === 0 || !lastParams) return;
+
+    setIsExtending(true);
+    try {
+      const { data, error: fnError } = await supabase.functions.invoke("search", {
+        body: {
+          query: lastQuery,
+          extended: true,
+          remainingCandidates,
+          extendedParams: lastParams,
+        },
+      });
+
+      if (data?.error) throw new Error(data.error);
+      if (fnError) throw new Error(fnError.message || "Extended search failed");
+
+      const newResults = data?.results || [];
+      if (newResults.length > 0) {
+        setResults(prev => [...prev, ...newResults]);
+        toast.success(`Found ${newResults.length} more result${newResults.length !== 1 ? "s" : ""}`);
+      } else {
+        toast.info("No additional results found");
+      }
+      setHasMore(!!data?.hasMore);
+      setRemainingCandidates(data?.remainingCandidates || []);
+    } catch (err: any) {
+      console.error("Extended search error:", err);
+      toast.error(err.message || "Extended search failed");
+    } finally {
+      setIsExtending(false);
+    }
+  }, [remainingCandidates, lastParams, lastQuery]);
+
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
-      {/* Header */}
       <header className="pt-6 pb-3 px-4 text-center">
         <h1 className="font-heading text-4xl md:text-5xl font-bold text-foreground mb-2 tracking-tight">
           Table<span className="text-primary">Finder</span>
@@ -124,7 +169,6 @@ const Index = () => {
         </p>
       </header>
 
-      {/* Search */}
       <section className="px-4 pb-3">
         <SearchBar
           onSearch={handleSearch}
@@ -136,7 +180,6 @@ const Index = () => {
         />
       </section>
 
-      {/* Results */}
       <section className="flex-1 overflow-y-auto pb-4">
         <ResultsGrid
           results={results}
@@ -146,10 +189,12 @@ const Index = () => {
           hasSearched={hasSearched}
           onCancel={cancelSearch}
           searchMeta={searchMeta}
+          hasMore={hasMore}
+          isExtending={isExtending}
+          onExtendSearch={handleExtendedSearch}
         />
       </section>
 
-      {/* Footer */}
       <footer className="py-6 text-center border-t border-border">
         <p className="text-xs text-muted-foreground font-body">
           TableFinder aggregates availability from Resy, OpenTable & Yelp

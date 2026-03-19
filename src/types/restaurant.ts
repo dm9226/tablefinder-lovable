@@ -40,6 +40,8 @@ export interface SearchMeta {
   city: string;
   state?: string;
   country?: string;
+  hasMore?: boolean;
+  remainingCandidates?: Restaurant[];
 }
 
 export interface SearchState {
