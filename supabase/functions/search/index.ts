@@ -450,15 +450,23 @@ serve(async (req) => {
     const finalResults = cleanTransientFields(sorted);
 
     clearTimeout(globalTimer);
+    const hasMore = remainingAfterSelection.length > 0;
+    console.log(`[RESPONSE] ${finalResults.length} results, hasMore=${hasMore} (${remainingAfterSelection.length} remaining candidates)`);
     try {
-      const responseBody = JSON.stringify({ results: finalResults, params, cached: false });
+      const responseBody = JSON.stringify({
+        results: finalResults,
+        params,
+        cached: false,
+        hasMore,
+        remainingCandidates: hasMore ? remainingAfterSelection : undefined,
+      });
       return new Response(responseBody, {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     } catch (jsonErr) {
       console.error("JSON.stringify failed:", jsonErr);
       return new Response(
-        JSON.stringify({ results: [], params, cached: false, error: "Response serialization failed" }),
+        JSON.stringify({ results: [], params, cached: false, hasMore: false, error: "Response serialization failed" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
