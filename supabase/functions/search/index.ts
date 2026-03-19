@@ -181,7 +181,7 @@ serve(async (req) => {
   const startTime = Date.now();
 
   try {
-    const { query, lat, lng, location } = await req.json();
+    const { query, lat, lng, location, extended, remainingCandidates: incomingCandidates, extendedParams } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
     const YELP_API_KEY = Deno.env.get("YELP_API_KEY");
