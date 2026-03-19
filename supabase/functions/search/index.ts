@@ -181,13 +181,103 @@ serve(async (req) => {
   const startTime = Date.now();
 
   try {
-    const { query, lat, lng, location } = await req.json();
+    const { query, lat, lng, location, extended, remainingCandidates: incomingCandidates, extendedParams } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
     const YELP_API_KEY = Deno.env.get("YELP_API_KEY");
 
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
+
+    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, yelpKey: YELP_API_KEY, _startTime: startTime };
+    const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter];
+    if (YELP_API_KEY) adapters.push(yelpAdapter);
+
+    // ─── Extended Search Mode ───
+    // Skips discovery and parsing; verifies remaining candidates from a previous search
+    if (extended && incomingCandidates && extendedParams) {
+      console.log(`[EXTENDED] Starting extended search with ${incomingCandidates.length} remaining candidates`);
+      const params = extendedParams as SearchParams;
+      const amenityTerms = extractAmenityTerms(params.cuisine || "", query || "");
+
+      // Verify up to 18 remaining candidates
+      const toVerify = (incomingCandidates as Restaurant[]).slice(0, 18);
+      const leftover = (incomingCandidates as Restaurant[]).slice(18);
+
+      let verified = (await Promise.all(
+        adapters.map(a => a.verify(
+          toVerify.filter((c: Restaurant) => c.platform === a.platform),
+          params, keys, amenityTerms
+        ))
+      )).flat();
+      console.log(`[EXTENDED] Verified: ${verified.length}/${toVerify.length}`);
+
+      // Geocoding + enrichment (same as main flow)
+      const elapsed = Date.now() - startTime;
+      const skipEnrichment = elapsed > 110_000;
+      const enrichmentPromise = skipEnrichment
+        ? Promise.resolve(new Map<number, any>())
+        : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
+
+      const [, enrichmentMap] = await Promise.all([
+        geocodeVerifiedResults(verified, params),
+        enrichmentPromise,
+      ]);
+
+      const cityLat = params.lat ?? 0;
+      const cityLng = params.lng ?? 0;
+      for (let i = 0; i < verified.length; i++) {
+        const e = enrichmentMap.get(i);
+        if (!e) continue;
+        const r = verified[i];
+        r.rating = e.rating ?? r.rating;
+        r.reviewCount = e.reviewCount ?? r.reviewCount;
+        r.cuisine = e.cuisine || r.cuisine;
+        r.description = e.description || r.description;
+        r.vibeTags = e.vibeTags || r.vibeTags;
+        r.priceRange = e.priceRange || r.priceRange;
+        if (e.neighborhood && r.neighborhood === params.city) {
+          r.neighborhood = e.neighborhood;
+        }
+        if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
+          const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
+          if (aiDist <= 200) {
+            r.distanceMiles = aiDist;
+            if (e.neighborhood) r.neighborhood = e.neighborhood;
+          }
+        }
+      }
+
+      // Distance filter + sort
+      const metroCity = getMetroCityName(params.city || "", params.state || "");
+      const wasMetroNormalized = metroCity !== (params.city || "");
+      const MAX_DISTANCE_MILES = wasMetroNormalized ? 30 : 15;
+      const nearby = verified.filter((r) => {
+        const d = r.distanceMiles;
+        if (d === null || d === undefined) return true;
+        return d <= MAX_DISTANCE_MILES;
+      });
+      const sorted = nearby.sort((a, b) => {
+        const dA = a.distanceMiles ?? 9999;
+        const dB = b.distanceMiles ?? 9999;
+        if (Math.abs(dA - dB) > 0.5) return dA - dB;
+        return (b.rating ?? 0) - (a.rating ?? 0);
+      });
+
+      const finalResults = cleanTransientFields(sorted);
+      clearTimeout(globalTimer);
+      return new Response(
+        JSON.stringify({
+          results: finalResults,
+          params,
+          hasMore: leftover.length > 0,
+          remainingCandidates: leftover.length > 0 ? leftover : undefined,
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // ─── Normal Search Flow ───
 
     // Step 1: Parse user query (always fresh)
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
@@ -203,10 +293,6 @@ serve(async (req) => {
     if (amenityTerms.length > 0) {
       console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
     }
-
-    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, yelpKey: YELP_API_KEY, _startTime: startTime };
-    const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter];
-    if (YELP_API_KEY) adapters.push(yelpAdapter);
 
     // Discovery with early termination: if it takes >40s, use whatever we have
     const DISCOVERY_TIMEOUT_MS = 40_000;
@@ -249,6 +335,10 @@ serve(async (req) => {
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+
+    // Track remaining candidates for extended search
+    const selectedIds = new Set(selected.map(r => r.name + r.platform));
+    const remainingAfterSelection = allCandidates.filter(c => !selectedIds.has(c.name + c.platform));
 
     let verified = (await Promise.all(
       adapters.map(a => a.verify(
@@ -360,15 +450,23 @@ serve(async (req) => {
     const finalResults = cleanTransientFields(sorted);
 
     clearTimeout(globalTimer);
+    const hasMore = remainingAfterSelection.length > 0;
+    console.log(`[RESPONSE] ${finalResults.length} results, hasMore=${hasMore} (${remainingAfterSelection.length} remaining candidates)`);
     try {
-      const responseBody = JSON.stringify({ results: finalResults, params, cached: false });
+      const responseBody = JSON.stringify({
+        results: finalResults,
+        params,
+        cached: false,
+        hasMore,
+        remainingCandidates: hasMore ? remainingAfterSelection : undefined,
+      });
       return new Response(responseBody, {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     } catch (jsonErr) {
       console.error("JSON.stringify failed:", jsonErr);
       return new Response(
-        JSON.stringify({ results: [], params, cached: false, error: "Response serialization failed" }),
+        JSON.stringify({ results: [], params, cached: false, hasMore: false, error: "Response serialization failed" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }

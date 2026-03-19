@@ -1,7 +1,8 @@
 import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { RestaurantCard } from "./RestaurantCard";
-import { SearchX, RefreshCw, CalendarDays, Clock, Users, MapPin } from "lucide-react";
+import { SearchX, RefreshCw, Search } from "lucide-react";
 import { SearchProgress } from "./SearchProgress";
+import { Button } from "./ui/button";
 
 interface ResultsGridProps {
   results: Restaurant[];
@@ -11,6 +12,9 @@ interface ResultsGridProps {
   hasSearched: boolean;
   onCancel: () => void;
   searchMeta?: SearchMeta | null;
+  hasMore?: boolean;
+  isExtending?: boolean;
+  onExtendSearch?: () => void;
 }
 
 function formatSearchMeta(meta: SearchMeta): string {
@@ -23,7 +27,7 @@ function formatSearchMeta(meta: SearchMeta): string {
   return parts.join(" · ");
 }
 
-export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearched, onCancel, searchMeta }: ResultsGridProps) {
+export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearched, onCancel, searchMeta, hasMore, isExtending, onExtendSearch }: ResultsGridProps) {
   if (isLoading) {
     return <SearchProgress onCancel={onCancel} />;
   }
@@ -81,6 +85,27 @@ export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearch
           <RestaurantCard key={r.id} restaurant={r} />
         ))}
       </div>
+
+      {/* Extended search button */}
+      {hasMore && !isExtending && (
+        <div className="flex justify-center mt-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onExtendSearch}
+            className="gap-2 font-body text-xs"
+          >
+            <Search className="h-3.5 w-3.5" />
+            Find more results
+          </Button>
+        </div>
+      )}
+      {isExtending && (
+        <div className="flex items-center justify-center gap-2 mt-4 py-3">
+          <RefreshCw className="h-3.5 w-3.5 animate-spin text-primary" />
+          <span className="text-xs text-muted-foreground font-body">Searching for more…</span>
+        </div>
+      )}
     </div>
   );
 }
