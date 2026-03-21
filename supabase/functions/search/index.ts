@@ -2068,8 +2068,9 @@ async function verifyAvailability(
       // oysters even if "oysters" isn't on the booking page.
       // For CUISINE searches (e.g. "seafood"): standard check — page must mention the cuisine.
       const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
-      const MEAL_TERMS_SET = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
-      const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS_SET.has(t));
+      const MEAL_AS_CUISINE_VERIFY = new Set(["brunch", "breakfast"]);
+      const MEAL_TERMS_SET = new Set(["dinner", "lunch", "supper", "meal", "eat", "eating", "dining"]);
+      const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS_SET.has(t) || MEAL_AS_CUISINE_VERIFY.has(t));
       
       // Build expanded check tokens: include parent cuisine types for dish searches
       const GENERIC_VERIFY_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
