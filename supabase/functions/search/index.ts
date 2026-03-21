@@ -1435,8 +1435,12 @@ async function fetchYelpCandidates(
     // Include amenity terms in Yelp search to discover rooftop/patio restaurants
     const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
     // Strip generic meal terms from Yelp search — "dinner restaurants" → "restaurants"
+    // BUT preserve "brunch" and "breakfast" as they represent genuine cuisine/category intent
+    const MEAL_AS_CUISINE_YELP = new Set(["brunch", "breakfast"]);
     const YELP_MEAL_STRIP = /\b(dinner|lunch|breakfast|supper|brunch|meal|dining)\b/gi;
-    const yelpCuisine = (params.cuisine || "").replace(YELP_MEAL_STRIP, "").trim();
+    const yelpCuisine = (params.cuisine || "").replace(YELP_MEAL_STRIP, (match) => {
+      return MEAL_AS_CUISINE_YELP.has(match.toLowerCase()) ? match : "";
+    }).replace(/\s+/g, " ").trim();
     
     // Use metro city name for Yelp search — tiny CDPs like "Scottdale" return no results
     const yelpCity = getMetroCityName(params.city, params.state);
@@ -1500,9 +1504,10 @@ async function fetchYelpCandidates(
     //   1) The dish keyword itself, OR
     //   2) The parent cuisine type (e.g. "seafood") from DISH_TO_CUISINE_MAP
     // If user searched for a cuisine type (e.g. "seafood"), use standard matching.
-    const MEAL_TERMS = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
+    const MEAL_AS_CUISINE_FILTER = new Set(["brunch", "breakfast"]);
+    const MEAL_TERMS = new Set(["dinner", "lunch", "supper", "meal", "eat", "eating", "dining"]);
     const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
-    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t));
+    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t) || MEAL_AS_CUISINE_FILTER.has(t));
 
     // Build expanded token set for dish searches: include parent cuisine types
     const GENERIC_CUISINE_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
@@ -2063,8 +2068,9 @@ async function verifyAvailability(
       // oysters even if "oysters" isn't on the booking page.
       // For CUISINE searches (e.g. "seafood"): standard check — page must mention the cuisine.
       const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
-      const MEAL_TERMS_SET = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
-      const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS_SET.has(t));
+      const MEAL_AS_CUISINE_VERIFY = new Set(["brunch", "breakfast"]);
+      const MEAL_TERMS_SET = new Set(["dinner", "lunch", "supper", "meal", "eat", "eating", "dining"]);
+      const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS_SET.has(t) || MEAL_AS_CUISINE_VERIFY.has(t));
       
       // Build expanded check tokens: include parent cuisine types for dish searches
       const GENERIC_VERIFY_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
@@ -2117,21 +2123,39 @@ async function verifyAvailability(
           if (hasMatch) {
             console.log(`  ✓ ${r.name} [yelp] — cuisine relevance passed via Yelp API categories`);
           }
+          // For meal-as-cuisine terms (brunch, breakfast), also check scraped text including reviews
+          if (!hasMatch) {
+            const mealTokens = verifyTokens.filter(t => MEAL_AS_CUISINE_VERIFY.has(t));
+            if (mealTokens.length > 0) {
+              hasMatch = mealTokens.some((token) => tokenMatches(pageText, token));
+              if (hasMatch) {
+                console.log(`  ✓ ${r.name} [yelp] — meal-as-cuisine relevance passed via page text/reviews`);
+              }
+            }
+          }
         } else if (isDishSearch) {
           // Dish search: keep current loose matching — any mention passes
           hasMatch = verifyTokens.some((token) => tokenMatches(pageText, token));
         } else {
-          // Cuisine category search: require stronger signal
-          hasMatch = verifyTokens.some((token) => {
-            // Auto-pass if token is in the restaurant name
+          // Check if any tokens are meal-as-cuisine terms — use loose matching for those
+          const mealTokens = verifyTokens.filter(t => MEAL_AS_CUISINE_VERIFY.has(t));
+          const nonMealTokens = verifyTokens.filter(t => !MEAL_AS_CUISINE_VERIFY.has(t));
+          
+          // Meal-as-cuisine tokens (brunch, breakfast): loose match — any mention in page/reviews passes
+          const mealMatch = mealTokens.length > 0 && mealTokens.some((token) => tokenMatches(pageText, token));
+          
+          // Non-meal tokens: standard strict matching (name, header, or 3+ frequency)
+          const nonMealMatch = nonMealTokens.length > 0 && nonMealTokens.some((token) => {
             if (tokenMatches(restaurantName, token)) return true;
-            // Auto-pass if token appears in first 500 chars (header/identity area)
             const headerText = lower.slice(0, 500);
             if (tokenMatches(headerText, token)) return true;
-            // Frequency threshold: token must appear 3+ times in full text
             if (countOccurrences(lower, token) >= 3) return true;
             return false;
           });
+          
+          hasMatch = mealMatch || nonMealMatch;
+          // If ONLY meal tokens exist and none matched, hasMatch stays false (correct)
+          // If ONLY non-meal tokens exist, nonMealMatch decides (original behavior)
         }
 
         if (!hasMatch) {
