@@ -1862,13 +1862,13 @@ async function verifyAvailability(
       // Yelp: onlyMainContent=true (no addresses available anyway)
       // Resy + OT: onlyMainContent=false to capture address/location sections for geocoding
       // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
-      const scrapePayload: Record<string, unknown> = {
-        url: r.platformUrl,
-        formats: ["markdown"],
-        onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
-        ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
-        ...(isOT && { waitFor: 5000 }),    // OT booking widget needs 5s for JS to fully render all time slots
-      };
+        const scrapePayload: Record<string, unknown> = {
+          url: r.platformUrl,
+          formats: isOT ? ["markdown", "html"] : ["markdown"],  // OT: also get HTML for more reliable slot extraction
+          onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
+          ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
+          ...(isOT && { waitFor: 5000 }),    // OT booking widget needs 5s for JS to fully render all time slots
+        };
 
       // Per-scrape timeout: 25s max to prevent a single hung request from consuming the entire budget
       const scrapeAbort = new AbortController();
