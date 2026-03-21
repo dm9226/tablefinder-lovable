@@ -2269,13 +2269,10 @@ async function verifyAvailability(
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from "Select a time" section: ${foundTimes.map(t=>t.time).join(", ")}`);
         }
         
-        // Two-pass retry: re-scrape with waitFor:5000 if no slots found OR fewer than 3 slots (widget likely didn't fully render)
-        if ((foundTimes.length === 0 && !hadSelectSection) || 
-            (hadSelectSection && foundTimes.length > 0 && foundTimes.length < 3)) {
-          const retryReason = foundTimes.length === 0 
-            ? 'no "Select a time" section on first pass' 
-            : `only ${foundTimes.length} slot(s) found — widget may not have fully rendered`;
-          console.log(`  ${r.name} [opentable]: ${retryReason} — retrying with waitFor: 5000ms`);
+        // Two-pass retry: re-scrape with waitFor:8000 ONLY if no slots found AND no "Select a time" section
+        // (first pass already uses waitFor:5000 which should capture all rendered slots)
+        if (foundTimes.length === 0 && !hadSelectSection) {
+          console.log(`  ${r.name} [opentable]: no "Select a time" section on first pass — retrying with waitFor: 8000ms`);
           try {
             const otRetryAbort = new AbortController();
             const otRetryTimer = setTimeout(() => otRetryAbort.abort(), 25_000);
