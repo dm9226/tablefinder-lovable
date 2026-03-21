@@ -2074,7 +2074,10 @@ async function verifyAvailability(
       
       // Build expanded check tokens: include parent cuisine types for dish searches
       const GENERIC_VERIFY_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
-      let verifyTokens = [...cuisineTokens];
+      // Filter out amenity terms (patio, rooftop, outdoor, etc.) from cuisine verification —
+      // these are handled by the dedicated amenity check downstream (line ~2172).
+      const AMENITY_TERM_SET = new Set(Object.keys(AMENITY_KEYWORDS));
+      let verifyTokens = cuisineTokens.filter(t => !AMENITY_TERM_SET.has(t));
       if (params.dishKeyword) {
         const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
         for (const pc of parentCuisines) {
