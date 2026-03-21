@@ -2123,21 +2123,39 @@ async function verifyAvailability(
           if (hasMatch) {
             console.log(`  ✓ ${r.name} [yelp] — cuisine relevance passed via Yelp API categories`);
           }
+          // For meal-as-cuisine terms (brunch, breakfast), also check scraped text including reviews
+          if (!hasMatch) {
+            const mealTokens = verifyTokens.filter(t => MEAL_AS_CUISINE_VERIFY.has(t));
+            if (mealTokens.length > 0) {
+              hasMatch = mealTokens.some((token) => tokenMatches(pageText, token));
+              if (hasMatch) {
+                console.log(`  ✓ ${r.name} [yelp] — meal-as-cuisine relevance passed via page text/reviews`);
+              }
+            }
+          }
         } else if (isDishSearch) {
           // Dish search: keep current loose matching — any mention passes
           hasMatch = verifyTokens.some((token) => tokenMatches(pageText, token));
         } else {
-          // Cuisine category search: require stronger signal
-          hasMatch = verifyTokens.some((token) => {
-            // Auto-pass if token is in the restaurant name
+          // Check if any tokens are meal-as-cuisine terms — use loose matching for those
+          const mealTokens = verifyTokens.filter(t => MEAL_AS_CUISINE_VERIFY.has(t));
+          const nonMealTokens = verifyTokens.filter(t => !MEAL_AS_CUISINE_VERIFY.has(t));
+          
+          // Meal-as-cuisine tokens (brunch, breakfast): loose match — any mention in page/reviews passes
+          const mealMatch = mealTokens.length > 0 && mealTokens.some((token) => tokenMatches(pageText, token));
+          
+          // Non-meal tokens: standard strict matching (name, header, or 3+ frequency)
+          const nonMealMatch = nonMealTokens.length > 0 && nonMealTokens.some((token) => {
             if (tokenMatches(restaurantName, token)) return true;
-            // Auto-pass if token appears in first 500 chars (header/identity area)
             const headerText = lower.slice(0, 500);
             if (tokenMatches(headerText, token)) return true;
-            // Frequency threshold: token must appear 3+ times in full text
             if (countOccurrences(lower, token) >= 3) return true;
             return false;
           });
+          
+          hasMatch = mealMatch || nonMealMatch;
+          // If ONLY meal tokens exist and none matched, hasMatch stays false (correct)
+          // If ONLY non-meal tokens exist, nonMealMatch decides (original behavior)
         }
 
         if (!hasMatch) {
