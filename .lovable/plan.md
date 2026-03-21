@@ -1,61 +1,36 @@
 
 
-## SEO Improvements for TableFinder
+## Problem: "Patio" Search Rejects All Results at Cuisine Check
 
-### Changes Overview
+### Root Cause
 
-**1. Structured Data (JSON-LD) in `index.html`**
-- Add `WebApplication` schema with name, URL, description, category
-- Add `WebSite` schema with `SearchAction` for potential sitelinks search box
-- Add `manifest.json` link and `apple-touch-icon` meta tag
+There are **two separate relevance checks** that run sequentially during verification:
 
-**2. Create `public/sitemap.xml`**
-- List all pages: `/`, `/about`, `/how-it-works`
-- Static file served directly by Vite
+1. **Cuisine relevance check** (line 2090) — checks if the page mentions cuisine tokens with strict matching (3+ occurrences or in name/header)
+2. **Amenity relevance check** (line 2172) — checks if the page mentions amenity synonyms (patio, outdoor seating, al fresco, etc.) with loose matching
 
-**3. Update `public/robots.txt`**
-- Add `Sitemap: https://tablefinder.ai/sitemap.xml` directive
+The problem: when the user searches "patio", the AI parser puts "patio" into `params.cuisine`. This means "patio" ends up in `cuisineTokens` at line 2073 and gets checked as a **cuisine word** with strict matching. Most restaurant pages don't mention "patio" 3+ times in their text or in their name/header, so they fail at step 1 and never reach the amenity check at step 2 — which would have passed them using the synonym list.
 
-**4. Create `public/manifest.json`**
-- App name, short name, theme color matching the warm dark palette, display standalone
+The logs confirm this: every rejection says `failed cuisine relevance (category) for: patio (checked: patio)`. The amenity check never runs.
 
-**5. Install `react-helmet-async` and wrap app**
-- Add `HelmetProvider` in `src/App.tsx`
-- Each page sets its own `<title>` and `<meta description>`
+For Yelp specifically, the `_yelpCategories` field is checked for "patio" (line 2122), but Yelp categories are things like "italian", "seafood" — never "patio". So Yelp candidates also fail.
 
-**6. Create `/about` page (`src/pages/About.tsx`)**
-- Explains what TableFinder is, which platforms it searches
-- SEO-targeted title: "About TableFinder — Search Resy, OpenTable & Yelp Together"
-- Clean content page with consistent branding, link back to search
+### Fix
 
-**7. Create `/how-it-works` page (`src/pages/HowItWorks.tsx`)**
-- 3-step explanation: Enter search → We check platforms → See results
-- SEO-targeted title: "How TableFinder Works — Find Restaurant Reservations in Seconds"
-- Visual step cards, CTA to try a search
+**File: `supabase/functions/search/index.ts`**
 
-**8. Add routes in `src/App.tsx`**
-- `/about` → lazy-loaded About page
-- `/how-it-works` → lazy-loaded HowItWorks page
+1. **Filter amenity terms out of `cuisineTokens` and `verifyTokens`** at the cuisine relevance check (around line 2073). Use the existing `AMENITY_KEYWORDS` keys to identify them. If "patio" is the only token, `verifyTokens` becomes empty, and the cuisine check is skipped entirely (`verifyTokens.length > 0` is false).
 
-**9. Add `<Helmet>` to `src/pages/Index.tsx`**
-- Sets page-specific title and description on the home page
+2. The **amenity check at line 2172 already handles this correctly** — it uses the `AMENITY_KEYWORDS` synonym list with loose matching. No changes needed there.
 
-### Files
+3. **For Yelp specifically**, also skip the `_yelpCategories` cuisine check when the only tokens are amenity terms, allowing Yelp candidates to pass through to the amenity synonym check.
 
-| Action | File |
-|--------|------|
-| Modify | `index.html` — JSON-LD, manifest link |
-| Modify | `public/robots.txt` — sitemap directive |
-| Create | `public/sitemap.xml` |
-| Create | `public/manifest.json` |
-| Modify | `src/main.tsx` — wrap with HelmetProvider |
-| Modify | `src/App.tsx` — add routes |
-| Modify | `src/pages/Index.tsx` — add Helmet |
-| Create | `src/pages/About.tsx` |
-| Create | `src/pages/HowItWorks.tsx` |
+### What this changes
+- Amenity-only searches ("patio", "rooftop", "outdoor") skip the cuisine relevance gate entirely and rely on the purpose-built amenity check
+- Mixed searches ("italian patio") still check "italian" via cuisine relevance AND "patio" via amenity check
+- No performance impact — just filtering a token array
 
-### Design
-- Both content pages use the same dark warm theme, Outfit/Playfair fonts
-- Minimal nav: TableFinder logo links home, footer matches Index
-- Pages are static content — no API calls, instant load
+### Expected Outcome
+- Restaurants with patios/outdoor seating pass verification when searching "patio"
+- Yelp results return alongside Resy and OpenTable results
 
