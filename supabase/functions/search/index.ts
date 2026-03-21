@@ -2258,15 +2258,62 @@ async function verifyAvailability(
         }
         return slots;
       };
+
+      // Helper: parse OT slots from raw HTML (more reliable than markdown for JS-rendered widgets)
+      const parseOTSlotsFromHTML = (html: string): { time: string; minutes: number }[] => {
+        const slots: { time: string; minutes: number }[] = [];
+        const seen = new Set<string>();
+        
+        // OT renders time slots as buttons with data-test="time-button" or similar,
+        // or as list items within a time-selection section.
+        // Pattern 1: button elements with time text like ">6:30 PM<" or ">7:00 PM<"
+        // Look for the availability/time-slot section first
+        const timeSelectionIdx = html.indexOf('Select a time');
+        if (timeSelectionIdx === -1) return slots;
+        
+        // Extract a chunk around the time selection area
+        const sectionChunk = html.substring(timeSelectionIdx, Math.min(html.length, timeSelectionIdx + 5000));
+        
+        // Find all time patterns in this section — buttons, links, or plain text
+        const htmlTimeRegex = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
+        let htmlMatch;
+        while ((htmlMatch = htmlTimeRegex.exec(sectionChunk)) !== null) {
+          // Skip if near "Notify" (waitlist, not bookable)
+          const context = sectionChunk.substring(Math.max(0, htmlMatch.index - 50), htmlMatch.index + htmlMatch[0].length + 50);
+          if (/notify/i.test(context)) continue;
+          // Skip dropdown/picker times (those appear in long concatenated lists)
+          if (/\d{1,2}:\d{2}\s*(?:AM|PM)\d{1,2}:\d{2}/i.test(context)) continue;
+          
+          const parsed = parseTimeStr(htmlMatch[1]);
+          if (parsed && !seen.has(parsed.time)) {
+            seen.add(parsed.time);
+            slots.push(parsed);
+          }
+        }
+        return slots;
+      };
       
       if (isOT) {
-        // First pass: parse OT slots from initial scrape
+        // First pass: parse OT slots from markdown
         foundTimes = parseOTSlots(markdown);
-        const hadSelectSection = markdown.toLowerCase().includes("select a time");
+        
+        // Also try HTML parsing for more complete extraction
+        const scrapeHtml = data?.data?.html || data?.html || "";
+        if (scrapeHtml) {
+          const htmlSlots = parseOTSlotsFromHTML(scrapeHtml);
+          for (const slot of htmlSlots) {
+            if (!seenTimes.has(slot.time)) {
+              seenTimes.add(slot.time);
+              foundTimes.push(slot);
+            }
+          }
+        }
+        
+        const hadSelectSection = markdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
         
         if (foundTimes.length > 0) {
           foundTimes.forEach(t => seenTimes.add(t.time));
-          console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from "Select a time" section: ${foundTimes.map(t=>t.time).join(", ")}`);
+          console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
         }
         
         // Two-pass retry: re-scrape with waitFor:8000 ONLY if no slots found AND no "Select a time" section
