@@ -1862,13 +1862,13 @@ async function verifyAvailability(
       // Yelp: onlyMainContent=true (no addresses available anyway)
       // Resy + OT: onlyMainContent=false to capture address/location sections for geocoding
       // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
-      const scrapePayload: Record<string, unknown> = {
-        url: r.platformUrl,
-        formats: ["markdown"],
-        onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
-        ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
-        ...(isOT && { waitFor: 3000 }),    // OT booking widget needs JS to fully render all time slots
-      };
+        const scrapePayload: Record<string, unknown> = {
+          url: r.platformUrl,
+          formats: isOT ? ["markdown", "html"] : ["markdown"],  // OT: also get HTML for more reliable slot extraction
+          onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
+          ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
+          ...(isOT && { waitFor: 5000 }),    // OT booking widget needs 5s for JS to fully render all time slots
+        };
 
       // Per-scrape timeout: 25s max to prevent a single hung request from consuming the entire budget
       const scrapeAbort = new AbortController();
@@ -2258,24 +2258,69 @@ async function verifyAvailability(
         }
         return slots;
       };
+
+      // Helper: parse OT slots from raw HTML (more reliable than markdown for JS-rendered widgets)
+      const parseOTSlotsFromHTML = (html: string): { time: string; minutes: number }[] => {
+        const slots: { time: string; minutes: number }[] = [];
+        const seen = new Set<string>();
+        
+        // OT renders time slots as buttons with data-test="time-button" or similar,
+        // or as list items within a time-selection section.
+        // Pattern 1: button elements with time text like ">6:30 PM<" or ">7:00 PM<"
+        // Look for the availability/time-slot section first
+        const timeSelectionIdx = html.indexOf('Select a time');
+        if (timeSelectionIdx === -1) return slots;
+        
+        // Extract a chunk around the time selection area
+        const sectionChunk = html.substring(timeSelectionIdx, Math.min(html.length, timeSelectionIdx + 5000));
+        
+        // Find all time patterns in this section — buttons, links, or plain text
+        const htmlTimeRegex = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
+        let htmlMatch;
+        while ((htmlMatch = htmlTimeRegex.exec(sectionChunk)) !== null) {
+          // Skip if near "Notify" (waitlist, not bookable)
+          const context = sectionChunk.substring(Math.max(0, htmlMatch.index - 50), htmlMatch.index + htmlMatch[0].length + 50);
+          if (/notify/i.test(context)) continue;
+          // Skip dropdown/picker times (those appear in long concatenated lists)
+          if (/\d{1,2}:\d{2}\s*(?:AM|PM)\d{1,2}:\d{2}/i.test(context)) continue;
+          
+          const parsed = parseTimeStr(htmlMatch[1]);
+          if (parsed && !seen.has(parsed.time)) {
+            seen.add(parsed.time);
+            slots.push(parsed);
+          }
+        }
+        return slots;
+      };
       
       if (isOT) {
-        // First pass: parse OT slots from initial scrape
+        // First pass: parse OT slots from markdown
         foundTimes = parseOTSlots(markdown);
-        const hadSelectSection = markdown.toLowerCase().includes("select a time");
+        // Populate seenTimes from markdown slots BEFORE HTML merge to avoid dupes
+        foundTimes.forEach(t => seenTimes.add(t.time));
         
-        if (foundTimes.length > 0) {
-          foundTimes.forEach(t => seenTimes.add(t.time));
-          console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from "Select a time" section: ${foundTimes.map(t=>t.time).join(", ")}`);
+        // Also try HTML parsing for more complete extraction
+        const scrapeHtml = data?.data?.html || data?.html || "";
+        if (scrapeHtml) {
+          const htmlSlots = parseOTSlotsFromHTML(scrapeHtml);
+          for (const slot of htmlSlots) {
+            if (!seenTimes.has(slot.time)) {
+              seenTimes.add(slot.time);
+              foundTimes.push(slot);
+            }
+          }
         }
         
-        // Two-pass retry: re-scrape with waitFor:5000 if no slots found OR fewer than 3 slots (widget likely didn't fully render)
-        if ((foundTimes.length === 0 && !hadSelectSection) || 
-            (hadSelectSection && foundTimes.length > 0 && foundTimes.length < 3)) {
-          const retryReason = foundTimes.length === 0 
-            ? 'no "Select a time" section on first pass' 
-            : `only ${foundTimes.length} slot(s) found — widget may not have fully rendered`;
-          console.log(`  ${r.name} [opentable]: ${retryReason} — retrying with waitFor: 5000ms`);
+        const hadSelectSection = markdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
+        
+        if (foundTimes.length > 0) {
+          console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
+        }
+        
+        // Two-pass retry: re-scrape with waitFor:8000 ONLY if no slots found AND no "Select a time" section
+        // (first pass already uses waitFor:5000 which should capture all rendered slots)
+        if (foundTimes.length === 0 && !hadSelectSection) {
+          console.log(`  ${r.name} [opentable]: no "Select a time" section on first pass — retrying with waitFor: 8000ms`);
           try {
             const otRetryAbort = new AbortController();
             const otRetryTimer = setTimeout(() => otRetryAbort.abort(), 25_000);
@@ -2287,9 +2332,9 @@ async function verifyAvailability(
               },
               body: JSON.stringify({
                 url: r.platformUrl,
-                formats: ["markdown"],
+                formats: ["markdown", "html"],
                 onlyMainContent: false,
-                waitFor: 5000,
+                waitFor: 8000,
               }),
               signal: otRetryAbort.signal,
             });
@@ -2298,21 +2343,29 @@ async function verifyAvailability(
             if (retryResp.ok) {
               const retryData = await retryResp.json();
               const retryMarkdown = extractFirecrawlMarkdown(retryData);
-              if (retryMarkdown) {
-                const retrySlots = parseOTSlots(retryMarkdown);
-                if (retrySlots.length > 0) {
-                  // Merge retry results with first-pass results (deduped)
-                  for (const slot of retrySlots) {
+              const retryHtml = retryData?.data?.html || retryData?.html || "";
+              if (retryMarkdown || retryHtml) {
+                // Parse both markdown and HTML from retry
+                const retryMdSlots = retryMarkdown ? parseOTSlots(retryMarkdown) : [];
+                const retryHtmlSlots = retryHtml ? parseOTSlotsFromHTML(retryHtml) : [];
+                const allRetrySlots = [...retryMdSlots];
+                const retrySeenSet = new Set(retryMdSlots.map(s => s.time));
+                for (const s of retryHtmlSlots) {
+                  if (!retrySeenSet.has(s.time)) { retrySeenSet.add(s.time); allRetrySlots.push(s); }
+                }
+                
+                if (allRetrySlots.length > 0) {
+                  for (const slot of allRetrySlots) {
                     if (!seenTimes.has(slot.time)) {
                       seenTimes.add(slot.time);
                       foundTimes.push(slot);
                     }
                   }
                   console.log(`  ${r.name} [opentable] RETRY SUCCESS: now have ${foundTimes.length} total times: ${foundTimes.map(t=>t.time).join(", ")}`);
-                  bookingMarkdown = retryMarkdown;
+                  if (retryMarkdown) bookingMarkdown = retryMarkdown;
                 } else {
                   console.log(`  ${r.name} [opentable] RETRY: still no additional slots after waitFor`);
-                  bookingMarkdown = retryMarkdown;
+                  if (retryMarkdown) bookingMarkdown = retryMarkdown;
                 }
               }
             } else {
