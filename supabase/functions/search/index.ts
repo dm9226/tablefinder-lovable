@@ -2286,7 +2286,7 @@ async function verifyAvailability(
                 url: r.platformUrl,
                 formats: ["markdown"],
                 onlyMainContent: false,
-                waitFor: 5000,
+                waitFor: 8000,
               }),
               signal: otRetryAbort.signal,
             });
