@@ -1,27 +1,61 @@
 
 
-## Review-Based Relevance: Zero Extra Latency
+## SEO Improvements for TableFinder
 
-Good news: **we already have the review data** — it's in the scraped markdown from each restaurant's page during verification. Yelp pages include review snippets, and those are captured in the markdown we're already fetching. No additional API calls or scrape time needed.
+### Changes Overview
 
-The real problem is that "brunch" (and terms like "breakfast") are currently **stripped before we ever check the text**. The `MEAL_TERMS` set on lines 1503 and 2066 removes these words from the token list, so the relevance check never looks for them — even though they're sitting right there in the reviews.
+**1. Structured Data (JSON-LD) in `index.html`**
+- Add `WebApplication` schema with name, URL, description, category
+- Add `WebSite` schema with `SearchAction` for potential sitelinks search box
+- Add `manifest.json` link and `apple-touch-icon` meta tag
 
-### What changes
+**2. Create `public/sitemap.xml`**
+- List all pages: `/`, `/about`, `/how-it-works`
+- Static file served directly by Vite
 
-**File: `supabase/functions/search/index.ts`**
+**3. Update `public/robots.txt`**
+- Add `Sitemap: https://tablefinder.ai/sitemap.xml` directive
 
-1. **Create a `MEAL_AS_CUISINE` set** for terms like "brunch" and "breakfast" that represent genuine search intent (not just time hints like "dinner" or "lunch")
+**4. Create `public/manifest.json`**
+- App name, short name, theme color matching the warm dark palette, display standalone
 
-2. **Preserve these tokens in three places:**
-   - **Yelp API query** (~line 1504): Keep "brunch" in the search term so Yelp returns brunch-relevant restaurants instead of generic ones
-   - **Yelp category filter** (~line 1505): Keep "brunch" in `cuisineTokens` so candidates are filtered by brunch-related categories (e.g., `breakfast_brunch`)
-   - **Verification relevance check** (~line 2067): Keep "brunch" in `verifyTokens` so the scraped page text (including review snippets) is checked for mentions of "brunch"
+**5. Install `react-helmet-async` and wrap app**
+- Add `HelmetProvider` in `src/App.tsx`
+- Each page sets its own `<title>` and `<meta description>`
 
-3. **Use loose matching for meal-as-cuisine terms**: Since reviews may mention "brunch" only once or twice, use the dish-style loose matching (any mention passes) rather than the strict 3+ frequency threshold used for cuisine categories
+**6. Create `/about` page (`src/pages/About.tsx`)**
+- Explains what TableFinder is, which platforms it searches
+- SEO-targeted title: "About TableFinder — Search Resy, OpenTable & Yelp Together"
+- Clean content page with consistent branding, link back to search
 
-### Performance impact
-Zero. We're already scraping these pages and analyzing the text. This just stops throwing away a search token before checking it.
+**7. Create `/how-it-works` page (`src/pages/HowItWorks.tsx`)**
+- 3-step explanation: Enter search → We check platforms → See results
+- SEO-targeted title: "How TableFinder Works — Find Restaurant Reservations in Seconds"
+- Visual step cards, CTA to try a search
 
-### What this covers beyond brunch
-The same pattern works for "breakfast", and can be extended to any meal-type term that users genuinely search for as a category. "Dinner" and "lunch" stay stripped since they're time hints, not cuisine categories.
+**8. Add routes in `src/App.tsx`**
+- `/about` → lazy-loaded About page
+- `/how-it-works` → lazy-loaded HowItWorks page
+
+**9. Add `<Helmet>` to `src/pages/Index.tsx`**
+- Sets page-specific title and description on the home page
+
+### Files
+
+| Action | File |
+|--------|------|
+| Modify | `index.html` — JSON-LD, manifest link |
+| Modify | `public/robots.txt` — sitemap directive |
+| Create | `public/sitemap.xml` |
+| Create | `public/manifest.json` |
+| Modify | `src/main.tsx` — wrap with HelmetProvider |
+| Modify | `src/App.tsx` — add routes |
+| Modify | `src/pages/Index.tsx` — add Helmet |
+| Create | `src/pages/About.tsx` |
+| Create | `src/pages/HowItWorks.tsx` |
+
+### Design
+- Both content pages use the same dark warm theme, Outfit/Playfair fonts
+- Minimal nav: TableFinder logo links home, footer matches Index
+- Pages are static content — no API calls, instant load
 
