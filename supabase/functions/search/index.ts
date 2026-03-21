@@ -1435,8 +1435,12 @@ async function fetchYelpCandidates(
     // Include amenity terms in Yelp search to discover rooftop/patio restaurants
     const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
     // Strip generic meal terms from Yelp search — "dinner restaurants" → "restaurants"
+    // BUT preserve "brunch" and "breakfast" as they represent genuine cuisine/category intent
+    const MEAL_AS_CUISINE_YELP = new Set(["brunch", "breakfast"]);
     const YELP_MEAL_STRIP = /\b(dinner|lunch|breakfast|supper|brunch|meal|dining)\b/gi;
-    const yelpCuisine = (params.cuisine || "").replace(YELP_MEAL_STRIP, "").trim();
+    const yelpCuisine = (params.cuisine || "").replace(YELP_MEAL_STRIP, (match) => {
+      return MEAL_AS_CUISINE_YELP.has(match.toLowerCase()) ? match : "";
+    }).replace(/\s+/g, " ").trim();
     
     // Use metro city name for Yelp search — tiny CDPs like "Scottdale" return no results
     const yelpCity = getMetroCityName(params.city, params.state);
