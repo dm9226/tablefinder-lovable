@@ -2269,9 +2269,13 @@ async function verifyAvailability(
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from "Select a time" section: ${foundTimes.map(t=>t.time).join(", ")}`);
         }
         
-        // Two-pass retry: if no slots AND no "Select a time" section, re-scrape with waitFor
-        if (foundTimes.length === 0 && !hadSelectSection) {
-          console.log(`  ${r.name} [opentable]: no "Select a time" section on first pass — retrying with waitFor: 5000ms`);
+        // Two-pass retry: re-scrape with waitFor:5000 if no slots found OR fewer than 3 slots (widget likely didn't fully render)
+        if ((foundTimes.length === 0 && !hadSelectSection) || 
+            (hadSelectSection && foundTimes.length > 0 && foundTimes.length < 3)) {
+          const retryReason = foundTimes.length === 0 
+            ? 'no "Select a time" section on first pass' 
+            : `only ${foundTimes.length} slot(s) found — widget may not have fully rendered`;
+          console.log(`  ${r.name} [opentable]: ${retryReason} — retrying with waitFor: 5000ms`);
           try {
             const otRetryAbort = new AbortController();
             const otRetryTimer = setTimeout(() => otRetryAbort.abort(), 25_000);
@@ -2295,13 +2299,19 @@ async function verifyAvailability(
               const retryData = await retryResp.json();
               const retryMarkdown = extractFirecrawlMarkdown(retryData);
               if (retryMarkdown) {
-                foundTimes = parseOTSlots(retryMarkdown);
-                if (foundTimes.length > 0) {
-                  foundTimes.forEach(t => seenTimes.add(t.time));
-                  console.log(`  ${r.name} [opentable] RETRY SUCCESS: extracted ${foundTimes.length} times: ${foundTimes.map(t=>t.time).join(", ")}`);
+                const retrySlots = parseOTSlots(retryMarkdown);
+                if (retrySlots.length > 0) {
+                  // Merge retry results with first-pass results (deduped)
+                  for (const slot of retrySlots) {
+                    if (!seenTimes.has(slot.time)) {
+                      seenTimes.add(slot.time);
+                      foundTimes.push(slot);
+                    }
+                  }
+                  console.log(`  ${r.name} [opentable] RETRY SUCCESS: now have ${foundTimes.length} total times: ${foundTimes.map(t=>t.time).join(", ")}`);
                   bookingMarkdown = retryMarkdown;
                 } else {
-                  console.log(`  ${r.name} [opentable] RETRY: still no slots after waitFor`);
+                  console.log(`  ${r.name} [opentable] RETRY: still no additional slots after waitFor`);
                   bookingMarkdown = retryMarkdown;
                 }
               }
