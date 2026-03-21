@@ -2331,7 +2331,7 @@ async function verifyAvailability(
               },
               body: JSON.stringify({
                 url: r.platformUrl,
-                formats: ["markdown"],
+                formats: ["markdown", "html"],
                 onlyMainContent: false,
                 waitFor: 8000,
               }),
@@ -2342,21 +2342,29 @@ async function verifyAvailability(
             if (retryResp.ok) {
               const retryData = await retryResp.json();
               const retryMarkdown = extractFirecrawlMarkdown(retryData);
-              if (retryMarkdown) {
-                const retrySlots = parseOTSlots(retryMarkdown);
-                if (retrySlots.length > 0) {
-                  // Merge retry results with first-pass results (deduped)
-                  for (const slot of retrySlots) {
+              const retryHtml = retryData?.data?.html || retryData?.html || "";
+              if (retryMarkdown || retryHtml) {
+                // Parse both markdown and HTML from retry
+                const retryMdSlots = retryMarkdown ? parseOTSlots(retryMarkdown) : [];
+                const retryHtmlSlots = retryHtml ? parseOTSlotsFromHTML(retryHtml) : [];
+                const allRetrySlots = [...retryMdSlots];
+                const retrySeenSet = new Set(retryMdSlots.map(s => s.time));
+                for (const s of retryHtmlSlots) {
+                  if (!retrySeenSet.has(s.time)) { retrySeenSet.add(s.time); allRetrySlots.push(s); }
+                }
+                
+                if (allRetrySlots.length > 0) {
+                  for (const slot of allRetrySlots) {
                     if (!seenTimes.has(slot.time)) {
                       seenTimes.add(slot.time);
                       foundTimes.push(slot);
                     }
                   }
                   console.log(`  ${r.name} [opentable] RETRY SUCCESS: now have ${foundTimes.length} total times: ${foundTimes.map(t=>t.time).join(", ")}`);
-                  bookingMarkdown = retryMarkdown;
+                  if (retryMarkdown) bookingMarkdown = retryMarkdown;
                 } else {
                   console.log(`  ${r.name} [opentable] RETRY: still no additional slots after waitFor`);
-                  bookingMarkdown = retryMarkdown;
+                  if (retryMarkdown) bookingMarkdown = retryMarkdown;
                 }
               }
             } else {
