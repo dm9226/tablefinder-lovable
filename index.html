@@ -25,6 +25,41 @@
   <meta property="og:image" content="https://tablefinder.ai/og-image.png">
   <meta name="twitter:image" content="https://tablefinder.ai/og-image.png">
 
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#1a1510" />
+  <link rel="apple-touch-icon" href="/og-image.png" />
+
+  <!-- Structured Data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "TableFinder",
+    "url": "https://tablefinder.ai",
+    "description": "Search restaurant reservations across Resy, OpenTable, and Yelp in one place",
+    "applicationCategory": "LifestyleApplication",
+    "operatingSystem": "Any",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    }
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    "name": "TableFinder",
+    "url": "https://tablefinder.ai",
+    "potentialAction": {
+      "@type": "SearchAction",
+      "target": "https://tablefinder.ai/?q={search_term_string}",
+      "query-input": "required name=search_term_string"
+    }
+  }
+  </script>
+
   <!-- Google Analytics -->
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-FVMLEWBSP6"></script>
   <script>
