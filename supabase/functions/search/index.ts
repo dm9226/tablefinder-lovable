@@ -1867,6 +1867,7 @@ async function verifyAvailability(
         formats: ["markdown"],
         onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
         ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
+        ...(isOT && { waitFor: 3000 }),    // OT booking widget needs JS to fully render all time slots
       };
 
       // Per-scrape timeout: 25s max to prevent a single hung request from consuming the entire budget
