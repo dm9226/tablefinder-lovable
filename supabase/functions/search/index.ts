@@ -1504,9 +1504,10 @@ async function fetchYelpCandidates(
     //   1) The dish keyword itself, OR
     //   2) The parent cuisine type (e.g. "seafood") from DISH_TO_CUISINE_MAP
     // If user searched for a cuisine type (e.g. "seafood"), use standard matching.
-    const MEAL_TERMS = new Set(["dinner", "lunch", "breakfast", "supper", "brunch", "meal", "eat", "eating", "dining"]);
+    const MEAL_AS_CUISINE_FILTER = new Set(["brunch", "breakfast"]);
+    const MEAL_TERMS = new Set(["dinner", "lunch", "supper", "meal", "eat", "eating", "dining"]);
     const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
-    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t));
+    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t) || MEAL_AS_CUISINE_FILTER.has(t));
 
     // Build expanded token set for dish searches: include parent cuisine types
     const GENERIC_CUISINE_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
