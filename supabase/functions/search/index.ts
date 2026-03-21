@@ -2296,6 +2296,8 @@ async function verifyAvailability(
       if (isOT) {
         // First pass: parse OT slots from markdown
         foundTimes = parseOTSlots(markdown);
+        // Populate seenTimes from markdown slots BEFORE HTML merge to avoid dupes
+        foundTimes.forEach(t => seenTimes.add(t.time));
         
         // Also try HTML parsing for more complete extraction
         const scrapeHtml = data?.data?.html || data?.html || "";
@@ -2312,7 +2314,6 @@ async function verifyAvailability(
         const hadSelectSection = markdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
         
         if (foundTimes.length > 0) {
-          foundTimes.forEach(t => seenTimes.add(t.time));
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
         }
         
