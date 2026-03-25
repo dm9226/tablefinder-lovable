@@ -366,6 +366,8 @@ serve(async (req) => {
           console.log(`[YELP_FALLBACK] No additional Yelp results survived`);
         }
       }
+    } else if (yelpVerified === 0 && verified.length >= 12) {
+      console.log(`[YELP_FALLBACK] Skipped — already have ${verified.length} verified results`);
     } else if (yelpVerified === 0 && fallbackElapsed >= 90_000) {
       console.log(`[YELP_FALLBACK] Skipped — ${fallbackElapsed}ms elapsed (>90s budget)`);
     }
