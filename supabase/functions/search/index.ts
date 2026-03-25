@@ -1661,7 +1661,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
         .replace(/\s+/g, " ")
         .trim();
       if (simplified !== addr) {
-        await new Promise(w => setTimeout(w, 200));
+        // No delay — Nominatim handles sequential queries fine
         const url2 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(simplified)}&format=json&limit=1&addressdetails=1`;
         if (await tryGeocode(url2, "simplified")) return;
       }
