@@ -2557,7 +2557,7 @@ async function verifyAvailability(
               url: r.platformUrl,
               formats: ["markdown"],
               onlyMainContent: true,
-              waitFor: 5000,
+              waitFor: 4000,
             }),
             signal: yelpRetryAbort.signal,
           });
