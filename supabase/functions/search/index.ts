@@ -352,7 +352,7 @@ serve(async (req) => {
     // Skip if we're past 90s to prevent overall timeout
     const yelpVerified = verified.filter(r => r.platform === "yelp").length;
     const fallbackElapsed = Date.now() - startTime;
-    if (yelpVerified === 0 && fallbackElapsed < 90_000) {
+    if (yelpVerified === 0 && fallbackElapsed < 90_000 && verified.length < 12) {
       const selectedIds = new Set(selected.map(r => r.name + r.platform));
       const untestedYelp = allCandidates.filter(c => c.platform === "yelp" && !selectedIds.has(c.name + c.platform));
       if (untestedYelp.length > 0) {
@@ -366,6 +366,8 @@ serve(async (req) => {
           console.log(`[YELP_FALLBACK] No additional Yelp results survived`);
         }
       }
+    } else if (yelpVerified === 0 && verified.length >= 12) {
+      console.log(`[YELP_FALLBACK] Skipped — already have ${verified.length} verified results`);
     } else if (yelpVerified === 0 && fallbackElapsed >= 90_000) {
       console.log(`[YELP_FALLBACK] Skipped — ${fallbackElapsed}ms elapsed (>90s budget)`);
     }
@@ -1661,7 +1663,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
         .replace(/\s+/g, " ")
         .trim();
       if (simplified !== addr) {
-        await new Promise(w => setTimeout(w, 200));
+        // No delay — Nominatim handles sequential queries fine
         const url2 = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(simplified)}&format=json&limit=1&addressdetails=1`;
         if (await tryGeocode(url2, "simplified")) return;
       }
@@ -1669,7 +1671,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
       // Strategy 3: Structured query (street + city + state params)
       const streetPart = addr.split(",")[0].trim();
       if (streetPart.length > 3) {
-        await new Promise(w => setTimeout(w, 200));
+        // No delay — same endpoint, different query params
         const url3 = `https://nominatim.openstreetmap.org/search?street=${encodeURIComponent(streetPart)}&city=${encodeURIComponent(metroCity)}&state=${encodeURIComponent(state)}&format=json&limit=1&addressdetails=1`;
         if (await tryGeocode(url3, "structured")) return;
       }
@@ -1686,14 +1688,19 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 
   console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim...`);
 
-  // Fire in parallel with 100ms stagger
-  const geocodePromises = toGeocode.map((r, i) =>
-    new Promise<void>(async (resolve) => {
-      await new Promise(w => setTimeout(w, i * 100));
-      await geocodeOne(r);
-      resolve();
-    })
-  );
+  // Fire in batches of 4 with 40ms stagger between batches
+  const BATCH_SIZE = 4;
+  const geocodePromises: Promise<void>[] = [];
+  for (let i = 0; i < toGeocode.length; i++) {
+    const batchIndex = Math.floor(i / BATCH_SIZE);
+    geocodePromises.push(
+      new Promise<void>(async (resolve) => {
+        await new Promise(w => setTimeout(w, batchIndex * 40));
+        await geocodeOne(toGeocode[i]);
+        resolve();
+      })
+    );
+  }
 
   await Promise.all(geocodePromises);
   const geocoded = toGeocode.filter(r => r.distanceMiles != null).length;
@@ -1872,7 +1879,7 @@ async function verifyAvailability(
           formats: isOT ? ["markdown", "html"] : ["markdown"],  // OT: also get HTML for more reliable slot extraction
           onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
           ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
-          ...(isOT && { waitFor: 5000 }),    // OT booking widget needs 5s for JS to fully render all time slots
+          ...(isOT && { waitFor: 3500 }),    // OT booking widget — HTML parser compensates if markdown misses slots
         };
 
       // Per-scrape timeout: 25s max to prevent a single hung request from consuming the entire budget
@@ -2361,7 +2368,7 @@ async function verifyAvailability(
                 url: r.platformUrl,
                 formats: ["markdown", "html"],
                 onlyMainContent: false,
-                waitFor: 8000,
+                waitFor: 5500,
               }),
               signal: otRetryAbort.signal,
             });
@@ -2552,7 +2559,7 @@ async function verifyAvailability(
               url: r.platformUrl,
               formats: ["markdown"],
               onlyMainContent: true,
-              waitFor: 5000,
+              waitFor: 4000,
             }),
             signal: yelpRetryAbort.signal,
           });
