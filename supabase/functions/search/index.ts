@@ -352,7 +352,7 @@ serve(async (req) => {
     // Skip if we're past 90s to prevent overall timeout
     const yelpVerified = verified.filter(r => r.platform === "yelp").length;
     const fallbackElapsed = Date.now() - startTime;
-    if (yelpVerified === 0 && fallbackElapsed < 90_000) {
+    if (yelpVerified === 0 && fallbackElapsed < 90_000 && verified.length < 12) {
       const selectedIds = new Set(selected.map(r => r.name + r.platform));
       const untestedYelp = allCandidates.filter(c => c.platform === "yelp" && !selectedIds.has(c.name + c.platform));
       if (untestedYelp.length > 0) {
