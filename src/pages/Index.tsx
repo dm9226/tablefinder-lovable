@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { Helmet } from "react-helmet-async";
 import { SearchBar } from "@/components/SearchBar";
 import { ResultsGrid } from "@/components/ResultsGrid";
