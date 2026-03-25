@@ -1686,14 +1686,19 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 
   console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim...`);
 
-  // Fire in parallel with 100ms stagger
-  const geocodePromises = toGeocode.map((r, i) =>
-    new Promise<void>(async (resolve) => {
-      await new Promise(w => setTimeout(w, i * 100));
-      await geocodeOne(r);
-      resolve();
-    })
-  );
+  // Fire in batches of 4 with 40ms stagger between batches
+  const BATCH_SIZE = 4;
+  const geocodePromises: Promise<void>[] = [];
+  for (let i = 0; i < toGeocode.length; i++) {
+    const batchIndex = Math.floor(i / BATCH_SIZE);
+    geocodePromises.push(
+      new Promise<void>(async (resolve) => {
+        await new Promise(w => setTimeout(w, batchIndex * 40));
+        await geocodeOne(toGeocode[i]);
+        resolve();
+      })
+    );
+  }
 
   await Promise.all(geocodePromises);
   const geocoded = toGeocode.filter(r => r.distanceMiles != null).length;
