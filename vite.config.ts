@@ -19,6 +19,7 @@ export default defineConfig(({ mode }) => ({
     mode === "production" &&
       vitePrerender({
         routes: ["/", "/about", "/how-it-works"],
+        staticDir: path.resolve(__dirname, "dist"),
       }),
   ].filter(Boolean),
   resolve: {
