@@ -202,10 +202,14 @@ const Index = () => {
         />
       </section>
 
-      <footer className="py-6 text-center border-t border-border">
+      <footer className="py-6 text-center border-t border-border space-y-2">
         <p className="text-xs text-muted-foreground font-body">
           TableFinder aggregates availability from Resy, OpenTable & Yelp
         </p>
+        <nav className="flex justify-center gap-4">
+          <Link to="/about" className="text-xs text-muted-foreground hover:text-primary transition-colors font-body">About</Link>
+          <Link to="/how-it-works" className="text-xs text-muted-foreground hover:text-primary transition-colors font-body">How It Works</Link>
+        </nav>
       </footer>
     </div>
   );
