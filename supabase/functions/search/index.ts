@@ -1877,7 +1877,7 @@ async function verifyAvailability(
           formats: isOT ? ["markdown", "html"] : ["markdown"],  // OT: also get HTML for more reliable slot extraction
           onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
           ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
-          ...(isOT && { waitFor: 5000 }),    // OT booking widget needs 5s for JS to fully render all time slots
+          ...(isOT && { waitFor: 3500 }),    // OT booking widget — HTML parser compensates if markdown misses slots
         };
 
       // Per-scrape timeout: 25s max to prevent a single hung request from consuming the entire budget
