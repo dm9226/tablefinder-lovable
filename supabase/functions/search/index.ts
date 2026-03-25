@@ -1669,7 +1669,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
       // Strategy 3: Structured query (street + city + state params)
       const streetPart = addr.split(",")[0].trim();
       if (streetPart.length > 3) {
-        await new Promise(w => setTimeout(w, 200));
+        // No delay — same endpoint, different query params
         const url3 = `https://nominatim.openstreetmap.org/search?street=${encodeURIComponent(streetPart)}&city=${encodeURIComponent(metroCity)}&state=${encodeURIComponent(state)}&format=json&limit=1&addressdetails=1`;
         if (await tryGeocode(url3, "structured")) return;
       }
