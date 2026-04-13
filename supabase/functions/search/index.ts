@@ -3014,6 +3014,17 @@ const yelpAdapter: ProviderAdapter = {
     return fetchYelpCandidates(params, keys.firecrawlKey, amenityTerms);
   },
   async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
+    // Candidates that already have time slots from the search page are pre-verified
+    const preVerified = candidates.filter((c: any) => c._yelpSearchVerified && c.timeSlots.length > 0);
+    const needsVerification = candidates.filter((c: any) => !c._yelpSearchVerified || c.timeSlots.length === 0);
+    
+    console.log(`Yelp verify: ${preVerified.length} pre-verified from search page, ${needsVerification.length} need individual verification`);
+    
+    // Only verify the ones without slots
+    const verified = needsVerification.length > 0
+      ? await verifyAvailability(needsVerification, params, keys.firecrawlKey, amenityTerms, keys._startTime)
+      : [];
+    
+    return [...preVerified, ...verified];
   },
 };
