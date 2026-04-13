@@ -1566,8 +1566,107 @@ async function fetchYelpCandidates(
     return [];
   }
 }
+// Parse Yelp search results from markdown text (no LLM needed — pure regex)
+function parseYelpMarkdownResults(markdown: string): Array<{
+  name: string;
+  neighborhood?: string;
+  rating?: number;
+  reviewCount?: number;
+  priceRange?: string;
+  cuisineCategories: string[];
+  availableTimes: string[];
+  reservationUrl?: string;
+  businessUrl?: string;
+}> {
+  if (!markdown || markdown.length < 50) return [];
 
-function buildYelpAvailabilityUrl(baseUrl: string, params: SearchParams): string {
+  const results: Array<{
+    name: string;
+    neighborhood?: string;
+    rating?: number;
+    reviewCount?: number;
+    priceRange?: string;
+    cuisineCategories: string[];
+    availableTimes: string[];
+    reservationUrl?: string;
+    businessUrl?: string;
+  }> = [];
+
+  // Split markdown into blocks — each restaurant typically starts with a numbered item or bold name
+  // Common patterns: "1. **Restaurant Name**" or "## Restaurant Name" or "[Restaurant Name](url)"
+  // We'll split on patterns that look like restaurant boundaries
+  const blocks = markdown.split(/(?=\n\d+\.\s|\n#{1,3}\s|\n\*\*[A-Z])/);
+
+  for (const block of blocks) {
+    if (block.length < 20) continue;
+    // Skip sponsored blocks
+    if (/sponsored|^ad\b/i.test(block.slice(0, 200))) continue;
+
+    // Try to extract restaurant name
+    // Pattern 1: "1. **Name**" or "**Name**"
+    let nameMatch = block.match(/\*\*([^*]{3,60})\*\*/);
+    // Pattern 2: "## Name" or "### Name"
+    if (!nameMatch) nameMatch = block.match(/#{1,3}\s+([^\n]{3,60})/);
+    // Pattern 3: "[Name](url)"
+    if (!nameMatch) nameMatch = block.match(/\[([^\]]{3,60})\]\(https?:\/\/www\.yelp\.com/);
+
+    if (!nameMatch) continue;
+    const name = nameMatch[1].trim().replace(/\s*\(.*?\)\s*$/, "");
+    if (!name || name.length < 2) continue;
+
+    // Extract rating: "4.5 star" or "★ 4.5" or "(4.5)"
+    const ratingMatch = block.match(/(\d\.\d)\s*(?:star|★|rating)/i) || block.match(/★\s*(\d\.\d)/);
+    const rating = ratingMatch ? parseFloat(ratingMatch[1]) : undefined;
+
+    // Extract review count: "123 reviews" or "(123)"
+    const reviewMatch = block.match(/(\d[\d,]+)\s*review/i);
+    const reviewCount = reviewMatch ? parseInt(reviewMatch[1].replace(/,/g, "")) : undefined;
+
+    // Extract price range: "$$$" or "$$"
+    const priceMatch = block.match(/(\${1,4})(?:\s|,|\n)/);
+    const priceRange = priceMatch ? priceMatch[1] : undefined;
+
+    // Extract neighborhood
+    const hoodMatch = block.match(/(?:in\s+|·\s*|,\s*)([A-Z][a-zA-Z\s]+?)(?:\s*[·,\n]|\s*$)/m);
+    const neighborhood = hoodMatch ? hoodMatch[1].trim() : undefined;
+
+    // Extract cuisine categories — look for comma-separated category lists
+    const catMatch = block.match(/(?:Categories?|Type):\s*([^\n]+)/i);
+    const cuisineCategories = catMatch
+      ? catMatch[1].split(/[,|·]/).map(c => c.trim()).filter(c => c.length > 1 && c.length < 30)
+      : [];
+
+    // Extract time slots — look for time patterns like "6:30 PM", "7:00 PM"
+    const timePattern = /\b(\d{1,2}:\d{2}\s*(?:AM|PM))\b/gi;
+    const rawTimes = block.match(timePattern) || [];
+    const availableTimes = rawTimes
+      .map(t => normalizeExtractedTimeLabel(t))
+      .filter(Boolean) as string[];
+
+    // Dedupe times
+    const uniqueTimes = [...new Set(availableTimes)];
+
+    // Extract URLs
+    const resUrlMatch = block.match(/https?:\/\/www\.yelp\.com\/reservations\/[^\s)"\]]+/);
+    const bizUrlMatch = block.match(/https?:\/\/www\.yelp\.com\/biz\/[^\s)"\]]+/);
+
+    results.push({
+      name,
+      neighborhood,
+      rating,
+      reviewCount,
+      priceRange,
+      cuisineCategories,
+      availableTimes: uniqueTimes,
+      reservationUrl: resUrlMatch?.[0],
+      businessUrl: bizUrlMatch?.[0],
+    });
+  }
+
+  return results;
+}
+
+
   try {
     const u = new URL(baseUrl);
     u.searchParams.set("covers", String(params.partySize));
