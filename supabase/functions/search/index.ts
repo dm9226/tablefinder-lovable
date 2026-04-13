@@ -1429,96 +1429,113 @@ function extractNeighborhoodFromTitle(title: string | undefined, description: st
 
 
 async function fetchYelpCandidates(
-  params: SearchParams, yelpKey: string, amenityTerms: string[] = []
+  params: SearchParams, firecrawlKey: string, amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   try {
-    // Include amenity terms in Yelp search to discover rooftop/patio restaurants
     const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
-    // Strip generic meal terms from Yelp search — "dinner restaurants" → "restaurants"
-    // BUT preserve "brunch" and "breakfast" as they represent genuine cuisine/category intent
     const MEAL_AS_CUISINE_YELP = new Set(["brunch", "breakfast"]);
     const YELP_MEAL_STRIP = /\b(dinner|lunch|breakfast|supper|brunch|meal|dining)\b/gi;
     const yelpCuisine = (params.cuisine || "").replace(YELP_MEAL_STRIP, (match) => {
       return MEAL_AS_CUISINE_YELP.has(match.toLowerCase()) ? match : "";
     }).replace(/\s+/g, " ").trim();
-    
-    // Use metro city name for Yelp search — tiny CDPs like "Scottdale" return no results
+
     const yelpCity = getMetroCityName(params.city, params.state);
-    const yelpState = params.state;
-    
-    // For UK, use "City, UK" format for Yelp location
-    const yelpLocation = params.country === "gb" 
-      ? `${yelpCity}, UK` 
-      : `${yelpCity}, ${yelpState}`;
-    
-    const sp = new URLSearchParams({
-      term: `${yelpCuisine}${amenitySuffix} restaurants`.trim(),
-      location: yelpLocation,
-      limit: "20",
-      sort_by: "best_match",
-    });
-    // attributes=reservation is US-only; skip for UK searches
+    const yelpLocation = params.country === "gb"
+      ? `${yelpCity}, UK`
+      : `${yelpCity}, ${params.state}`;
+
+    // Build Yelp search URL with reservation filter
+    const searchTerm = `${yelpCuisine}${amenitySuffix} restaurants`.trim();
+    const yelpSearchUrl = new URL("https://www.yelp.com/search");
+    yelpSearchUrl.searchParams.set("find_desc", searchTerm);
+    yelpSearchUrl.searchParams.set("find_loc", yelpLocation);
     if (params.country !== "gb") {
-      sp.set("attributes", "reservation");
-    }
-    // Add locale for UK Yelp
-    if (params.country === "gb") {
-      sp.set("locale", "en_GB");
-    }
-    if (params.lat && params.lng) {
-      sp.set("latitude", String(params.lat));
-      sp.set("longitude", String(params.lng));
+      yelpSearchUrl.searchParams.set("attrs", "reservation");
     }
 
-    console.log(`Yelp API key metadata: len=${yelpKey.length}, prefix=${yelpKey.slice(0,4)}, suffix=${yelpKey.slice(-4)}`);
-    console.log(`Yelp search (reservation, city="${yelpCity}"):`, sp.toString());
-    let resp = await fetch(`${YELP_API}/businesses/search?${sp}`, {
-      headers: { Authorization: `Bearer ${yelpKey}` },
+    console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
+
+    // Scrape Yelp search results via Firecrawl
+    const scrapeResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${firecrawlKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url: yelpSearchUrl.toString(),
+        formats: ["markdown", "links"],
+        waitFor: 3000,
+        onlyMainContent: true,
+      }),
     });
 
-    if (!resp.ok) {
-      const errBody = await resp.text().catch(() => "");
-      console.log(`Yelp API error: status=${resp.status}, body=${errBody.slice(0, 300)}`);
+    if (!scrapeResp.ok) {
+      const errBody = await scrapeResp.text().catch(() => "");
+      console.log(`Yelp scrape error: status=${scrapeResp.status}, body=${errBody.slice(0, 300)}`);
+      return [];
     }
-    let businesses = resp.ok ? (await resp.json())?.businesses || [] : [];
 
-    // Broaden if few results
-    if (businesses.length < 5) {
-      console.log(`Yelp reservation filter returned only ${businesses.length}, broadening`);
-      sp.delete("attributes");
-      const resp2 = await fetch(`${YELP_API}/businesses/search?${sp}`, {
-        headers: { Authorization: `Bearer ${yelpKey}` },
-      });
-      if (!resp2.ok) {
-        const errBody2 = await resp2.text().catch(() => "");
-        console.log(`Yelp API error (broadened): status=${resp2.status}, body=${errBody2.slice(0, 300)}`);
-      }
-      if (resp2.ok) {
-        const broaderRaw = (await resp2.json()).businesses || [];
-        // For UK, don't filter by restaurant_reservation (US-only transaction type)
-        const broader = params.country === "gb"
-          ? broaderRaw
-          : broaderRaw.filter((b: any) => b.transactions?.includes("restaurant_reservation"));
-        const seen = new Set(businesses.map((b: any) => b.id));
-        for (const b of broader) {
-          if (!seen.has(b.id)) { businesses.push(b); seen.add(b.id); }
-        }
+    const scrapeData = await scrapeResp.json();
+    const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
+    const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
+
+    // Extract restaurant aliases from yelp.com/biz/ links
+    const bizAliasSet = new Set<string>();
+    const bizLinkMap = new Map<string, string>(); // alias -> full URL
+    for (const link of links) {
+      const m = link.match(/yelp\.com\/biz\/([\w-]+)/);
+      if (m && m[1]) {
+        bizAliasSet.add(m[1]);
+        if (!bizLinkMap.has(m[1])) bizLinkMap.set(m[1], link);
       }
     }
 
-    console.log(`Yelp candidates: ${businesses.length}`);
+    // Also extract from markdown (backup)
+    const mdBizMatches = markdown.matchAll(/yelp\.com\/biz\/([\w-]+)/g);
+    for (const m of mdBizMatches) {
+      if (m[1] && !bizAliasSet.has(m[1])) {
+        bizAliasSet.add(m[1]);
+        bizLinkMap.set(m[1], `https://www.yelp.com/biz/${m[1]}`);
+      }
+    }
 
-    // TWO-TIER CUISINE/DISH RELEVANCE FILTER for Yelp candidates.
-    // If user searched for a dish (e.g. "oysters"), accept businesses matching:
-    //   1) The dish keyword itself, OR
-    //   2) The parent cuisine type (e.g. "seafood") from DISH_TO_CUISINE_MAP
-    // If user searched for a cuisine type (e.g. "seafood"), use standard matching.
+    // Parse restaurant names from markdown — Yelp search results typically show numbered lists
+    // Pattern: "[Restaurant Name](https://www.yelp.com/biz/alias-city)"
+    const nameMap = new Map<string, string>(); // alias -> display name
+    const namePatterns = markdown.matchAll(/\[([^\]]+)\]\(https?:\/\/(?:www\.)?yelp\.com\/biz\/([\w-]+)[^)]*\)/g);
+    for (const m of namePatterns) {
+      const name = m[1].replace(/^\d+\.\s*/, "").trim();
+      const alias = m[2];
+      if (name && alias && !nameMap.has(alias)) {
+        nameMap.set(alias, name);
+      }
+    }
+
+    // Convert alias to readable name if not found in markdown links
+    function aliasToName(alias: string): string {
+      if (nameMap.has(alias)) return nameMap.get(alias)!;
+      return alias
+        .split("-")
+        .filter(p => !/^[a-z]{2}\d*$/.test(p)) // strip trailing city-state slugs like "new-york-3"
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
+    }
+
+    // Filter out non-restaurant pages (yelp collections, ads, etc.)
+    const SKIP_ALIASES = new Set(["undefined", "search", "writeareview", "login", "signup"]);
+    const businesses = Array.from(bizAliasSet)
+      .filter(alias => !SKIP_ALIASES.has(alias) && alias.length > 2)
+      .slice(0, 20); // cap at 20 like the API did
+
+    console.log(`Yelp scrape found ${businesses.length} business aliases from ${links.length} links`);
+
+    // Apply cuisine filter (same logic as before)
     const MEAL_AS_CUISINE_FILTER = new Set(["brunch", "breakfast"]);
     const MEAL_TERMS = new Set(["dinner", "lunch", "supper", "meal", "eat", "eating", "dining"]);
     const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
     const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t) || MEAL_AS_CUISINE_FILTER.has(t));
 
-    // Build expanded token set for dish searches: include parent cuisine types
     const GENERIC_CUISINE_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
     let expandedTokens = [...cuisineTokens];
     if (params.dishKeyword) {
@@ -1526,21 +1543,33 @@ async function fetchYelpCandidates(
       for (const pc of parentCuisines) {
         if (!expandedTokens.includes(pc)) expandedTokens.push(pc);
       }
-      // Also add the explicit cuisineType if set
       if (params.cuisineType && !expandedTokens.includes(params.cuisineType)) {
         expandedTokens.push(params.cuisineType);
       }
-      // Remove overly generic tokens that cause false positives in dish searches
       expandedTokens = expandedTokens.filter(t => !GENERIC_CUISINE_TOKENS.has(t));
     }
 
-    const filtered = businesses.filter((b: any) => {
-      if (!b.alias) return false;
-      if (expandedTokens.length === 0) return true; // no cuisine filter
-      // Check if any Yelp category or business name matches any token (dish OR parent cuisine)
-      const cats = (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`.toLowerCase()).join(" ");
-      const bizName = (b.name || "").toLowerCase();
-      const searchText = `${cats} ${bizName}`;
+    const results: Restaurant[] = businesses.map(alias => {
+      const name = aliasToName(alias);
+      return {
+        id: `yelp-${alias}`,
+        name,
+        cuisine: params.cuisine || "Restaurant",
+        neighborhood: params.city,
+        rating: undefined,
+        priceRange: undefined,
+        imageUrl: null,
+        platform: "yelp" as const,
+        platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${alias}`, params),
+        timeSlots: [],
+        distanceMiles: null,
+        _yelpCategories: alias.replace(/-/g, " "),
+      };
+    });
+
+    // Apply cuisine filter if tokens exist
+    const filtered = expandedTokens.length === 0 ? results : results.filter(r => {
+      const searchText = `${r.name.toLowerCase()} ${(r as any)._yelpCategories || ""}`;
       return expandedTokens.some((token: string) => {
         if (searchText.includes(token)) return true;
         const singular = token.endsWith("s") ? token.slice(0, -1) : null;
@@ -1551,25 +1580,10 @@ async function fetchYelpCandidates(
       });
     });
 
-    console.log(`Yelp after cuisine filter: ${filtered.length}/${businesses.length} (tokens: "${expandedTokens.join(", ")}", dish: "${params.dishKeyword}", cuisineType: "${params.cuisineType}")`);
-
-    return filtered
-      .map((b: any): Restaurant => ({
-        id: `yelp-${b.id}`,
-        name: b.name,
-        cuisine: b.categories?.[0]?.title || params.cuisine || "Restaurant",
-        neighborhood: b.location?.neighborhood || b.location?.city || params.city,
-        rating: b.rating,
-        priceRange: b.price || undefined,
-        imageUrl: b.image_url || null,
-        platform: "yelp",
-        platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${b.alias}`, params),
-        timeSlots: [],
-        distanceMiles: b.distance ? +(b.distance / 1609.34).toFixed(1) : null,
-        _yelpCategories: (b.categories || []).map((c: any) => `${c.alias || ""} ${c.title || ""}`).join(" ").toLowerCase(),
-      }));
+    console.log(`Yelp after cuisine filter: ${filtered.length}/${results.length} (tokens: "${expandedTokens.join(", ")}")`);
+    return filtered;
   } catch (err) {
-    console.error("Yelp error:", err);
+    console.error("Yelp scrape error:", err);
     return [];
   }
 }
