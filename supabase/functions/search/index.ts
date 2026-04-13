@@ -2458,7 +2458,7 @@ async function verifyAvailability(
         foundTimes.forEach(t => seenTimes.add(t.time));
         
         // Also try HTML parsing for more complete extraction
-        const scrapeHtml = data?.data?.html || data?.html || "";
+        const scrapeHtml = effectiveHtml || data?.data?.html || data?.html || "";
         if (scrapeHtml) {
           const htmlSlots = parseOTSlotsFromHTML(scrapeHtml);
           for (const slot of htmlSlots) {
@@ -2469,7 +2469,7 @@ async function verifyAvailability(
           }
         }
         
-        const hadSelectSection = markdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
+        const hadSelectSection = effectiveMarkdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
         
         if (foundTimes.length > 0) {
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
