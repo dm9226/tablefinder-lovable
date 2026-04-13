@@ -1553,9 +1553,6 @@ async function fetchYelpCandidates(
         timeSlots: allTimes.map(time => ({ time })),
         distanceMiles: null,
         _yelpCategories: rest.cuisineCategories.join(" ").toLowerCase() || alias.replace(/-/g, " "),
-        // Mark ALL Yelp search page results as verified — Yelp's reservation filter
-        // (attrs=reservation + date/time/covers) already confirms availability
-        _yelpSearchVerified: true,
       });
     }
 
@@ -2105,8 +2102,8 @@ async function verifyAvailability(
         const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "extract"] : ["markdown"],  // OT: also get HTML for more reliable slot extraction
-          onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
-          ...(isYelp && { waitFor: 4500, extract: { prompt: yelpExtractPrompt } }),  // Yelp reservation widgets need JS to render time slots
+          onlyMainContent: isYelp ? false : false,  // Yelp needs full-page context for reservation widget extraction; Resy/OT need full page for addresses
+          ...(isYelp && { waitFor: 9000, timeout: 28000, extract: { prompt: yelpExtractPrompt } }),  // Yelp reservation widgets need a longer wait and full-page extraction
           ...(isOT && { waitFor: 3500 }),    // OT booking widget — HTML parser compensates if markdown misses slots
         };
 
@@ -2847,8 +2844,9 @@ async function verifyAvailability(
             body: JSON.stringify({
               url: r.platformUrl,
               formats: ["markdown", "extract"],
-              onlyMainContent: true,
-              waitFor: 6500,
+              onlyMainContent: false,
+              waitFor: 12000,
+              timeout: 28000,
               extract: { prompt: yelpExtractPrompt },
             }),
             signal: yelpRetryAbort.signal,
@@ -3076,19 +3074,7 @@ const yelpAdapter: ProviderAdapter = {
     return fetchYelpCandidates(params, keys.firecrawlKey, keys.aiKey, amenityTerms);
   },
   async verify(candidates, params, keys, amenityTerms) {
-    // ALL Yelp candidates from the search page are pre-verified:
-    // Yelp's reservation search (attrs=reservation + date/time/covers) already
-    // confirms these restaurants accept reservations for the requested date/time/party.
-    // Individual page verification is skipped because Yelp's JS widgets block scraping.
-    const preVerified = candidates.filter((c: any) => c._yelpSearchVerified);
-    const needsVerification = candidates.filter((c: any) => !c._yelpSearchVerified);
-    
-    console.log(`Yelp verify: ${preVerified.length} pre-verified from search page, ${needsVerification.length} need individual verification`);
-    
-    const verified = needsVerification.length > 0
-      ? await verifyAvailability(needsVerification, params, keys.firecrawlKey, amenityTerms, keys._startTime)
-      : [];
-    
-    return [...preVerified, ...verified];
+    console.log(`Yelp verify: checking ${candidates.length} candidates on reservation pages for real time slots`);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
