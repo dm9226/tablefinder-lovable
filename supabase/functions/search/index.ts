@@ -1515,64 +1515,6 @@ async function fetchYelpCandidates(
       }
     }
 
-    // ─── Extract reservation time slots and metadata from JSON extraction ───
-    // Firecrawl's LLM-powered JSON extraction captures JS-rendered reservation widgets
-    // that don't appear in static markdown/HTML
-    const aliasToSlots = new Map<string, string[]>();
-    const jsonMetadataMap = new Map<string, { rating?: number; reviewCount?: number; priceRange?: string; neighborhood?: string; slots?: string[] }>();
-    
-    if (jsonExtract?.restaurants && Array.isArray(jsonExtract.restaurants)) {
-      for (const jr of jsonExtract.restaurants) {
-        if (!jr.name) continue;
-        
-        // Match JSON restaurant to a biz alias by fuzzy name matching
-        let matchedAlias: string | null = null;
-        const jrNameLower = jr.name.toLowerCase().replace(/[^a-z0-9]/g, "");
-        
-        for (const alias of bizAliasSet) {
-          const aliasName = aliasToName(alias).toLowerCase().replace(/[^a-z0-9]/g, "");
-          // Check if names are similar enough (one contains the other, or >70% overlap)
-          if (aliasName === jrNameLower || aliasName.includes(jrNameLower) || jrNameLower.includes(aliasName)) {
-            matchedAlias = alias;
-            break;
-          }
-        }
-        
-        if (!matchedAlias) {
-          // Try matching by converting jr.name to slug format
-          const jrSlug = jr.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-          for (const alias of bizAliasSet) {
-            if (alias.startsWith(jrSlug) || jrSlug.startsWith(alias.split("-").slice(0, -2).join("-"))) {
-              matchedAlias = alias;
-              break;
-            }
-          }
-        }
-        
-        if (matchedAlias) {
-          // Store metadata
-          jsonMetadataMap.set(matchedAlias, {
-            rating: jr.rating,
-            reviewCount: jr.reviewCount,
-            priceRange: jr.priceRange,
-            neighborhood: jr.neighborhood,
-            slots: jr.reservationSlots,
-          });
-          
-          // Store slots if present and valid
-          if (jr.reservationSlots && Array.isArray(jr.reservationSlots) && jr.reservationSlots.length > 0) {
-            const normalizedSlots = jr.reservationSlots
-              .map((s: string) => s.replace(/\s+/g, " ").trim().toUpperCase())
-              .filter((s: string) => /^\d{1,2}:\d{2}\s*(AM|PM)$/.test(s));
-            
-            if (normalizedSlots.length > 0) {
-              aliasToSlots.set(matchedAlias, normalizedSlots);
-            }
-          }
-        }
-      }
-    }
-
     // Convert alias to readable name if not found in markdown links
     function aliasToName(alias: string): string {
       if (nameMap.has(alias)) return nameMap.get(alias)!;
@@ -1590,102 +1532,26 @@ async function fetchYelpCandidates(
       .slice(0, 20);
 
     console.log(`Yelp scrape found ${businesses.length} business aliases from ${links.length} links`);
-    
-    // Log which restaurants had inline slots extracted
-    const withSlots = businesses.filter(a => aliasToSlots.has(a));
-    console.log(`Yelp inline slots extracted: ${withSlots.length}/${businesses.length} restaurants`);
-    for (const alias of withSlots) {
-      const slots = aliasToSlots.get(alias)!;
-      console.log(`  ${aliasToName(alias)}: ${slots.join(", ")}`);
-    }
 
-    // Build metadata map from JSON extraction + markdown fallback
-    const metadataMap = new Map<string, { rating?: number; reviewCount?: number; priceRange?: string; neighborhood?: string; imageUrl?: string }>();
-    
-    // Image URLs from markdown
-    const imgPatterns = markdown.matchAll(/\[([^\]]*)\]\((https:\/\/s3-media\d*\.fl\.yelpcdn\.com\/bphoto\/[^)]+)\)/g);
-    const imagesByName = new Map<string, string>();
-    for (const m of imgPatterns) {
-      const name = m[1].trim();
-      const url = m[2];
-      if (name && !imagesByName.has(name)) {
-        imagesByName.set(name, url);
-      }
-    }
-    
-    for (const alias of businesses) {
+    const results: Restaurant[] = businesses.map(alias => {
       const name = aliasToName(alias);
-      const jsonMeta = jsonMetadataMap.get(alias);
-      const meta: { rating?: number; reviewCount?: number; priceRange?: string; neighborhood?: string; imageUrl?: string } = {};
-      
-      // Prefer JSON extraction metadata, fall back to markdown parsing
-      if (jsonMeta) {
-        meta.rating = jsonMeta.rating;
-        meta.reviewCount = jsonMeta.reviewCount;
-        meta.priceRange = jsonMeta.priceRange;
-        meta.neighborhood = jsonMeta.neighborhood;
-      }
-      
-      // Image from markdown
-      if (imagesByName.has(name)) {
-        meta.imageUrl = imagesByName.get(name);
-      }
-      
-      // Fallback: parse from markdown if JSON didn't have it
-      const nameEscaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      if (!meta.rating) {
-        const ratingMatch = markdown.match(new RegExp(nameEscaped + "[\\s\\S]{0,300}?(\\d\\.\\d)\\s*\\((\\d[\\d,]*)\\s*reviews?\\)", "i"));
-        if (ratingMatch) {
-          meta.rating = parseFloat(ratingMatch[1]);
-          meta.reviewCount = parseInt(ratingMatch[2].replace(/,/g, ""));
-        }
-      }
-      
-      // Price range and neighborhood from markdown (fallback)
-      if (!meta.neighborhood) {
-        const priceMatch = markdown.match(new RegExp(nameEscaped + "[\\s\\S]{0,500}?([A-Z][a-z]+(?:\\s+[A-Za-z/]+)*)(\\${1,4})", "i"));
-        if (priceMatch) {
-          meta.neighborhood = priceMatch[1].trim();
-          meta.priceRange = meta.priceRange || priceMatch[2];
-        }
-      }
-      
-      metadataMap.set(alias, meta);
-    }
+      return {
+        id: `yelp-${alias}`,
+        name,
+        cuisine: params.cuisine || "Restaurant",
+        neighborhood: params.city,
+        rating: undefined,
+        priceRange: undefined,
+        imageUrl: null,
+        platform: "yelp" as const,
+        platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${alias}`, params),
+        timeSlots: [],
+        distanceMiles: null,
+        _yelpCategories: alias.replace(/-/g, " "),
+      };
+    });
 
-    const results: Restaurant[] = businesses
-      .filter(alias => {
-        // Only include restaurants that have inline reservation slots from the search page
-        // This ensures we only return restaurants with REAL Yelp-native reservations
-        const hasSlots = aliasToSlots.has(alias);
-        if (!hasSlots) {
-          console.log(`  Yelp skip ${aliasToName(alias)}: no inline reservation slots on search page`);
-        }
-        return hasSlots;
-      })
-      .map(alias => {
-        const name = aliasToName(alias);
-        const meta = metadataMap.get(alias) || {};
-        const slots = aliasToSlots.get(alias) || [];
-        
-        return {
-          id: `yelp-${alias}`,
-          name,
-          cuisine: params.cuisine || "Restaurant",
-          neighborhood: meta.neighborhood || params.city,
-          rating: meta.rating,
-          reviewCount: meta.reviewCount,
-          priceRange: meta.priceRange,
-          imageUrl: meta.imageUrl || null,
-          platform: "yelp" as const,
-          platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${alias}`, params),
-          timeSlots: slots.map(t => ({ time: t })),
-          distanceMiles: null,
-          _yelpSearchPageVerified: true, // Flag: slots came from search page, skip individual scrape
-        };
-      });
-
-    console.log(`Yelp scrape candidates (with verified slots): ${results.length}`);
+    console.log(`Yelp scrape candidates: ${results.length}`);
     return results;
   } catch (err) {
     console.error("Yelp scrape error:", err);
