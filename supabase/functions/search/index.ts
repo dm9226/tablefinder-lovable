@@ -1484,18 +1484,20 @@ async function fetchYelpCandidates(
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     
-    // DEBUG: Check HTML for reservation time slots
+    // DEBUG: Search HTML for reservation slot data (might be in JSON/script tags)
     const html = scrapeData?.data?.html || scrapeData?.html || "";
-    console.log(`[YELP_DEBUG] MD length: ${markdown.length}, HTML length: ${html.length}`);
-    // Search HTML for time slot patterns (e.g., "6:30 pm", "7:00 pm")  
-    const htmlTimeMatches = html.match(/\d{1,2}:\d{2}\s*(pm|am|PM|AM)/g) || [];
-    console.log(`[YELP_DEBUG] HTML time matches: ${htmlTimeMatches.slice(0, 20).join(", ")}`);
-    // Look for reservation-specific HTML elements
-    const reservationSnippets = html.match(/reservation[^"]{0,100}/gi) || [];
-    console.log(`[YELP_DEBUG] Reservation HTML snippets: ${reservationSnippets.slice(0, 5).join(" | ")}`);
-    // Look for time button patterns
-    const timeButtonPattern = html.match(/<(?:button|a|span)[^>]*>\s*\d{1,2}:\d{2}\s*(pm|am|PM|AM)\s*<\//gi) || [];
-    console.log(`[YELP_DEBUG] Time button patterns: ${timeButtonPattern.length} found: ${timeButtonPattern.slice(0, 5).join(" | ")}`);
+    // Look for time values like 18:30, 1830, "6:30", etc. in data attributes or scripts
+    const slotDataMatches = html.match(/(?:time|slot|avail)[^"]{0,50}(?:18[0-9]{2}|19[0-9]{2}|20[0-9]{2})/gi) || [];
+    console.log(`[YELP_DEBUG] Slot data matches: ${slotDataMatches.length}: ${slotDataMatches.slice(0, 5).join(" | ")}`);
+    // Look for script tags with reservation data
+    const scriptTags = html.match(/<script[^>]*>(?:(?!<\/script>).)*(?:reservation|timeslot|available)[^<]*<\/script>/gis) || [];
+    console.log(`[YELP_DEBUG] Scripts with reservation data: ${scriptTags.length}`);
+    if (scriptTags.length > 0) {
+      console.log(`[YELP_DEBUG] Script snippet: ${scriptTags[0].slice(0, 500)}`);
+    }
+    // Look for data- attributes with reservation info
+    const dataAttrs = html.match(/data-[^=]*(?:reservation|timeslot|booking)[^"]*="[^"]{0,200}"/gi) || [];
+    console.log(`[YELP_DEBUG] Data attrs: ${dataAttrs.length}: ${dataAttrs.slice(0, 3).join(" | ")}`);
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
