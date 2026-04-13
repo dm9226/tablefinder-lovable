@@ -1468,7 +1468,10 @@ async function fetchYelpCandidates(
       },
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: ["markdown", "links"],
+        formats: ["markdown", "links", "extract"],
+        extract: {
+          prompt: "Extract all restaurants listed on this search results page. For each restaurant, extract: name, neighborhood, rating (number), price_range (dollar signs like $$ or $$$), cuisine_categories (array of strings), and available_times (array of available reservation time strings like '6:30 PM', '7:00 PM'). Return as a JSON object with a 'restaurants' array.",
+        },
         waitFor: 5000,
         onlyMainContent: true,
       }),
@@ -1483,6 +1486,10 @@ async function fetchYelpCandidates(
     const scrapeData = await scrapeResp.json();
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
+    
+    // Extract LLM-powered structured data (restaurant + time slots)
+    const extractData = scrapeData?.data?.extract || scrapeData?.extract || null;
+    console.log(`Yelp extract result: ${JSON.stringify(extractData)?.slice(0, 3000)}`);
     
 
     // Extract restaurant aliases from yelp.com/biz/ links
