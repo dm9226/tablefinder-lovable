@@ -1468,27 +1468,7 @@ async function fetchYelpCandidates(
       },
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: ["markdown", "links", "extract"],
-        extract: {
-          prompt: "Extract all restaurants shown with their available reservation time slots. Each restaurant has a name and 0 or more time slots like '6:30 pm', '7:00 pm'.",
-          schema: {
-            type: "object",
-            properties: {
-              restaurants: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    name: { type: "string" },
-                    timeSlots: { type: "array", items: { type: "string" } },
-                    neighborhood: { type: "string" },
-                    categories: { type: "string" }
-                  }
-                }
-              }
-            }
-          }
-        },
+        formats: ["markdown", "links"],
         waitFor: 5000,
         onlyMainContent: true,
       }),
