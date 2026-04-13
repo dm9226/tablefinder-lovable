@@ -2575,6 +2575,29 @@ async function verifyAvailability(
       matchingTimes.sort((a, b) => a.minutes - b.minutes);
 
       if (matchingTimes.length > 0) {
+        // ── YELP OPERATING-HOURS REJECTION ──
+        // If exactly 2 slots spanning 4+ hours, these are likely open/close hours, not real slots
+        // Real reservation slots have granular 15-30 min spacing
+        if (isYelp && matchingTimes.length <= 2) {
+          if (matchingTimes.length === 2) {
+            const gap = Math.abs(matchingTimes[1].minutes - matchingTimes[0].minutes);
+            if (gap >= 180) { // 3+ hours apart = operating hours
+              console.log(`✗ ${r.name} [yelp] — rejected: 2 slots ${gap}min apart (likely operating hours): ${matchingTimes.map(t=>t.time).join(", ")}`);
+              return null;
+            }
+          } else {
+            // Only 1 slot from Yelp — likely an open/close time, not a real bookable slot
+            console.log(`✗ ${r.name} [yelp] — rejected: only 1 slot (likely operating hours): ${matchingTimes[0].time}`);
+            return null;
+          }
+        }
+        
+        // Also check for external platform mentions on Yelp pages (OpenTable/Resy embeds)
+        if (isYelp && /opentable\.com|resy\.com|powered\s+by\s+opentable|book\s+on\s+opentable|book\s+on\s+resy/i.test(markdown)) {
+          console.log(`✗ ${r.name} [yelp] — rejected: page mentions external booking platform (OpenTable/Resy)`);
+          return null;
+        }
+        
         r.timeSlots = matchingTimes.map((t) => ({ time: t.time }));
         console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} ${mealLabel} slots (${windowStart/60|0}:${(windowStart%60).toString().padStart(2,"0")}–${windowEnd/60|0}:${(windowEnd%60).toString().padStart(2,"0")}): ${matchingTimes.map(t => t.time).join(", ")}`);
         return r;
