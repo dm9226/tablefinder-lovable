@@ -2207,6 +2207,7 @@ async function verifyAvailability(
       const sectionCutMarkers = [
         "need to know", "hours of operation", "about the restaurant",
         "about this restaurant", "cross street", "additional info", "special features",
+        "location\\s*(?:&|and|&amp;)?\\s*hours", "amenities and more", "about the business",
       ];
       for (const marker of sectionCutMarkers) {
         const markerRegex = new RegExp(`(?:^|\\n)#+?\\s*${marker}|(?:^|\\n)\\*\\*${marker}`, "im");
@@ -2214,6 +2215,18 @@ async function verifyAvailability(
         if (idx > 200) { // Only cut if there's enough content before
           bookingMarkdown = bookingMarkdown.substring(0, idx);
         }
+      }
+
+      // Strip lines that look like operating-hours tables (e.g. "| Mon | - 4:00 PM - 9:00 PM |")
+      // These contain close/open times that get falsely extracted as reservation slots
+      if (isYelp) {
+        bookingMarkdown = bookingMarkdown.split("\n").filter(line => {
+          // Match day-of-week table rows: "| Mon | - 4:00 PM - 9:00 PM |"
+          if (/\|\s*(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s*\|/i.test(line)) return false;
+          // Match "Closed now" or standalone "Closed"
+          if (/^\s*\|?\s*Closed\s*(now)?\s*\|?\s*$/i.test(line)) return false;
+          return true;
+        }).join("\n");
       }
 
       // Determine meal window from requested time
