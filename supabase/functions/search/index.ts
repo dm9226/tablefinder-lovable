@@ -157,7 +157,6 @@ interface Restaurant {
 // ─── Provider Adapter Interface ───
 interface ApiKeys {
   firecrawlKey: string;
-  yelpKey?: string;
   _startTime?: number;
 }
 
