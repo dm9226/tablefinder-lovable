@@ -1987,7 +1987,7 @@ async function verifyAvailability(
           // - Collapse line breaks between street and city/state lines
           // - Replace bullets/middots with spaces
           // - Remove duplicate whitespace
-          const normalizedMd = effectiveMarkdown
+          const normalizedMd = markdown
             .replace(/·/g, " ")           // middots
             .replace(/•/g, " ")           // bullets
             .replace(/\|/g, " ")          // pipes
@@ -2076,7 +2076,7 @@ async function verifyAvailability(
         }
       }
 
-      const lower = effectiveMarkdown.toLowerCase();
+      const lower = markdown.toLowerCase();
 
       // Check for "no availability" signals
       if (NO_AVAILABILITY_SIGNALS.some((signal) => lower.includes(signal))) {
@@ -2198,7 +2198,7 @@ async function verifyAvailability(
 
       // RELEVANCE CHECK: If user searched for an amenity (rooftop, patio, etc.),
       // verify the restaurant page actually mentions it. Zero extra latency — uses already-scraped markdown.
-      if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(effectiveMarkdown, amenityTerms)) {
+      if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(markdown, amenityTerms)) {
         console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${amenityTerms.join(", ")}`);
         return null;
       }
@@ -2207,7 +2207,7 @@ async function verifyAvailability(
 
       // ── Strip non-booking sections from markdown for regex fallback ──
       // Remove "Need to Know", "Hours of Operation", "About", etc. sections
-      let bookingMarkdown = effectiveMarkdown;
+      let bookingMarkdown = markdown;
       const sectionCutMarkers = [
         "need to know", "hours of operation", "about the restaurant",
         "about this restaurant", "cross street", "additional info", "special features",
@@ -2347,17 +2347,17 @@ async function verifyAvailability(
       };
       
       // For cross-platform converted candidates, use the new platform's identity
-      const effectiveIsOT = r.platform === "opentable";
-      const effectiveIsResy = r.platform === "resy";
+      const isOT = r.platform === "opentable";
+      const isResy = r.platform === "resy";
       
-      if (effectiveIsOT) {
+      if (isOT) {
         // First pass: parse OT slots from markdown
-        foundTimes = parseOTSlots(effectiveMarkdown);
+        foundTimes = parseOTSlots(markdown);
         // Populate seenTimes from markdown slots BEFORE HTML merge to avoid dupes
         foundTimes.forEach(t => seenTimes.add(t.time));
         
         // Also try HTML parsing for more complete extraction
-        const scrapeHtml = effectiveHtml || data?.data?.html || data?.html || "";
+        const scrapeHtml = scrapeHtmlFallback || data?.data?.html || data?.html || "";
         if (scrapeHtml) {
           const htmlSlots = parseOTSlotsFromHTML(scrapeHtml);
           for (const slot of htmlSlots) {
@@ -2368,7 +2368,7 @@ async function verifyAvailability(
           }
         }
         
-        const hadSelectSection = effectiveMarkdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
+        const hadSelectSection = markdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
         
         if (foundTimes.length > 0) {
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
@@ -2465,11 +2465,11 @@ async function verifyAvailability(
       }
 
       // ── RESY-SPECIFIC: Parse meal section from markdown directly ──
-      if (effectiveIsResy) {
+      if (isResy) {
         const mealSectionRegex = new RegExp(
           `## (?:${mealLabel}|all day)([\\s\\S]*?)(?=##|$)`, "i"
         );
-        const mealMatch = effectiveMarkdown.match(mealSectionRegex);
+        const mealMatch = markdown.match(mealSectionRegex);
         
         if (mealMatch) {
           const mealSection = mealMatch[1];
@@ -2497,7 +2497,7 @@ async function verifyAvailability(
             return null;
           }
         } else {
-          if (/\bnotify\b/i.test(effectiveMarkdown)) {
+          if (/\bnotify\b/i.test(markdown)) {
             console.log(`✗ ${r.name} [resy] — no "${mealLabel}" section and Notify detected`);
             return null;
           }
@@ -2509,11 +2509,11 @@ async function verifyAvailability(
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
       // Tightened: require actual Yelp widget markers, not just the generic word "reservations"
-      const hasYelpAvailabilityMarker = isYelp && !effectiveIsOT && !effectiveIsResy && /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|request\s+a\s+reservation)\b/i.test(effectiveMarkdown);
+      const hasYelpAvailabilityMarker = isYelp && !isOT && !isResy && /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|request\s+a\s+reservation)\b/i.test(markdown);
 
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
       // ── STRATEGY 2: Regex on cleaned booking markdown (non-Resy only) ──
-      if (!effectiveIsResy && foundTimes.length === 0) {
+      if (!isResy && foundTimes.length === 0) {
         let match12;
         while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
           // Context check: skip times near "notify", "sold out", "waitlist"
@@ -2568,7 +2568,7 @@ async function verifyAvailability(
       // ── YELP TWO-PASS RETRY: if first scrape (waitFor:3000) found no slots, retry with waitFor:5000 ──
       // Skip retry if we're past 80s elapsed to prevent overall timeout
       const yelpRetryElapsed = globalStartTime ? Date.now() - globalStartTime : 0;
-      if (isYelp && !effectiveIsOT && !effectiveIsResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
+      if (isYelp && !isOT && !isResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
         console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms (elapsed: ${yelpRetryElapsed}ms)`);
         const yelpRetryAbort = new AbortController();
         const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
@@ -2630,7 +2630,7 @@ async function verifyAvailability(
           clearTimeout(yelpRetryTimer);
           console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
         }
-      } else if (isYelp && !effectiveIsOT && !effectiveIsResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
+      } else if (isYelp && !isOT && !isResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
         console.log(`  ${r.name} [yelp]: skipping retry — ${yelpRetryElapsed}ms elapsed (>80s budget)`);
       }
 
@@ -2666,7 +2666,7 @@ async function verifyAvailability(
 
       // OpenTable: Do NOT fabricate fallback times from booking markers.
       // If real slots exist but are outside window, or parser found nothing, reject.
-      if (effectiveIsOT && foundTimes.length === 0) {
+      if (isOT && foundTimes.length === 0) {
         console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback)`);
         return null;
       }
