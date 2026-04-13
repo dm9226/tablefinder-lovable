@@ -1484,6 +1484,12 @@ async function fetchYelpCandidates(
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     
+    // DEBUG: Log markdown to see if time slots appear on search results page
+    console.log(`Yelp search markdown (first 4000 chars):\n${markdown.slice(0, 4000)}`);
+    // Look for time patterns
+    const debugTimeMatches = markdown.match(/\d{1,2}:\d{2}\s*(AM|PM|am|pm)/g);
+    console.log(`Yelp search time patterns found: ${JSON.stringify(debugTimeMatches)}`);
+    
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
