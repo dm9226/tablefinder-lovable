@@ -1468,8 +1468,8 @@ async function fetchYelpCandidates(
       },
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: ["markdown", "links"],
-        waitFor: 3000,
+        formats: ["markdown", "links", "html"],
+        waitFor: 5000,
         onlyMainContent: true,
       }),
     });
