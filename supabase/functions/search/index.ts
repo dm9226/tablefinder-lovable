@@ -8,7 +8,7 @@ const corsHeaders = {
 
 const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
-const YELP_API = "https://api.yelp.com/v3";
+// Yelp discovery now uses Firecrawl scraping instead of the Fusion API
 
 interface SearchParams {
   cuisine: string;
