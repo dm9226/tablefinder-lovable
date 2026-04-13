@@ -1536,12 +1536,8 @@ async function fetchYelpCandidates(
       bizUrl = bizUrl || bizLinkMap.get(alias) || null;
       const bestUrl = reservationUrl || (bizUrl ? bizUrl.replace("/biz/", "/reservations/") : `https://www.yelp.com/reservations/${alias}`);
 
-      // Prefer markdown-parsed times (more reliable), fall back to extract times
-      const mdTimes = markdownTimesMap.get(rest.name) || [];
-      const extractTimes = rest.availableTimes
-        .map(t => normalizeExtractedTimeLabel(t))
-        .filter(Boolean) as string[];
-      const allTimes = mdTimes.length > 0 ? mdTimes : extractTimes;
+      // Use times from parsing
+      const allTimes = rest.availableTimes;
 
       results.push({
         id: `yelp-${alias}`,
