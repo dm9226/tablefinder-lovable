@@ -152,6 +152,7 @@ interface Restaurant {
   _address?: string; // transient: extracted from scraped page for geocoding
   _addressCity?: string; // transient: city from extracted address
   _yelpCategories?: string; // transient: Yelp API category text for cuisine relevance bypass
+  _yelpCrossplatformGuess?: boolean; // transient: true if URL was guessed from name (not from link)
 }
 
 // ─── Provider Adapter Interface ───
