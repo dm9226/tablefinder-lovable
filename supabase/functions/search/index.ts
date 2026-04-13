@@ -2505,7 +2505,8 @@ async function verifyAvailability(
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
       // Tightened: require actual Yelp widget markers, not just the generic word "reservations"
-      const hasYelpAvailabilityMarker = isYelp && !isOT && !isResy && /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|request\s+a\s+reservation)\b/i.test(markdown);
+      // Yelp reservation markers — relaxed since discovery uses Yelp's reservation search filter
+      const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|request\s+a\s+reservation|book\s+a\s+table|takes?\s+reservations?|make\s+a\s+reservation|party\s+size|reservation|available\s+times?)\b/i.test(markdown);
 
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
       // ── STRATEGY 2: Regex on cleaned booking markdown (non-Resy only) ──
@@ -2564,7 +2565,7 @@ async function verifyAvailability(
       // ── YELP TWO-PASS RETRY: if first scrape (waitFor:3000) found no slots, retry with waitFor:5000 ──
       // Skip retry if we're past 80s elapsed to prevent overall timeout
       const yelpRetryElapsed = globalStartTime ? Date.now() - globalStartTime : 0;
-      if (isYelp && !isOT && !isResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
+      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
         console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms (elapsed: ${yelpRetryElapsed}ms)`);
         const yelpRetryAbort = new AbortController();
         const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
@@ -2626,7 +2627,7 @@ async function verifyAvailability(
           clearTimeout(yelpRetryTimer);
           console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
         }
-      } else if (isYelp && !isOT && !isResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
+      } else if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
         console.log(`  ${r.name} [yelp]: skipping retry — ${yelpRetryElapsed}ms elapsed (>80s budget)`);
       }
 
