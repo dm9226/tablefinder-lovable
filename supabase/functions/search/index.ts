@@ -1527,13 +1527,10 @@ async function fetchYelpCandidates(
       bizUrl = bizUrl || bizLinkMap.get(alias) || null;
       const bestUrl = reservationUrl || (bizUrl ? bizUrl.replace("/biz/", "/reservations/") : `https://www.yelp.com/reservations/${alias}`);
 
-      // Merge time slots: vision (primary) > extract (fallback)
-      const visionTimes = visionTimesMap.get(rest.name) || [];
-      const extractTimes = rest.availableTimes
+      // Use extract times directly
+      const allTimes = rest.availableTimes
         .map(t => normalizeExtractedTimeLabel(t))
         .filter(Boolean) as string[];
-      // Prefer vision times if available; extract times are often wrong (operating hours)
-      const allTimes = visionTimes.length > 0 ? visionTimes : extractTimes;
 
       results.push({
         id: `yelp-${alias}`,
