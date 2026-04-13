@@ -1650,12 +1650,13 @@ Important: Only extract times that appear as clickable reservation buttons, NOT 
       bizUrl = bizUrl || bizLinkMap.get(alias) || null;
       const bestUrl = reservationUrl || (bizUrl ? bizUrl.replace("/biz/", "/reservations/") : `https://www.yelp.com/reservations/${alias}`);
 
-      // Merge time slots: extract data + markdown fallback
+      // Merge time slots: vision (primary) > extract (fallback)
+      const visionTimes = visionTimesMap.get(rest.name) || [];
       const extractTimes = rest.availableTimes
         .map(t => normalizeExtractedTimeLabel(t))
         .filter(Boolean) as string[];
-      const mdTimes = markdownTimesMap.get(rest.name) || [];
-      const allTimes = [...new Set([...extractTimes, ...mdTimes])];
+      // Prefer vision times if available; extract times are often wrong (operating hours)
+      const allTimes = visionTimes.length > 0 ? visionTimes : extractTimes;
 
       results.push({
         id: `yelp-${alias}`,
