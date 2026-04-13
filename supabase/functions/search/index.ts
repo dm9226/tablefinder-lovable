@@ -1481,13 +1481,11 @@ async function fetchYelpCandidates(
           prompt: "Extract all restaurant search results from this Yelp search page. SKIP any results marked 'Sponsored' or 'Ad'. For each organic restaurant, get: name, star rating, review count, price range, neighborhood, cuisine categories, available reservation time slots shown as clickable buttons (like '6:30 PM', '7:00 PM') — these are NOT operating hours — and the yelp URL.",
         },
         actions: [
-          { type: "wait", milliseconds: 3000 },
-          { type: "scroll", direction: "down", amount: 1500 },
           { type: "wait", milliseconds: 2000 },
-          { type: "scroll", direction: "down", amount: 1500 },
-          { type: "wait", milliseconds: 2000 },
+          { type: "scroll", direction: "down", amount: 2000 },
+          { type: "wait", milliseconds: 1500 },
         ],
-        waitFor: 3000,
+        timeout: 20000,
       }),
     });
 
