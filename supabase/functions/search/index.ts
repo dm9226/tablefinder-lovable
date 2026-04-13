@@ -2771,15 +2771,7 @@ async function verifyAvailability(
         return r;
       }
 
-      // For Yelp, ONLY use the availability marker fallback if we couldn't extract
-      // ANY times at all (i.e. the JS widget didn't render into markdown).
-      // If we DID find times but none are in the meal window, that's a real rejection.
-      if (foundTimes.length === 0 && hasYelpAvailabilityMarker) {
-        const reqLabel = toTwelveHourLabel(params.time);
-        if (reqLabel) r.timeSlots = [{ time: reqLabel }];
-        console.log(`✓ Verified ${r.name} [yelp] — reservation markers, using requested time ${reqLabel}`);
-        return r;
-      }
+      // Yelp trust-marker fallback removed — slots now come from search page discovery
 
       // OpenTable: Do NOT fabricate fallback times from booking markers.
       // If real slots exist but are outside window, or parser found nothing, reject.
