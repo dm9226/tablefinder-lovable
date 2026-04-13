@@ -1487,9 +1487,9 @@ async function fetchYelpCandidates(
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     
-    // Extract JSON data (LLM-powered extraction of restaurant + time slots)
-    const jsonData = scrapeData?.data?.json || scrapeData?.json || null;
-    console.log(`Yelp JSON extraction result: ${JSON.stringify(jsonData)?.slice(0, 3000)}`);
+    // Extract LLM-powered structured data (restaurant + time slots)
+    const extractData = scrapeData?.data?.extract || scrapeData?.extract || null;
+    console.log(`Yelp extract result: ${JSON.stringify(extractData)?.slice(0, 3000)}`);
     
 
     // Extract restaurant aliases from yelp.com/biz/ links
