@@ -1409,7 +1409,7 @@ function extractNeighborhoodFromTitle(title: string | undefined, description: st
 
 
 async function fetchYelpCandidates(
-  params: SearchParams, firecrawlKey: string, amenityTerms: string[] = []
+  params: SearchParams, firecrawlKey: string, aiKey: string, amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   try {
     const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
