@@ -2113,22 +2113,26 @@ async function verifyAvailability(
 
         let hasMatch: boolean;
 
-        // Yelp candidates: trust API category metadata as first-class relevance signal.
-        // The Yelp Fusion API already matched these candidates by category during discovery,
-        // and Yelp reservation pages often lack sufficient cuisine text in scraped markdown.
-        if (r.platform === "yelp" && r._yelpCategories) {
-          hasMatch = verifyTokens.some((token) => tokenMatches(r._yelpCategories!, token));
-          if (hasMatch) {
-            console.log(`  ✓ ${r.name} [yelp] — cuisine relevance passed via Yelp API categories`);
+        // Yelp candidates: since discovery is now via scraping (no category metadata),
+        // use page-text matching like other platforms. Yelp reservation pages often
+        // have cuisine info in the page header/description area.
+        if (r.platform === "yelp") {
+          // Check restaurant name, page header (first 500 chars), and frequency in full text
+          if (verifyTokens.some((token) => tokenMatches(restaurantName, token))) {
+            hasMatch = true;
+          } else {
+            const headerText = lower.slice(0, 500);
+            hasMatch = verifyTokens.some((token) => {
+              if (tokenMatches(headerText, token)) return true;
+              if (countOccurrences(lower, token) >= 2) return true; // slightly looser than non-yelp (2 vs 3)
+              return false;
+            });
           }
-          // For meal-as-cuisine terms (brunch, breakfast), also check scraped text including reviews
+          // For meal-as-cuisine terms (brunch, breakfast), also check scraped text
           if (!hasMatch) {
             const mealTokens = verifyTokens.filter(t => MEAL_AS_CUISINE_VERIFY.has(t));
             if (mealTokens.length > 0) {
               hasMatch = mealTokens.some((token) => tokenMatches(pageText, token));
-              if (hasMatch) {
-                console.log(`  ✓ ${r.name} [yelp] — meal-as-cuisine relevance passed via page text/reviews`);
-              }
             }
           }
         } else if (isDishSearch) {
