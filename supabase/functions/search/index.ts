@@ -1459,7 +1459,7 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Scrape Yelp search results via Firecrawl
+    // Scrape Yelp search results via Firecrawl — request HTML to capture JS-rendered reservation widgets
     const scrapeResp = await fetch(`${FIRECRAWL_API}/scrape`, {
       method: "POST",
       headers: {
@@ -1468,9 +1468,9 @@ async function fetchYelpCandidates(
       },
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: ["markdown", "links"],
-        waitFor: 3000,
-        onlyMainContent: true,
+        formats: ["markdown", "html", "links"],
+        waitFor: 5000,
+        onlyMainContent: false, // need full page to capture reservation widgets
       }),
     });
 
@@ -1482,6 +1482,7 @@ async function fetchYelpCandidates(
 
     const scrapeData = await scrapeResp.json();
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
+    const html = scrapeData?.data?.html || scrapeData?.html || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
 
     // Extract restaurant aliases from yelp.com/biz/ links
@@ -1504,8 +1505,7 @@ async function fetchYelpCandidates(
       }
     }
 
-    // Parse restaurant names from markdown — Yelp search results typically show numbered lists
-    // Pattern: "[Restaurant Name](https://www.yelp.com/biz/alias-city)"
+    // Parse restaurant names from markdown
     const nameMap = new Map<string, string>(); // alias -> display name
     const namePatterns = markdown.matchAll(/\[([^\]]+)\]\(https?:\/\/(?:www\.)?yelp\.com\/biz\/([\w-]+)[^)]*\)/g);
     for (const m of namePatterns) {
@@ -1516,12 +1516,96 @@ async function fetchYelpCandidates(
       }
     }
 
+    // ─── Extract inline reservation time slots from HTML ───
+    // Yelp search results with reservation params render JS widgets showing available times
+    // per restaurant. We extract these from the HTML to get REAL slots, not operating hours.
+    const aliasToSlots = new Map<string, string[]>();
+    
+    if (html) {
+      // Strategy 1: Find reservation time buttons/links near each restaurant listing
+      // Yelp renders time slots as buttons/links with times like "5:30 PM", "6:00 PM" etc.
+      // They appear in the context of each business listing
+      
+      // Split HTML by business listing sections — each listing links to /biz/alias
+      // Look for time patterns near each listing
+      const bizSections = html.split(/(?=href="[^"]*\/biz\/[\w-]+)/i);
+      
+      for (const section of bizSections) {
+        // Extract the alias from this section
+        const aliasMatch = section.match(/\/biz\/([\w-]+)/);
+        if (!aliasMatch) continue;
+        const alias = aliasMatch[1];
+        if (!bizAliasSet.has(alias)) continue;
+        
+        // Look for reservation time slots in this section
+        // Yelp shows times like "5:30 PM", "6:00 PM" as clickable buttons
+        // These appear within reservation widget containers
+        const timeMatches = section.match(/\b(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\b/g);
+        if (timeMatches && timeMatches.length > 0) {
+          // Normalize times
+          const normalizedTimes = timeMatches
+            .map(t => t.replace(/\s+/g, " ").trim().toUpperCase())
+            .filter((t, i, arr) => arr.indexOf(t) === i); // unique
+          
+          // Filter: must have at least 2 times with 15-30 min granularity to be real slots
+          // (operating hours show as just open/close like "5:00 PM" / "10:00 PM")
+          if (normalizedTimes.length >= 2) {
+            // Check for granular spacing (real slots are 15-30 min apart)
+            const minutes = normalizedTimes.map(t => {
+              const m = t.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/);
+              if (!m) return -1;
+              let h = parseInt(m[1]);
+              const min = parseInt(m[2]);
+              if (m[3] === "PM" && h !== 12) h += 12;
+              if (m[3] === "AM" && h === 12) h = 0;
+              return h * 60 + min;
+            }).filter(m => m >= 0).sort((a, b) => a - b);
+            
+            // Check if any adjacent pair is within 30 min (granular = real slots)
+            let hasGranularPair = false;
+            for (let i = 1; i < minutes.length; i++) {
+              const gap = minutes[i] - minutes[i - 1];
+              if (gap > 0 && gap <= 45) {
+                hasGranularPair = true;
+                break;
+              }
+            }
+            
+            if (hasGranularPair) {
+              aliasToSlots.set(alias, normalizedTimes);
+            }
+          }
+        }
+      }
+      
+      // Strategy 2: Also look for reservation links with times embedded
+      // Pattern: /reservations/alias?...time=HHMM
+      const resLinkMatches = html.matchAll(/\/reservations\/([\w-]+)\?[^"]*?time=(\d{4})/g);
+      for (const m of resLinkMatches) {
+        const alias = m[1];
+        const timeCode = m[2];
+        if (!bizAliasSet.has(alias)) continue;
+        
+        const h = parseInt(timeCode.slice(0, 2));
+        const min = parseInt(timeCode.slice(2));
+        const displayH = h % 12 || 12;
+        const ampm = h >= 12 ? "PM" : "AM";
+        const formatted = `${displayH}:${min.toString().padStart(2, "0")} ${ampm}`;
+        
+        const existing = aliasToSlots.get(alias) || [];
+        if (!existing.includes(formatted)) {
+          existing.push(formatted);
+          aliasToSlots.set(alias, existing);
+        }
+      }
+    }
+
     // Convert alias to readable name if not found in markdown links
     function aliasToName(alias: string): string {
       if (nameMap.has(alias)) return nameMap.get(alias)!;
       return alias
         .split("-")
-        .filter(p => !/^[a-z]{2}\d*$/.test(p)) // strip trailing city-state slugs like "new-york-3"
+        .filter(p => !/^[a-z]{2}\d*$/.test(p))
         .map(w => w.charAt(0).toUpperCase() + w.slice(1))
         .join(" ");
     }
@@ -1530,31 +1614,93 @@ async function fetchYelpCandidates(
     const SKIP_ALIASES = new Set(["undefined", "search", "writeareview", "login", "signup"]);
     const businesses = Array.from(bizAliasSet)
       .filter(alias => !SKIP_ALIASES.has(alias) && alias.length > 2)
-      .slice(0, 20); // cap at 20 like the API did
+      .slice(0, 20);
 
     console.log(`Yelp scrape found ${businesses.length} business aliases from ${links.length} links`);
+    
+    // Log which restaurants had inline slots extracted
+    const withSlots = businesses.filter(a => aliasToSlots.has(a));
+    console.log(`Yelp inline slots extracted: ${withSlots.length}/${businesses.length} restaurants`);
+    for (const alias of withSlots) {
+      const slots = aliasToSlots.get(alias)!;
+      console.log(`  ${aliasToName(alias)}: ${slots.join(", ")}`);
+    }
 
-    const results: Restaurant[] = businesses.map(alias => {
+    // Extract metadata from markdown (rating, price, neighborhood, image)
+    const metadataMap = new Map<string, { rating?: number; reviewCount?: number; priceRange?: string; neighborhood?: string; imageUrl?: string }>();
+    
+    // Image URLs from markdown: ![Name](https://s3-media...yelpcdn.com/bphoto/...)
+    const imgPatterns = markdown.matchAll(/\[([^\]]*)\]\((https:\/\/s3-media\d*\.fl\.yelpcdn\.com\/bphoto\/[^)]+)\)/g);
+    const imagesByName = new Map<string, string>();
+    for (const m of imgPatterns) {
+      const name = m[1].trim();
+      const url = m[2];
+      if (name && !imagesByName.has(name)) {
+        imagesByName.set(name, url);
+      }
+    }
+    
+    // Rating/price/neighborhood from markdown text near restaurant names
+    for (const alias of businesses) {
       const name = aliasToName(alias);
-      return {
-        id: `yelp-${alias}`,
-        name,
-        cuisine: params.cuisine || "Restaurant",
-        neighborhood: params.city,
-        rating: undefined,
-        priceRange: undefined,
-        imageUrl: null,
-        platform: "yelp" as const,
-        platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${alias}`, params),
-        timeSlots: [],
-        distanceMiles: null,
-        _yelpCategories: alias.replace(/-/g, " "),
-      };
-    });
+      const meta: { rating?: number; reviewCount?: number; priceRange?: string; neighborhood?: string; imageUrl?: string } = {};
+      
+      // Find image
+      if (imagesByName.has(name)) {
+        meta.imageUrl = imagesByName.get(name);
+      }
+      
+      // Rating: "4.4 (756 reviews)" pattern near the restaurant name
+      const nameEscaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const ratingMatch = markdown.match(new RegExp(nameEscaped + "[\\s\\S]{0,300}?(\\d\\.\\d)\\s*\\((\\d[\\d,]*)\\s*reviews?\\)", "i"));
+      if (ratingMatch) {
+        meta.rating = parseFloat(ratingMatch[1]);
+        meta.reviewCount = parseInt(ratingMatch[2].replace(/,/g, ""));
+      }
+      
+      // Price range and neighborhood: "Midtown$$" or "Buckhead$$$"
+      const priceMatch = markdown.match(new RegExp(nameEscaped + "[\\s\\S]{0,500}?([A-Z][a-z]+(?:\\s+[A-Za-z/]+)*)(\\${1,4})", "i"));
+      if (priceMatch) {
+        meta.neighborhood = priceMatch[1].trim();
+        meta.priceRange = priceMatch[2];
+      }
+      
+      metadataMap.set(alias, meta);
+    }
 
-    // Skip post-scrape cuisine filter — Yelp's search already filters by cuisine via the search term
-    // Verification will confirm actual availability
-    console.log(`Yelp scrape candidates: ${results.length}`);
+    const results: Restaurant[] = businesses
+      .filter(alias => {
+        // Only include restaurants that have inline reservation slots from the search page
+        // This ensures we only return restaurants with REAL Yelp-native reservations
+        const hasSlots = aliasToSlots.has(alias);
+        if (!hasSlots) {
+          console.log(`  Yelp skip ${aliasToName(alias)}: no inline reservation slots on search page`);
+        }
+        return hasSlots;
+      })
+      .map(alias => {
+        const name = aliasToName(alias);
+        const meta = metadataMap.get(alias) || {};
+        const slots = aliasToSlots.get(alias) || [];
+        
+        return {
+          id: `yelp-${alias}`,
+          name,
+          cuisine: params.cuisine || "Restaurant",
+          neighborhood: meta.neighborhood || params.city,
+          rating: meta.rating,
+          reviewCount: meta.reviewCount,
+          priceRange: meta.priceRange,
+          imageUrl: meta.imageUrl || null,
+          platform: "yelp" as const,
+          platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${alias}`, params),
+          timeSlots: slots.map(t => ({ time: t })),
+          distanceMiles: null,
+          _yelpSearchPageVerified: true, // Flag: slots came from search page, skip individual scrape
+        };
+      });
+
+    console.log(`Yelp scrape candidates (with verified slots): ${results.length}`);
     return results;
   } catch (err) {
     console.error("Yelp scrape error:", err);
