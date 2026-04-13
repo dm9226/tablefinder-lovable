@@ -1484,10 +1484,21 @@ async function fetchYelpCandidates(
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     
-    // DEBUG: Log sections of markdown to find time slots
+    // DEBUG: Log restaurant-relevant sections of markdown
     const cleanMd = markdown.replace(/Sorry, we have no imagery here\.\n*/g, "").replace(/\n{3,}/g, "\n\n");
-    console.log(`[YELP_DEBUG_MD_CLEAN] Length: ${cleanMd.length}, first 4000:\n${cleanMd.slice(0, 4000)}`);
-    console.log(`[YELP_DEBUG_MD_CLEAN2] 4000-8000:\n${cleanMd.slice(4000, 8000)}`);
+    // Find first restaurant listing pattern
+    const firstBizIdx = cleanMd.indexOf("/biz/");
+    if (firstBizIdx > 0) {
+      console.log(`[YELP_DEBUG_BIZ] First /biz/ at char ${firstBizIdx}, context:\n${cleanMd.slice(Math.max(0, firstBizIdx - 200), firstBizIdx + 2000)}`);
+      // Find a section with time-like patterns
+      const timeMatch = cleanMd.match(/\d{1,2}:\d{2}\s*(pm|am|PM|AM)/);
+      if (timeMatch) {
+        const timeIdx = cleanMd.indexOf(timeMatch[0]);
+        console.log(`[YELP_DEBUG_TIME] First time at char ${timeIdx}, context:\n${cleanMd.slice(Math.max(0, timeIdx - 500), timeIdx + 500)}`);
+      } else {
+        console.log(`[YELP_DEBUG_TIME] No time patterns found in clean markdown`);
+      }
+    }
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
