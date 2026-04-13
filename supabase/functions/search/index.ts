@@ -1484,9 +1484,6 @@ async function fetchYelpCandidates(
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     
-    // DEBUG: Check JSON extraction results
-    const jsonExtract = scrapeData?.data?.json || scrapeData?.json;
-    console.log(`[YELP_DEBUG] JSON extract: ${JSON.stringify(jsonExtract)?.slice(0, 2000)}`);
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
