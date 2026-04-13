@@ -1329,7 +1329,7 @@ function normalizeCandidates(
         neighborhood: extractNeighborhoodFromTitle(c.title, c.description, params.city),
         rating: undefined,
         priceRange: undefined,
-        imageUrl: null,
+        imageUrl: undefined,
         platform,
         platformUrl: bookingUrl,
         timeSlots: [],
@@ -1567,7 +1567,7 @@ async function fetchYelpCandidates(
         neighborhood: params.city,
         rating: undefined,
         priceRange: undefined,
-        imageUrl: null,
+        imageUrl: undefined,
         platform: "yelp" as const,
         platformUrl: buildYelpAvailabilityUrl(reservationLinkMap.get(alias) || `https://www.yelp.com/reservations/${alias}`, params),
         timeSlots: [],
@@ -1749,7 +1749,7 @@ function coerceYelpExtractedRestaurants(extractData: any): Array<{
         businessUrl: typeof row?.business_url === "string" ? row.business_url : undefined,
       };
     })
-    .filter((row) => row.name);
+    .filter((row: { name: string }) => row.name);
 }
 
 function extractFirecrawlMarkdown(data: any): string {
