@@ -1484,21 +1484,18 @@ async function fetchYelpCandidates(
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     
-    // DEBUG: Log restaurant-relevant sections of markdown
-    const cleanMd = markdown.replace(/Sorry, we have no imagery here\.\n*/g, "").replace(/\n{3,}/g, "\n\n");
-    // Find first restaurant listing pattern
-    const firstBizIdx = cleanMd.indexOf("/biz/");
-    if (firstBizIdx > 0) {
-      console.log(`[YELP_DEBUG_BIZ] First /biz/ at char ${firstBizIdx}, context:\n${cleanMd.slice(Math.max(0, firstBizIdx - 200), firstBizIdx + 2000)}`);
-      // Find a section with time-like patterns
-      const timeMatch = cleanMd.match(/\d{1,2}:\d{2}\s*(pm|am|PM|AM)/);
-      if (timeMatch) {
-        const timeIdx = cleanMd.indexOf(timeMatch[0]);
-        console.log(`[YELP_DEBUG_TIME] First time at char ${timeIdx}, context:\n${cleanMd.slice(Math.max(0, timeIdx - 500), timeIdx + 500)}`);
-      } else {
-        console.log(`[YELP_DEBUG_TIME] No time patterns found in clean markdown`);
-      }
-    }
+    // DEBUG: Check HTML for reservation time slots
+    const html = scrapeData?.data?.html || scrapeData?.html || "";
+    console.log(`[YELP_DEBUG] MD length: ${markdown.length}, HTML length: ${html.length}`);
+    // Search HTML for time slot patterns (e.g., "6:30 pm", "7:00 pm")  
+    const htmlTimeMatches = html.match(/\d{1,2}:\d{2}\s*(pm|am|PM|AM)/g) || [];
+    console.log(`[YELP_DEBUG] HTML time matches: ${htmlTimeMatches.slice(0, 20).join(", ")}`);
+    // Look for reservation-specific HTML elements
+    const reservationSnippets = html.match(/reservation[^"]{0,100}/gi) || [];
+    console.log(`[YELP_DEBUG] Reservation HTML snippets: ${reservationSnippets.slice(0, 5).join(" | ")}`);
+    // Look for time button patterns
+    const timeButtonPattern = html.match(/<(?:button|a|span)[^>]*>\s*\d{1,2}:\d{2}\s*(pm|am|PM|AM)\s*<\//gi) || [];
+    console.log(`[YELP_DEBUG] Time button patterns: ${timeButtonPattern.length} found: ${timeButtonPattern.slice(0, 5).join(" | ")}`);
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
