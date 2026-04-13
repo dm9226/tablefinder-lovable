@@ -1504,8 +1504,7 @@ async function fetchYelpCandidates(
       }
     }
 
-    // Parse restaurant names from markdown — Yelp search results typically show numbered lists
-    // Pattern: "[Restaurant Name](https://www.yelp.com/biz/alias-city)"
+    // Parse restaurant names from markdown
     const nameMap = new Map<string, string>(); // alias -> display name
     const namePatterns = markdown.matchAll(/\[([^\]]+)\]\(https?:\/\/(?:www\.)?yelp\.com\/biz\/([\w-]+)[^)]*\)/g);
     for (const m of namePatterns) {
@@ -1521,7 +1520,7 @@ async function fetchYelpCandidates(
       if (nameMap.has(alias)) return nameMap.get(alias)!;
       return alias
         .split("-")
-        .filter(p => !/^[a-z]{2}\d*$/.test(p)) // strip trailing city-state slugs like "new-york-3"
+        .filter(p => !/^[a-z]{2}\d*$/.test(p))
         .map(w => w.charAt(0).toUpperCase() + w.slice(1))
         .join(" ");
     }
@@ -1530,7 +1529,7 @@ async function fetchYelpCandidates(
     const SKIP_ALIASES = new Set(["undefined", "search", "writeareview", "login", "signup"]);
     const businesses = Array.from(bizAliasSet)
       .filter(alias => !SKIP_ALIASES.has(alias) && alias.length > 2)
-      .slice(0, 20); // cap at 20 like the API did
+      .slice(0, 20);
 
     console.log(`Yelp scrape found ${businesses.length} business aliases from ${links.length} links`);
 
@@ -1552,8 +1551,6 @@ async function fetchYelpCandidates(
       };
     });
 
-    // Skip post-scrape cuisine filter — Yelp's search already filters by cuisine via the search term
-    // Verification will confirm actual availability
     console.log(`Yelp scrape candidates: ${results.length}`);
     return results;
   } catch (err) {
@@ -1782,7 +1779,7 @@ ${list}`,
 // Clean transient fields before returning results
 function cleanTransientFields(results: Restaurant[]): Restaurant[] {
   return results.map(r => {
-    const { _address, _addressCity, _yelpCrossplatformGuess, _xplatMarkdown, _xplatHtml, _xplatMeta, ...clean } = r as any;
+    const { _address, _addressCity, _yelpCrossplatformGuess, _yelpCategories, _yelpSearchPageVerified, _xplatMarkdown, _xplatHtml, _xplatMeta, ...clean } = r as any;
     return clean;
   });
 }
@@ -1866,7 +1863,6 @@ async function verifyAvailability(
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-      // Yelp: onlyMainContent=true (no addresses available anyway)
       // Resy + OT: onlyMainContent=false to capture address/location sections for geocoding
       // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
         const scrapePayload: Record<string, unknown> = {
@@ -2562,74 +2558,7 @@ async function verifyAvailability(
         }
       }
 
-      // ── YELP TWO-PASS RETRY: if first scrape (waitFor:3000) found no slots, retry with waitFor:5000 ──
-      // Skip retry if we're past 80s elapsed to prevent overall timeout
-      const yelpRetryElapsed = globalStartTime ? Date.now() - globalStartTime : 0;
-      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
-        console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms (elapsed: ${yelpRetryElapsed}ms)`);
-        const yelpRetryAbort = new AbortController();
-        const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
-        try {
-          const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${firecrawlKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              url: r.platformUrl,
-              formats: ["markdown"],
-              onlyMainContent: true,
-              waitFor: 4000,
-            }),
-            signal: yelpRetryAbort.signal,
-          });
-          clearTimeout(yelpRetryTimer);
-
-          if (retryResp.ok) {
-            const retryData = await retryResp.json();
-            const retryMarkdown = extractFirecrawlMarkdown(retryData);
-            if (retryMarkdown) {
-              bookingMarkdown = retryMarkdown;
-              // Re-parse times from retry markdown
-              const retryTimeRegex = /\b(\d{1,2}):(\d{2})\s?(am|pm)\b/gi;
-              let retryMatch;
-              while ((retryMatch = retryTimeRegex.exec(retryMarkdown)) !== null) {
-                const ctxStart = Math.max(0, retryMatch.index - 60);
-                const ctxEnd = Math.min(retryMarkdown.length, retryMatch.index + retryMatch[0].length + 60);
-                const context = retryMarkdown.substring(ctxStart, ctxEnd).toLowerCase();
-                if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) continue;
-                const rawH = parseInt(retryMatch[1]);
-                const m = parseInt(retryMatch[2]);
-                const ampm = retryMatch[3].toLowerCase();
-                let h24 = rawH;
-                if (ampm === "pm" && rawH !== 12) h24 += 12;
-                if (ampm === "am" && rawH === 12) h24 = 0;
-                const totalMin = h24 * 60 + m;
-                const displayH = h24 % 12 || 12;
-                const displayAmpm = h24 >= 12 ? "PM" : "AM";
-                const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${displayAmpm}`;
-                if (seenTimes.has(formatted)) continue;
-                seenTimes.add(formatted);
-                foundTimes.push({ time: formatted, minutes: totalMin });
-              }
-              if (foundTimes.length > 0) {
-                console.log(`  ${r.name} [yelp] RETRY SUCCESS: extracted ${foundTimes.length} times: ${foundTimes.map(t=>t.time).join(", ")}`);
-              } else {
-                console.log(`  ${r.name} [yelp] RETRY: still no slots after waitFor:5000`);
-              }
-            }
-          } else {
-            console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
-            await retryResp.text().catch(() => {});
-          }
-        } catch (retryErr: any) {
-          clearTimeout(yelpRetryTimer);
-          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
-        }
-      } else if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
-        console.log(`  ${r.name} [yelp]: skipping retry — ${yelpRetryElapsed}ms elapsed (>80s budget)`);
-      }
+      // Yelp two-pass retry removed — slots now extracted from search results page during discovery
 
       // C. Filter times to those within the meal window
       let matchingTimes = foundTimes.filter((t) =>
@@ -2646,20 +2575,35 @@ async function verifyAvailability(
       matchingTimes.sort((a, b) => a.minutes - b.minutes);
 
       if (matchingTimes.length > 0) {
+        // ── YELP OPERATING-HOURS REJECTION ──
+        // If exactly 2 slots spanning 4+ hours, these are likely open/close hours, not real slots
+        // Real reservation slots have granular 15-30 min spacing
+        if (isYelp && matchingTimes.length <= 2) {
+          if (matchingTimes.length === 2) {
+            const gap = Math.abs(matchingTimes[1].minutes - matchingTimes[0].minutes);
+            if (gap >= 180) { // 3+ hours apart = operating hours
+              console.log(`✗ ${r.name} [yelp] — rejected: 2 slots ${gap}min apart (likely operating hours): ${matchingTimes.map(t=>t.time).join(", ")}`);
+              return null;
+            }
+          } else {
+            // Only 1 slot from Yelp — likely an open/close time, not a real bookable slot
+            console.log(`✗ ${r.name} [yelp] — rejected: only 1 slot (likely operating hours): ${matchingTimes[0].time}`);
+            return null;
+          }
+        }
+        
+        // Also check for external platform mentions on Yelp pages (OpenTable/Resy embeds)
+        if (isYelp && /opentable\.com|resy\.com|powered\s+by\s+opentable|book\s+on\s+opentable|book\s+on\s+resy/i.test(markdown)) {
+          console.log(`✗ ${r.name} [yelp] — rejected: page mentions external booking platform (OpenTable/Resy)`);
+          return null;
+        }
+        
         r.timeSlots = matchingTimes.map((t) => ({ time: t.time }));
         console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} ${mealLabel} slots (${windowStart/60|0}:${(windowStart%60).toString().padStart(2,"0")}–${windowEnd/60|0}:${(windowEnd%60).toString().padStart(2,"0")}): ${matchingTimes.map(t => t.time).join(", ")}`);
         return r;
       }
 
-      // For Yelp, ONLY use the availability marker fallback if we couldn't extract
-      // ANY times at all (i.e. the JS widget didn't render into markdown).
-      // If we DID find times but none are in the meal window, that's a real rejection.
-      if (foundTimes.length === 0 && hasYelpAvailabilityMarker) {
-        const reqLabel = toTwelveHourLabel(params.time);
-        if (reqLabel) r.timeSlots = [{ time: reqLabel }];
-        console.log(`✓ Verified ${r.name} [yelp] — reservation markers, using requested time ${reqLabel}`);
-        return r;
-      }
+      // Yelp trust-marker fallback removed — slots now come from search page discovery
 
       // OpenTable: Do NOT fabricate fallback times from booking markers.
       // If real slots exist but are outside window, or parser found nothing, reject.
