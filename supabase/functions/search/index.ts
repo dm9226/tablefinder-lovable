@@ -1672,8 +1672,8 @@ async function fetchYelpCandidates(
       }
       
       // Fallback: parse from markdown if JSON didn't have it
+      const nameEscaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       if (!meta.rating) {
-        const nameEscaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         const ratingMatch = markdown.match(new RegExp(nameEscaped + "[\\s\\S]{0,300}?(\\d\\.\\d)\\s*\\((\\d[\\d,]*)\\s*reviews?\\)", "i"));
         if (ratingMatch) {
           meta.rating = parseFloat(ratingMatch[1]);
@@ -1681,11 +1681,13 @@ async function fetchYelpCandidates(
         }
       }
       
-      // Price range and neighborhood: "Midtown$$" or "Buckhead$$$"
-      const priceMatch = markdown.match(new RegExp(nameEscaped + "[\\s\\S]{0,500}?([A-Z][a-z]+(?:\\s+[A-Za-z/]+)*)(\\${1,4})", "i"));
-      if (priceMatch) {
-        meta.neighborhood = priceMatch[1].trim();
-        meta.priceRange = priceMatch[2];
+      // Price range and neighborhood from markdown (fallback)
+      if (!meta.neighborhood) {
+        const priceMatch = markdown.match(new RegExp(nameEscaped + "[\\s\\S]{0,500}?([A-Z][a-z]+(?:\\s+[A-Za-z/]+)*)(\\${1,4})", "i"));
+        if (priceMatch) {
+          meta.neighborhood = priceMatch[1].trim();
+          meta.priceRange = meta.priceRange || priceMatch[2];
+        }
       }
       
       metadataMap.set(alias, meta);
