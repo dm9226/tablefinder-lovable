@@ -1502,18 +1502,6 @@ async function fetchYelpCandidates(
       }
     }
 
-    for (const item of extractedRestaurants) {
-      const reservationAlias = item.reservationUrl ? extractYelpAliasFromUrl(item.reservationUrl) : null;
-      const businessAlias = item.businessUrl ? extractYelpAliasFromUrl(item.businessUrl) : null;
-      if (reservationAlias && item.reservationUrl && !reservationLinkMap.has(reservationAlias)) {
-        reservationLinkMap.set(reservationAlias, item.reservationUrl);
-      }
-      if (businessAlias && item.businessUrl) {
-        bizAliasSet.add(businessAlias);
-        if (!bizLinkMap.has(businessAlias)) bizLinkMap.set(businessAlias, item.businessUrl);
-      }
-    }
-
     // Also extract from markdown (backup)
     const mdBizMatches = markdown.matchAll(/yelp\.com\/biz\/([\w-]+)/g);
     for (const m of mdBizMatches) {
@@ -1550,7 +1538,7 @@ async function fetchYelpCandidates(
       .filter(alias => !SKIP_ALIASES.has(alias) && alias.length > 2)
       .slice(0, 20);
 
-    console.log(`Yelp scrape found ${businesses.length} aliases, ${reservationLinkMap.size} reservation links, ${extractedRestaurants.length} extracted restaurants from ${links.length} links`);
+    console.log(`Yelp scrape found ${businesses.length} aliases, ${reservationLinkMap.size} reservation links from ${links.length} links`);
     // Parse times from markdown: Yelp search results show times inline near each restaurant
     // Pattern: restaurant name link followed by time buttons like "5:00 PM  5:30 PM  6:00 PM"
     const aliasTimesMap = new Map<string, string[]>();
