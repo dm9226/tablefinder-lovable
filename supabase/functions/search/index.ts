@@ -1478,14 +1478,9 @@ async function fetchYelpCandidates(
         formats: ["extract", "links", "markdown"],
         extract: {
           schema: yelpExtractSchema,
-          prompt: "Extract all restaurant search results from this Yelp search page. SKIP any results marked as 'Sponsored' or 'Ad' at the top. For each restaurant, get: name, star rating, review count, price range ($-$$$$), neighborhood, cuisine categories, available reservation time slots shown as clickable buttons (like '6:30 PM', '7:00 PM') — NOT operating hours or 'Open until' times — and the yelp URL.",
+          prompt: "Extract all restaurant search results from this Yelp search page. SKIP 'Sponsored' results. For each restaurant, get: name, star rating, review count, price range, neighborhood, cuisine categories, available reservation time slots shown as clickable buttons (like '6:30 PM', '7:00 PM') — NOT operating hours — and the yelp URL.",
         },
-        actions: [
-          { type: "wait", milliseconds: 3000 },
-          { type: "scroll", direction: "down", amount: 2000 },
-          { type: "wait", milliseconds: 2000 },
-        ],
-        waitFor: 3000,
+        waitFor: 5000,
         onlyMainContent: true,
       }),
     });
