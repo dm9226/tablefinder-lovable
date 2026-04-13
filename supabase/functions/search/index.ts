@@ -1468,7 +1468,7 @@ async function fetchYelpCandidates(
       },
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: ["markdown", "links"],
+        formats: ["markdown", "links", { type: "json", prompt: "Extract all restaurants listed on this page. For each restaurant, extract: name, neighborhood, rating (number), price_range ($ signs), cuisine categories, and available_times (array of time strings like '6:30 PM'). Return as JSON array." }],
         waitFor: 5000,
         onlyMainContent: true,
       }),
