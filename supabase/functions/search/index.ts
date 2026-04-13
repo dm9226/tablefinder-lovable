@@ -1537,11 +1537,27 @@ async function fetchYelpCandidates(
         if (screenshotBase64) {
           // Firecrawl may return a URL or base64 — handle both
           const isUrl = typeof screenshotBase64 === "string" && screenshotBase64.startsWith("http");
-          const imageUrl = isUrl
-            ? screenshotBase64
-            : screenshotBase64.startsWith("data:")
+          let imageUrl: string;
+          if (isUrl) {
+            // Fetch the screenshot URL and convert to base64 for the vision API
+            try {
+              const imgResp = await fetch(screenshotBase64);
+              const imgBuf = await imgResp.arrayBuffer();
+              const imgBytes = new Uint8Array(imgBuf);
+              let binary = "";
+              for (let i = 0; i < imgBytes.length; i++) binary += String.fromCharCode(imgBytes[i]);
+              const b64 = btoa(binary);
+              imageUrl = `data:image/png;base64,${b64}`;
+              console.log(`Yelp screenshot fetched from URL, converted to base64 (${b64.length} chars)`);
+            } catch (e) {
+              console.log(`Yelp screenshot URL fetch failed: ${e}`);
+              imageUrl = screenshotBase64; // fallback to URL
+            }
+          } else {
+            imageUrl = screenshotBase64.startsWith("data:")
               ? screenshotBase64
               : `data:image/png;base64,${screenshotBase64}`;
+          }
           console.log(`Yelp screenshot captured (${isUrl ? 'URL' : 'base64'}), sending to AI vision`);
           const restaurantNames = extracted.map(r => r.name);
           const visionResp = await fetch(AI_GATEWAY, {
@@ -1576,6 +1592,7 @@ Important: Only extract times that appear as clickable reservation buttons, NOT 
           if (visionResp.ok) {
             const visionData = await visionResp.json();
             const visionText = visionData?.choices?.[0]?.message?.content || "";
+            console.log(`Yelp vision raw response (first 500): ${visionText.slice(0, 500)}`);
             const jsonMatch = visionText.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
               try {
@@ -1606,7 +1623,8 @@ Important: Only extract times that appear as clickable reservation buttons, NOT 
               console.log(`Yelp vision response had no JSON: ${visionText.slice(0, 200)}`);
             }
           } else {
-            console.log(`Yelp vision API error: ${visionResp.status}`);
+            const errText = await visionResp.text().catch(() => "");
+            console.log(`Yelp vision API error: ${visionResp.status} ${errText.slice(0, 300)}`);
           }
         }
       } else {
