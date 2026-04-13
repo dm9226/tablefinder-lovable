@@ -1491,7 +1491,13 @@ async function fetchYelpCandidates(
         body: JSON.stringify({
           url: yelpSearchUrl.toString(),
           formats: ["screenshot"],
-          waitFor: 6000,
+          waitFor: 10000,
+          actions: [
+            { type: "wait", milliseconds: 3000 },
+            { type: "scroll", direction: "down", amount: 500 },
+            { type: "wait", milliseconds: 2000 },
+            { type: "screenshot" },
+          ],
         }),
       }).catch(e => { console.log(`Yelp screenshot fetch error: ${e}`); return null; }),
     ]);
