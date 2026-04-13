@@ -159,6 +159,7 @@ interface Restaurant {
 // ─── Provider Adapter Interface ───
 interface ApiKeys {
   firecrawlKey: string;
+  aiKey: string;
   _startTime?: number;
 }
 
@@ -190,7 +191,7 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
-    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, _startTime: startTime };
+    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, aiKey: LOVABLE_API_KEY, _startTime: startTime };
     const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter, yelpAdapter];
 
     // ─── Extended Search Mode ───
