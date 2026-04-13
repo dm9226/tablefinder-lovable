@@ -1444,7 +1444,7 @@ async function fetchYelpCandidates(
       ? `${yelpCity}, UK`
       : `${yelpCity}, ${params.state}`;
 
-    // Build Yelp search URL with reservation filter
+    // Build Yelp search URL with reservation filter AND reservation params
     const searchTerm = `${yelpCuisine}${amenitySuffix} restaurants`.trim();
     const yelpSearchUrl = new URL("https://www.yelp.com/search");
     yelpSearchUrl.searchParams.set("find_desc", searchTerm);
@@ -1452,6 +1452,10 @@ async function fetchYelpCandidates(
     if (params.country !== "gb") {
       yelpSearchUrl.searchParams.set("attrs", "reservation");
     }
+    // Add reservation date/time/party so Yelp filters to restaurants with actual availability
+    yelpSearchUrl.searchParams.set("reservation_date", params.date);
+    yelpSearchUrl.searchParams.set("reservation_time", params.time.replace(":", ""));
+    yelpSearchUrl.searchParams.set("reservation_covers", String(params.partySize));
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
