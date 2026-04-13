@@ -1941,17 +1941,11 @@ async function verifyAvailability(
       // Only reject if the page clearly redirected away from /reservations/ to a non-booking page.
       if (isYelp) {
         const scrapedSourceUrl = data?.data?.metadata?.sourceURL || data?.metadata?.sourceURL || "";
-        const redirectedAway = scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/") && !scrapedSourceUrl.includes("/biz/");
-        
-        if (redirectedAway) {
-          console.log(`✗ ${r.name} [yelp] — redirected to non-reservation page: ${scrapedSourceUrl}, skipping`);
+        // If the /reservations/ URL redirected to /biz/ or any non-reservation page,
+        // this restaurant does NOT support Yelp native reservations — reject it.
+        if (scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/")) {
+          console.log(`✗ ${r.name} [yelp] — redirected away from /reservations/ to: ${scrapedSourceUrl}, skipping`);
           return null;
-        }
-        
-        // If redirected to /biz/ page (no native Yelp reservation widget), 
-        // still try — the page may have reservation info or time slots in the content
-        if (scrapedSourceUrl && scrapedSourceUrl.includes("/biz/") && !scrapedSourceUrl.includes("/reservations/")) {
-          console.log(`  ${r.name} [yelp] — landed on /biz/ page, checking for reservation content...`);
         }
       }
 
