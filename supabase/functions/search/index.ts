@@ -1464,7 +1464,7 @@ async function fetchYelpCandidates(
       required: ["restaurants"],
     };
 
-    // Single extract scrape — screenshot+vision approach removed (too slow, returns 0 results)
+    // Single scrape with extract + markdown + links, scrolling past sponsored results
     const scrapeHeaders = {
       Authorization: `Bearer ${firecrawlKey}`,
       "Content-Type": "application/json",
@@ -1475,12 +1475,17 @@ async function fetchYelpCandidates(
       headers: scrapeHeaders,
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: ["extract", "links"],
+        formats: ["extract", "links", "markdown"],
         extract: {
           schema: yelpExtractSchema,
-          prompt: "Extract all restaurant search results from this Yelp search page. SKIP any results marked as 'Sponsored' or 'Ad' at the top of the page — only include organic results. For each restaurant, get: name, star rating, review count, price range ($-$$$$), neighborhood, cuisine categories (like American, Bars, Seafood), available reservation time slots shown as clickable buttons (like '6:30 PM', '7:00 PM'), and the yelp URL.",
+          prompt: "Extract all restaurant search results from this Yelp search page. SKIP any results marked as 'Sponsored' or 'Ad' at the top. For each restaurant, get: name, star rating, review count, price range ($-$$$$), neighborhood, cuisine categories, available reservation time slots shown as clickable buttons (like '6:30 PM', '7:00 PM') — NOT operating hours or 'Open until' times — and the yelp URL.",
         },
-        waitFor: 5000,
+        actions: [
+          { type: "wait", milliseconds: 3000 },
+          { type: "scroll", direction: "down", amount: 2000 },
+          { type: "wait", milliseconds: 2000 },
+        ],
+        waitFor: 3000,
         onlyMainContent: true,
       }),
     });
