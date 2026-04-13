@@ -1493,7 +1493,7 @@ async function fetchYelpCandidates(
       },
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: ["extract", "links"],
+        formats: ["extract", "markdown", "links"],
         extract: {
           schema: yelpExtractSchema,
           prompt: "Extract all restaurant search results from this Yelp search page. For each restaurant, get: name, star rating, review count, price range ($-$$$$), neighborhood, cuisine categories (like American, Bars, Seafood), any visible reservation time slot buttons (like '7:00 PM', '7:30 PM'), and the yelp URL. Only include actual restaurant results, not ads or sponsored content headers.",
