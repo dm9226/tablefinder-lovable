@@ -1484,9 +1484,10 @@ async function fetchYelpCandidates(
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     
-    // DEBUG: Log first 3000 chars of markdown to understand format for slot extraction
-    console.log(`[YELP_DEBUG_MD] First 3000 chars:\n${markdown.slice(0, 3000)}`);
-    console.log(`[YELP_DEBUG_MD] Chars 3000-6000:\n${markdown.slice(3000, 6000)}`);
+    // DEBUG: Log sections of markdown to find time slots
+    const cleanMd = markdown.replace(/Sorry, we have no imagery here\.\n*/g, "").replace(/\n{3,}/g, "\n\n");
+    console.log(`[YELP_DEBUG_MD_CLEAN] Length: ${cleanMd.length}, first 4000:\n${cleanMd.slice(0, 4000)}`);
+    console.log(`[YELP_DEBUG_MD_CLEAN2] 4000-8000:\n${cleanMd.slice(4000, 8000)}`);
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
