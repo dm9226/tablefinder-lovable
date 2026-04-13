@@ -1526,24 +1526,12 @@ async function fetchYelpCandidates(
       }
     }
 
-    // ─── Screenshot + AI Vision for time slots ───
-    // The extract format and markdown both miss JS-rendered reservation time buttons.
-    // Use Firecrawl screenshot + AI vision to read the actual slot buttons.
+    // ─── AI Vision for time slots from parallel screenshot ───
+    // The extract format misses JS-rendered reservation time buttons.
+    // Use the screenshot (fetched in parallel above) + AI vision to read actual slot buttons.
     let visionTimesMap = new Map<string, string[]>();
     try {
-      const screenshotResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${firecrawlKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url: yelpSearchUrl.toString(),
-          formats: ["screenshot"],
-          waitFor: 6000,
-        }),
-      });
-      if (screenshotResp.ok) {
+      if (screenshotResp && screenshotResp.ok) {
         const ssData = await screenshotResp.json();
         const screenshotBase64 = ssData?.data?.screenshot || ssData?.screenshot;
         if (screenshotBase64) {
@@ -1581,7 +1569,6 @@ Important: Only extract times that appear as clickable reservation buttons, NOT 
           if (visionResp.ok) {
             const visionData = await visionResp.json();
             const visionText = visionData?.choices?.[0]?.message?.content || "";
-            // Parse JSON from response (may have markdown code fences)
             const jsonMatch = visionText.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
               try {
@@ -1593,7 +1580,6 @@ Important: Only extract times that appear as clickable reservation buttons, NOT 
                       .map((t: string) => normalizeExtractedTimeLabel(t))
                       .filter(Boolean) as string[];
                     if (normalized.length > 0) {
-                      // Match by closest name
                       const bestMatch = extracted.find(e =>
                         e.name.toLowerCase() === r.name.toLowerCase() ||
                         e.name.toLowerCase().includes(r.name.toLowerCase()) ||
@@ -1616,9 +1602,11 @@ Important: Only extract times that appear as clickable reservation buttons, NOT 
             console.log(`Yelp vision API error: ${visionResp.status}`);
           }
         }
+      } else {
+        console.log(`Yelp screenshot not available (resp null or error)`);
       }
     } catch (e) {
-      console.log(`Yelp screenshot+vision error: ${e}`);
+      console.log(`Yelp vision error: ${e}`);
     }
 
     // Match extracted restaurants to URLs
