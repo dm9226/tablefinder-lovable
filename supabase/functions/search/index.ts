@@ -1552,7 +1552,7 @@ async function fetchYelpCandidates(
         // Extract times like "5:00 PM", "6:30 PM" etc.
         const timeMatches = section.match(/\d{1,2}:\d{2}\s*(?:AM|PM)/gi);
         if (timeMatches && timeMatches.length > 0) {
-          const normalized = timeMatches.map(t => normalizeExtractedTimeLabel(t)).filter(Boolean) as string[];
+          const normalized = timeMatches.map((t: string) => normalizeExtractedTimeLabel(t)).filter(Boolean) as string[];
           // Dedupe
           const unique = [...new Set(normalized)];
           if (unique.length > 0 && unique.length <= 10) { // sanity: real slots are 1-10
