@@ -1505,20 +1505,9 @@ async function fetchYelpCandidates(
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     
-    // DEBUG: Search for embedded JSON with reservation/availability data
-    const html = scrapeData?.data?.html || scrapeData?.html || "";
-    const rawHtml = scrapeData?.data?.rawHtml || scrapeData?.rawHtml || "";
-    console.log(`[YELP_DEBUG] HTML: ${html.length}, rawHTML: ${rawHtml.length}`);
-    // Check for __NEXT_DATA__ or similar embedded JSON
-    const nextDataMatch = html.match(/__NEXT_DATA__[^{]*(\{.*?\})\s*<\/script/s);
-    console.log(`[YELP_DEBUG] __NEXT_DATA__: ${nextDataMatch ? 'found, len=' + nextDataMatch[1].length : 'not found'}`);
-    // Check for any JSON containing "availableSlots" or "timeslots" or "openings"
-    const jsonPatterns = html.match(/"(?:available|timeslot|opening|slot|reservation_time)[^"]*"\s*:\s*\[/gi) || [];
-    console.log(`[YELP_DEBUG] JSON array patterns: ${jsonPatterns.length}: ${jsonPatterns.slice(0, 5).join(" | ")}`);
-    // Search for "6:30" or "18:30" literally 
-    const has630 = html.includes("6:30") || html.includes("18:30") || html.includes("1830");
-    const has700 = html.includes("7:00") || html.includes("19:00") || html.includes("1900");
-    console.log(`[YELP_DEBUG] Contains 6:30=${has630}, 7:00=${has700}`);
+    // DEBUG: Check JSON extraction results
+    const jsonExtract = scrapeData?.data?.json || scrapeData?.json;
+    console.log(`[YELP_DEBUG] JSON extract: ${JSON.stringify(jsonExtract)?.slice(0, 2000)}`);
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
