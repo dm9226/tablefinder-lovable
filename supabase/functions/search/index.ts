@@ -1932,6 +1932,26 @@ async function verifyAvailability(
         return null;
       }
 
+      // ── YELP: Verify this is an actual Yelp reservation page ──
+      // If the /reservations/ URL redirected to /biz/ (no Yelp reservation system),
+      // or the page doesn't contain Yelp's reservation widget markers, reject it.
+      if (isYelp) {
+        const scrapedSourceUrl = data?.data?.metadata?.sourceURL || data?.metadata?.sourceURL || "";
+        const redirectedAway = scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/");
+        // Yelp reservation widget has specific markers like date/time/party-size selectors
+        const hasYelpWidget = /select\s+a\s+date|select\s+a\s+time|party\s+size|find\s+a\s+table|request\s+a\s+reservation/i.test(markdown);
+        // Check if page mentions another platform (OpenTable, Resy) for reservations
+        const usesExternalPlatform = /opentable\.com|resy\.com|powered\s+by\s+opentable|powered\s+by\s+resy|book\s+on\s+opentable|reserve\s+on\s+opentable/i.test(markdown);
+        
+        if (redirectedAway || usesExternalPlatform || !hasYelpWidget) {
+          const reason = redirectedAway ? "redirected to /biz/ (no Yelp reservations)" 
+            : usesExternalPlatform ? "uses external platform (OpenTable/Resy)" 
+            : "no Yelp reservation widget found";
+          console.log(`✗ ${r.name} [yelp] — ${reason}, skipping`);
+          return null;
+        }
+      }
+
       // Extract structured data from Firecrawl JSON extraction (if present)
       const jsonData = data?.data?.extract || data?.extract;
       
