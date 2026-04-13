@@ -1484,20 +1484,20 @@ async function fetchYelpCandidates(
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     
-    // DEBUG: Search HTML for reservation slot data (might be in JSON/script tags)
+    // DEBUG: Search for embedded JSON with reservation/availability data
     const html = scrapeData?.data?.html || scrapeData?.html || "";
-    // Look for time values like 18:30, 1830, "6:30", etc. in data attributes or scripts
-    const slotDataMatches = html.match(/(?:time|slot|avail)[^"]{0,50}(?:18[0-9]{2}|19[0-9]{2}|20[0-9]{2})/gi) || [];
-    console.log(`[YELP_DEBUG] Slot data matches: ${slotDataMatches.length}: ${slotDataMatches.slice(0, 5).join(" | ")}`);
-    // Look for script tags with reservation data
-    const scriptTags = html.match(/<script[^>]*>(?:(?!<\/script>).)*(?:reservation|timeslot|available)[^<]*<\/script>/gis) || [];
-    console.log(`[YELP_DEBUG] Scripts with reservation data: ${scriptTags.length}`);
-    if (scriptTags.length > 0) {
-      console.log(`[YELP_DEBUG] Script snippet: ${scriptTags[0].slice(0, 500)}`);
-    }
-    // Look for data- attributes with reservation info
-    const dataAttrs = html.match(/data-[^=]*(?:reservation|timeslot|booking)[^"]*="[^"]{0,200}"/gi) || [];
-    console.log(`[YELP_DEBUG] Data attrs: ${dataAttrs.length}: ${dataAttrs.slice(0, 3).join(" | ")}`);
+    const rawHtml = scrapeData?.data?.rawHtml || scrapeData?.rawHtml || "";
+    console.log(`[YELP_DEBUG] HTML: ${html.length}, rawHTML: ${rawHtml.length}`);
+    // Check for __NEXT_DATA__ or similar embedded JSON
+    const nextDataMatch = html.match(/__NEXT_DATA__[^{]*(\{.*?\})\s*<\/script/s);
+    console.log(`[YELP_DEBUG] __NEXT_DATA__: ${nextDataMatch ? 'found, len=' + nextDataMatch[1].length : 'not found'}`);
+    // Check for any JSON containing "availableSlots" or "timeslots" or "openings"
+    const jsonPatterns = html.match(/"(?:available|timeslot|opening|slot|reservation_time)[^"]*"\s*:\s*\[/gi) || [];
+    console.log(`[YELP_DEBUG] JSON array patterns: ${jsonPatterns.length}: ${jsonPatterns.slice(0, 5).join(" | ")}`);
+    // Search for "6:30" or "18:30" literally 
+    const has630 = html.includes("6:30") || html.includes("18:30") || html.includes("1830");
+    const has700 = html.includes("7:00") || html.includes("19:00") || html.includes("1900");
+    console.log(`[YELP_DEBUG] Contains 6:30=${has630}, 7:00=${has700}`);
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
