@@ -2566,11 +2566,11 @@ async function verifyAvailability(
       }
 
       // ── RESY-SPECIFIC: Parse meal section from markdown directly ──
-      if (isResy) {
+      if (effectiveIsResy) {
         const mealSectionRegex = new RegExp(
           `## (?:${mealLabel}|all day)([\\s\\S]*?)(?=##|$)`, "i"
         );
-        const mealMatch = markdown.match(mealSectionRegex);
+        const mealMatch = effectiveMarkdown.match(mealSectionRegex);
         
         if (mealMatch) {
           const mealSection = mealMatch[1];
@@ -2598,7 +2598,7 @@ async function verifyAvailability(
             return null;
           }
         } else {
-          if (/\bnotify\b/i.test(markdown)) {
+          if (/\bnotify\b/i.test(effectiveMarkdown)) {
             console.log(`✗ ${r.name} [resy] — no "${mealLabel}" section and Notify detected`);
             return null;
           }
@@ -2610,11 +2610,11 @@ async function verifyAvailability(
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
       // Tightened: require actual Yelp widget markers, not just the generic word "reservations"
-      const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|request\s+a\s+reservation)\b/i.test(markdown);
+      const hasYelpAvailabilityMarker = isYelp && !effectiveIsOT && !effectiveIsResy && /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|request\s+a\s+reservation)\b/i.test(effectiveMarkdown);
 
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
       // ── STRATEGY 2: Regex on cleaned booking markdown (non-Resy only) ──
-      if (!isResy && foundTimes.length === 0) {
+      if (!effectiveIsResy && foundTimes.length === 0) {
         let match12;
         while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
           // Context check: skip times near "notify", "sold out", "waitlist"
