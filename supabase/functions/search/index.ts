@@ -2806,8 +2806,7 @@ const opentableAdapter: ProviderAdapter = {
 const yelpAdapter: ProviderAdapter = {
   platform: "yelp",
   async discover(params, keys, amenityTerms) {
-    if (!keys.yelpKey) return [];
-    return fetchYelpCandidates(params, keys.yelpKey, amenityTerms);
+    return fetchYelpCandidates(params, keys.firecrawlKey, amenityTerms);
   },
   async verify(candidates, params, keys, amenityTerms) {
     return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
