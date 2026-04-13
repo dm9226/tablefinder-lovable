@@ -1535,7 +1535,14 @@ async function fetchYelpCandidates(
         const ssData = await screenshotResp.json();
         const screenshotBase64 = ssData?.data?.screenshot || ssData?.screenshot;
         if (screenshotBase64) {
-          console.log(`Yelp screenshot captured, sending to AI vision (${Math.round(screenshotBase64.length / 1024)}KB)`);
+          // Firecrawl may return a URL or base64 — handle both
+          const isUrl = typeof screenshotBase64 === "string" && screenshotBase64.startsWith("http");
+          const imageUrl = isUrl
+            ? screenshotBase64
+            : screenshotBase64.startsWith("data:")
+              ? screenshotBase64
+              : `data:image/png;base64,${screenshotBase64}`;
+          console.log(`Yelp screenshot captured (${isUrl ? 'URL' : 'base64'}), sending to AI vision`);
           const restaurantNames = extracted.map(r => r.name);
           const visionResp = await fetch(AI_GATEWAY, {
             method: "POST",
@@ -1547,7 +1554,7 @@ async function fetchYelpCandidates(
                 content: [
                   {
                     type: "image_url",
-                    image_url: { url: screenshotBase64.startsWith("data:") ? screenshotBase64 : `data:image/png;base64,${screenshotBase64}` },
+                    image_url: { url: imageUrl },
                   },
                   {
                     type: "text",
