@@ -3087,7 +3087,7 @@ const opentableAdapter: ProviderAdapter = {
 const yelpAdapter: ProviderAdapter = {
   platform: "yelp",
   async discover(params, keys, amenityTerms) {
-    return fetchYelpCandidates(params, keys.firecrawlKey, amenityTerms);
+    return fetchYelpCandidates(params, keys.firecrawlKey, keys.aiKey, amenityTerms);
   },
   async verify(candidates, params, keys, amenityTerms) {
     // ALL Yelp candidates from the search page are pre-verified:
