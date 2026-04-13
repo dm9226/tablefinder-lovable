@@ -2013,9 +2013,12 @@ async function verifyAvailability(
       // ── YELP PRE-VERIFIED: slots already extracted from search results page ──
       // Skip individual page scrape — just apply time window filtering
       if (isYelp && (r as any)._yelpSearchPageVerified && r.timeSlots.length > 0) {
-        // Parse and filter slots through the same time window logic
-        const requestedMinutes = parseTimeToMinutes(params.time);
-        const { windowStart, windowEnd, mealLabel } = getMealWindow(requestedMinutes);
+        // Parse time window (same logic as main verification)
+        const [reqH, reqMin] = params.time.split(":").map(Number);
+        const requestedMinutes = reqH * 60 + (reqMin || 0);
+        const windowStart = Math.max(0, requestedMinutes - 120);
+        const windowEnd = Math.min(1439, requestedMinutes + 120);
+        const mealLabel = reqH < 10 ? "breakfast" : reqH < 12 ? "brunch" : reqH < 16 ? "lunch" : "dinner";
         
         const parsedSlots = r.timeSlots.map(s => {
           const m = s.time.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
