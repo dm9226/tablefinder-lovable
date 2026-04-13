@@ -1490,6 +1490,36 @@ async function fetchYelpCandidates(
       }),
     });
 
+    if (!scrapeResp.ok) {
+      const errBody = await scrapeResp.text().catch(() => "");
+      console.log(`Yelp scrape error: status=${scrapeResp.status}, body=${errBody.slice(0, 300)}`);
+      return [];
+    }
+
+    const scrapeData = await scrapeResp.json();
+    const extractData = scrapeData?.data?.extract || scrapeData?.extract;
+    const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
+
+    console.log(`Yelp extract response: ${JSON.stringify(extractData).slice(0, 1000)}`);
+    console.log(`Yelp links: ${links.length}`);
+
+    // Parse extracted restaurants
+    const extracted = coerceYelpExtractedRestaurants(extractData);
+    console.log(`Yelp extract parsed ${extracted.length} restaurants`);
+
+    // Build alias map from links for URL construction
+    const reservationLinkMap = new Map<string, string>();
+    const bizLinkMap = new Map<string, string>();
+    for (const link of links) {
+      const alias = extractYelpAliasFromUrl(link);
+      if (!alias) continue;
+      if (/\/reservations\//i.test(link)) {
+        if (!reservationLinkMap.has(alias)) reservationLinkMap.set(alias, link);
+      } else if (/\/biz\//i.test(link)) {
+        if (!bizLinkMap.has(alias)) bizLinkMap.set(alias, link);
+      }
+    }
+
     // Also grab markdown for time slot parsing fallback
     const markdown: string = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     console.log(`Yelp markdown length: ${markdown.length}, first 500: ${markdown.slice(0, 500)}`);
