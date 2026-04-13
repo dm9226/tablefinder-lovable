@@ -1527,25 +1527,6 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape found ${businesses.length} business aliases from ${links.length} links`);
 
-    // Apply cuisine filter (same logic as before)
-    const MEAL_AS_CUISINE_FILTER = new Set(["brunch", "breakfast"]);
-    const MEAL_TERMS = new Set(["dinner", "lunch", "supper", "meal", "eat", "eating", "dining"]);
-    const cuisineFilter = (params.cuisine || "").toLowerCase().replace(/\b(restaurant|restaurants|food)\b/g, "").trim();
-    const cuisineTokens = cuisineFilter.split(/\s+/).filter(Boolean).filter(t => !MEAL_TERMS.has(t) || MEAL_AS_CUISINE_FILTER.has(t));
-
-    const GENERIC_CUISINE_TOKENS = new Set(["american", "asian", "european", "mediterranean"]);
-    let expandedTokens = [...cuisineTokens];
-    if (params.dishKeyword) {
-      const parentCuisines = DISH_TO_CUISINE_MAP[params.dishKeyword] || [];
-      for (const pc of parentCuisines) {
-        if (!expandedTokens.includes(pc)) expandedTokens.push(pc);
-      }
-      if (params.cuisineType && !expandedTokens.includes(params.cuisineType)) {
-        expandedTokens.push(params.cuisineType);
-      }
-      expandedTokens = expandedTokens.filter(t => !GENERIC_CUISINE_TOKENS.has(t));
-    }
-
     const results: Restaurant[] = businesses.map(alias => {
       const name = aliasToName(alias);
       return {
@@ -1564,21 +1545,10 @@ async function fetchYelpCandidates(
       };
     });
 
-    // Apply cuisine filter if tokens exist
-    const filtered = expandedTokens.length === 0 ? results : results.filter(r => {
-      const searchText = `${r.name.toLowerCase()} ${(r as any)._yelpCategories || ""}`;
-      return expandedTokens.some((token: string) => {
-        if (searchText.includes(token)) return true;
-        const singular = token.endsWith("s") ? token.slice(0, -1) : null;
-        const plural = !token.endsWith("s") ? token + "s" : null;
-        if (singular && searchText.includes(singular)) return true;
-        if (plural && searchText.includes(plural)) return true;
-        return false;
-      });
-    });
-
-    console.log(`Yelp after cuisine filter: ${filtered.length}/${results.length} (tokens: "${expandedTokens.join(", ")}")`);
-    return filtered;
+    // Skip post-scrape cuisine filter — Yelp's search already filters by cuisine via the search term
+    // Verification will confirm actual availability
+    console.log(`Yelp scrape candidates: ${results.length}`);
+    return results;
   } catch (err) {
     console.error("Yelp scrape error:", err);
     return [];
