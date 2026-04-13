@@ -2091,7 +2091,7 @@ async function verifyAvailability(
           // - Collapse line breaks between street and city/state lines
           // - Replace bullets/middots with spaces
           // - Remove duplicate whitespace
-          const normalizedMd = markdown
+          const normalizedMd = effectiveMarkdown
             .replace(/·/g, " ")           // middots
             .replace(/•/g, " ")           // bullets
             .replace(/\|/g, " ")          // pipes
