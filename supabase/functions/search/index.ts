@@ -1494,7 +1494,10 @@ async function fetchYelpCandidates(
           waitFor: 10000,
           actions: [
             { type: "wait", milliseconds: 3000 },
-            { type: "scroll", direction: "down", amount: 500 },
+            // Scroll past sponsored listings to reach actual reservation results
+            { type: "scroll", direction: "down", amount: 1500 },
+            { type: "wait", milliseconds: 2000 },
+            { type: "scroll", direction: "down", amount: 1500 },
             { type: "wait", milliseconds: 2000 },
             { type: "screenshot" },
           ],
