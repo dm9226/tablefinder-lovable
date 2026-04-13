@@ -188,9 +188,8 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
-    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, yelpKey: YELP_API_KEY, _startTime: startTime };
-    const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter];
-    if (YELP_API_KEY) adapters.push(yelpAdapter);
+    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, _startTime: startTime };
+    const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter, yelpAdapter];
 
     // ─── Extended Search Mode ───
     // Skips discovery and parsing; verifies remaining candidates from a previous search
