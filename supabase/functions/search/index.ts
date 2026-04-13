@@ -1494,13 +1494,33 @@ async function fetchYelpCandidates(
     const scrapeData = await scrapeResp.json();
     const extractData = scrapeData?.data?.extract || scrapeData?.extract;
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
+    const markdown: string = scrapeData?.data?.markdown || scrapeData?.markdown || "";
 
     console.log(`Yelp extract response: ${JSON.stringify(extractData).slice(0, 1000)}`);
-    console.log(`Yelp links: ${links.length}`);
+    console.log(`Yelp links: ${links.length}, markdown length: ${markdown.length}`);
 
     // Parse extracted restaurants
     const extracted = coerceYelpExtractedRestaurants(extractData);
     console.log(`Yelp extract parsed ${extracted.length} restaurants`);
+
+    // Build markdown-based time slot map by parsing time patterns near restaurant names
+    const markdownTimesMap = new Map<string, string[]>();
+    if (markdown) {
+      // Match patterns like "6:30 PM" near restaurant names in the markdown
+      const timePattern = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
+      // Split markdown by restaurant-like headers and extract times from each section
+      for (const rest of extracted) {
+        const nameEscaped = rest.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const sectionRegex = new RegExp(`${nameEscaped}[\\s\\S]*?(?=\\n#{1,3}\\s|$)`, "i");
+        const section = markdown.match(sectionRegex)?.[0] || "";
+        const times = (section.match(timePattern) || [])
+          .map(t => normalizeExtractedTimeLabel(t))
+          .filter(Boolean) as string[];
+        if (times.length > 0) {
+          markdownTimesMap.set(rest.name, times);
+        }
+      }
+    }
 
     // Build alias map from links for URL construction
     const reservationLinkMap = new Map<string, string>();
@@ -1514,8 +1534,6 @@ async function fetchYelpCandidates(
         if (!bizLinkMap.has(alias)) bizLinkMap.set(alias, link);
       }
     }
-
-    console.log(`Yelp markdown length: ${markdown.length}`);
 
     // Match extracted restaurants to URLs
     const results: Restaurant[] = [];
