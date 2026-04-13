@@ -1469,7 +1469,7 @@ async function fetchYelpCandidates(
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
         formats: ["markdown", "links"],
-        waitFor: 3000,
+        waitFor: 5000,
         onlyMainContent: true,
       }),
     });
@@ -1483,6 +1483,7 @@ async function fetchYelpCandidates(
     const scrapeData = await scrapeResp.json();
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
+    
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
