@@ -1470,7 +1470,7 @@ async function fetchYelpCandidates(
         url: yelpSearchUrl.toString(),
         formats: ["markdown", "links", "extract"],
         extract: {
-          prompt: "Extract all restaurants listed on this search results page. For each restaurant, extract: name, neighborhood, rating (number), price_range (dollar signs like $$ or $$$), cuisine_categories (array of strings), and available_times (array of available reservation time strings like '6:30 PM', '7:00 PM'). Return as a JSON object with a 'restaurants' array.",
+          prompt: "Extract all restaurants listed on this Yelp search results page. For each restaurant, extract: name, neighborhood, rating (number), price_range (dollar signs like $$ or $$$), cuisine_categories (array of strings), available_times (array of visible reservation times like '6:30 PM'), reservation_url if a Yelp reservations link is visible, and business_url if a Yelp business page link is visible. Return as a JSON object with a restaurants array.",
         },
         waitFor: 5000,
         onlyMainContent: true,
@@ -1490,16 +1490,33 @@ async function fetchYelpCandidates(
     // Extract LLM-powered structured data (restaurant + time slots)
     const extractData = scrapeData?.data?.extract || scrapeData?.extract || null;
     console.log(`Yelp extract result: ${JSON.stringify(extractData)?.slice(0, 3000)}`);
+    const extractedRestaurants = coerceYelpExtractedRestaurants(extractData);
     
 
-    // Extract restaurant aliases from yelp.com/biz/ links
+    // Extract restaurant aliases from Yelp links
     const bizAliasSet = new Set<string>();
     const bizLinkMap = new Map<string, string>(); // alias -> full URL
+    const reservationLinkMap = new Map<string, string>(); // alias -> reservation URL
     for (const link of links) {
-      const m = link.match(/yelp\.com\/biz\/([\w-]+)/);
-      if (m && m[1]) {
-        bizAliasSet.add(m[1]);
-        if (!bizLinkMap.has(m[1])) bizLinkMap.set(m[1], link);
+      const alias = extractYelpAliasFromUrl(link);
+      if (!alias) continue;
+      if (/\/reservations\//i.test(link)) {
+        if (!reservationLinkMap.has(alias)) reservationLinkMap.set(alias, link);
+      } else if (/\/biz\//i.test(link)) {
+        bizAliasSet.add(alias);
+        if (!bizLinkMap.has(alias)) bizLinkMap.set(alias, link);
+      }
+    }
+
+    for (const item of extractedRestaurants) {
+      const reservationAlias = item.reservationUrl ? extractYelpAliasFromUrl(item.reservationUrl) : null;
+      const businessAlias = item.businessUrl ? extractYelpAliasFromUrl(item.businessUrl) : null;
+      if (reservationAlias && item.reservationUrl && !reservationLinkMap.has(reservationAlias)) {
+        reservationLinkMap.set(reservationAlias, item.reservationUrl);
+      }
+      if (businessAlias && item.businessUrl) {
+        bizAliasSet.add(businessAlias);
+        if (!bizLinkMap.has(businessAlias)) bizLinkMap.set(businessAlias, item.businessUrl);
       }
     }
 
@@ -1535,11 +1552,11 @@ async function fetchYelpCandidates(
 
     // Filter out non-restaurant pages (yelp collections, ads, etc.)
     const SKIP_ALIASES = new Set(["undefined", "search", "writeareview", "login", "signup"]);
-    const businesses = Array.from(bizAliasSet)
+    const businesses = Array.from(new Set([...reservationLinkMap.keys(), ...bizAliasSet]))
       .filter(alias => !SKIP_ALIASES.has(alias) && alias.length > 2)
       .slice(0, 20);
 
-    console.log(`Yelp scrape found ${businesses.length} business aliases from ${links.length} links`);
+    console.log(`Yelp scrape found ${businesses.length} aliases, ${reservationLinkMap.size} reservation links, ${extractedRestaurants.length} extracted restaurants from ${links.length} links`);
 
     const results: Restaurant[] = businesses.map(alias => {
       const name = aliasToName(alias);
@@ -1552,12 +1569,45 @@ async function fetchYelpCandidates(
         priceRange: undefined,
         imageUrl: null,
         platform: "yelp" as const,
-        platformUrl: buildYelpAvailabilityUrl(`https://www.yelp.com/reservations/${alias}`, params),
+        platformUrl: buildYelpAvailabilityUrl(reservationLinkMap.get(alias) || `https://www.yelp.com/reservations/${alias}`, params),
         timeSlots: [],
         distanceMiles: null,
         _yelpCategories: alias.replace(/-/g, " "),
       };
     });
+
+    const resultByAlias = new Map(results.map((result) => [result.id.replace(/^yelp-/, ""), result]));
+    const normalizedAliasNameMap = new Map<string, string>();
+    for (const alias of businesses) {
+      const candidateNames = [nameMap.get(alias), aliasToName(alias)].filter(Boolean) as string[];
+      for (const candidateName of candidateNames) {
+        const normalized = normalizeRestaurantNameForMatch(candidateName);
+        if (normalized && !normalizedAliasNameMap.has(normalized)) {
+          normalizedAliasNameMap.set(normalized, alias);
+        }
+      }
+    }
+
+    for (const item of extractedRestaurants) {
+      const matchedAlias = (item.reservationUrl && extractYelpAliasFromUrl(item.reservationUrl))
+        || (item.businessUrl && extractYelpAliasFromUrl(item.businessUrl))
+        || normalizedAliasNameMap.get(normalizeRestaurantNameForMatch(item.name))
+        || null;
+      if (!matchedAlias) continue;
+      const matched = resultByAlias.get(matchedAlias);
+      if (!matched) continue;
+
+      matched.name = item.name || matched.name;
+      matched.neighborhood = item.neighborhood || matched.neighborhood;
+      matched.rating = item.rating ?? matched.rating;
+      matched.priceRange = item.priceRange ?? matched.priceRange;
+      matched.cuisine = item.cuisineCategories.length > 0 ? item.cuisineCategories.join(", ") : matched.cuisine;
+      matched._yelpCategories = item.cuisineCategories.length > 0 ? item.cuisineCategories.join(" ") : matched._yelpCategories;
+      matched.platformUrl = buildYelpAvailabilityUrl(item.reservationUrl || reservationLinkMap.get(matchedAlias) || matched.platformUrl, params);
+      if (item.availableTimes.length > 0) {
+        matched.timeSlots = item.availableTimes.map((time) => ({ time }));
+      }
+    }
 
     console.log(`Yelp scrape candidates: ${results.length}`);
     return results;
@@ -1577,6 +1627,129 @@ function buildYelpAvailabilityUrl(baseUrl: string, params: SearchParams): string
   } catch {
     return baseUrl;
   }
+}
+
+function extractYelpAliasFromUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    const match = u.pathname.match(/^\/(?:biz|reservations)\/([^/?#]+)/i);
+    return match?.[1]?.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRestaurantNameForMatch(value: string | undefined | null): string {
+  if (!value) return "";
+  return value
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[’'`]/g, "")
+    .replace(/(the|restaurant|bar|grill|kitchen|cafe|café|bistro|tavern|steakhouse|house|atlanta|ga)/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, "");
+}
+
+function normalizeExtractedTimeLabel(raw: string): string | null {
+  const match = raw.trim().match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+  if (!match) return null;
+
+  const hour12 = Number(match[1]);
+  const minutes = Number(match[2] || "0");
+  if (!Number.isFinite(hour12) || hour12 < 1 || hour12 > 12 || minutes < 0 || minutes > 59) return null;
+
+  let hour24 = hour12 % 12;
+  if (match[3].toLowerCase() === "pm") hour24 += 12;
+
+  const displayHour = hour24 % 12 || 12;
+  const displayAmpm = hour24 >= 12 ? "PM" : "AM";
+  return `${displayHour}:${minutes.toString().padStart(2, "0")} ${displayAmpm}`;
+}
+
+function extractStructuredTimeLabels(value: unknown): string[] {
+  const rawValues: string[] = [];
+
+  const collect = (input: unknown) => {
+    if (!input) return;
+    if (Array.isArray(input)) {
+      input.forEach(collect);
+      return;
+    }
+    if (typeof input === "string") {
+      rawValues.push(input);
+      return;
+    }
+    if (typeof input === "object") {
+      const obj = input as Record<string, unknown>;
+      for (const key of ["available_times", "times", "time_slots", "slots", "reservation_times"]) {
+        collect(obj[key]);
+      }
+    }
+  };
+
+  collect(value);
+
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawValues) {
+    const matches = raw.match(/\d{1,2}(?::\d{2})?\s*(?:AM|PM)/gi) || [raw];
+    for (const candidate of matches) {
+      const label = normalizeExtractedTimeLabel(candidate);
+      if (label && !seen.has(label)) {
+        seen.add(label);
+        normalized.push(label);
+      }
+    }
+  }
+  return normalized;
+}
+
+function coerceYelpExtractedRestaurants(extractData: any): Array<{
+  name: string;
+  neighborhood?: string;
+  rating?: number;
+  priceRange?: string;
+  cuisineCategories: string[];
+  availableTimes: string[];
+  reservationUrl?: string;
+  businessUrl?: string;
+}> {
+  const rows = Array.isArray(extractData?.restaurants)
+    ? extractData.restaurants
+    : Array.isArray(extractData?.data?.restaurants)
+      ? extractData.data.restaurants
+      : Array.isArray(extractData)
+        ? extractData
+        : [];
+
+  return rows
+    .map((row: any) => {
+      const categoryValue = row?.cuisine_categories ?? row?.categories ?? row?.cuisine ?? [];
+      const cuisineCategories = Array.isArray(categoryValue)
+        ? categoryValue.map((value) => String(value).trim()).filter(Boolean)
+        : typeof categoryValue === "string"
+          ? categoryValue.split(/[|,]/).map((value) => value.trim()).filter(Boolean)
+          : [];
+
+      const ratingValue = typeof row?.rating === "number" ? row.rating : Number(row?.rating);
+
+      return {
+        name: typeof row?.name === "string" ? row.name.trim() : "",
+        neighborhood: typeof row?.neighborhood === "string" ? row.neighborhood.trim() : undefined,
+        rating: Number.isFinite(ratingValue) ? ratingValue : undefined,
+        priceRange: typeof row?.price_range === "string"
+          ? row.price_range.trim()
+          : typeof row?.priceRange === "string"
+            ? row.priceRange.trim()
+            : undefined,
+        cuisineCategories,
+        availableTimes: extractStructuredTimeLabels(row),
+        reservationUrl: typeof row?.reservation_url === "string" ? row.reservation_url : undefined,
+        businessUrl: typeof row?.business_url === "string" ? row.business_url : undefined,
+      };
+    })
+    .filter((row) => row.name);
 }
 
 function extractFirecrawlMarkdown(data: any): string {
@@ -1868,6 +2041,7 @@ async function verifyAvailability(
   const checked = await Promise.all(candidates.map(async (r) => {
     try {
       const isYelp = r.platform === "yelp";
+      const yelpExtractPrompt = "Extract only the visible, currently bookable reservation times from this Yelp reservation page. Exclude operating hours, opening/closing times, waitlist times, sold-out times, and anything from Location & Hours or About sections. Also extract address if visible. Return JSON with available_times (array of time strings like '6:30 PM') and address if present.";
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
@@ -1875,9 +2049,9 @@ async function verifyAvailability(
       // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
         const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
-          formats: isOT ? ["markdown", "html"] : ["markdown"],  // OT: also get HTML for more reliable slot extraction
+          formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "extract"] : ["markdown"],  // OT: also get HTML for more reliable slot extraction
           onlyMainContent: isYelp,  // only Yelp stays restricted — Resy and OT need full page for address extraction
-          ...(isYelp && { waitFor: 3000 }),  // Yelp reservation widgets need JS to render time slots
+          ...(isYelp && { waitFor: 4500, extract: { prompt: yelpExtractPrompt } }),  // Yelp reservation widgets need JS to render time slots
           ...(isOT && { waitFor: 3500 }),    // OT booking widget — HTML parser compensates if markdown misses slots
         };
 
@@ -2282,6 +2456,29 @@ async function verifyAvailability(
         return { time: formatted, minutes: totalMin };
       };
 
+      if (isYelp) {
+        for (const existingSlot of r.timeSlots || []) {
+          const parsed = parseTimeStr(existingSlot.time);
+          if (parsed && !seenTimes.has(parsed.time)) {
+            seenTimes.add(parsed.time);
+            foundTimes.push(parsed);
+          }
+        }
+
+        const extractedTimes = extractStructuredTimeLabels(jsonData);
+        for (const extractedTime of extractedTimes) {
+          const parsed = parseTimeStr(extractedTime);
+          if (parsed && !seenTimes.has(parsed.time)) {
+            seenTimes.add(parsed.time);
+            foundTimes.push(parsed);
+          }
+        }
+
+        if (foundTimes.length > 0) {
+          console.log(`  ${r.name} [yelp]: seeded ${foundTimes.length} structured times: ${foundTimes.map(t => t.time).join(", ")}`);
+        }
+      }
+
       // ── OPENTABLE-SPECIFIC: Parse "Select a time" section ──
       // Helper: parse OT slots from markdown content
       const parseOTSlots = (md: string): { time: string; minutes: number }[] => {
@@ -2581,7 +2778,55 @@ async function verifyAvailability(
         }
       }
 
-      // Yelp two-pass retry removed — slots now extracted from search results page during discovery
+      if (isYelp && foundTimes.length === 0) {
+        console.log(`  ${r.name} [yelp]: no structured slots on first pass — retrying with longer wait`);
+        try {
+          const yelpRetryAbort = new AbortController();
+          const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
+          const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${firecrawlKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              url: r.platformUrl,
+              formats: ["markdown", "extract"],
+              onlyMainContent: true,
+              waitFor: 6500,
+              extract: { prompt: yelpExtractPrompt },
+            }),
+            signal: yelpRetryAbort.signal,
+          });
+          clearTimeout(yelpRetryTimer);
+
+          if (retryResp.ok) {
+            const retryData = await retryResp.json();
+            const retryMarkdown = extractFirecrawlMarkdown(retryData);
+            const retryExtract = retryData?.data?.extract || retryData?.extract;
+            const retryTimes = extractStructuredTimeLabels(retryExtract);
+            if (retryMarkdown) bookingMarkdown = retryMarkdown;
+
+            for (const retryTime of retryTimes) {
+              const parsed = parseTimeStr(retryTime);
+              if (parsed && !seenTimes.has(parsed.time)) {
+                seenTimes.add(parsed.time);
+                foundTimes.push(parsed);
+              }
+            }
+
+            if (retryTimes.length > 0) {
+              console.log(`  ${r.name} [yelp] RETRY SUCCESS: ${retryTimes.join(", ")}`);
+            } else {
+              console.log(`  ${r.name} [yelp] RETRY: still no structured slots found`);
+            }
+          } else {
+            console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
+          }
+        } catch (retryErr: any) {
+          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
+        }
+      }
 
       // C. Filter times to those within the meal window
       let matchingTimes = foundTimes.filter((t) =>
