@@ -1472,11 +1472,16 @@ async function fetchYelpCandidates(
       sp.set("longitude", String(params.lng));
     }
 
+    console.log(`Yelp API key metadata: len=${yelpKey.length}, prefix=${yelpKey.slice(0,4)}, suffix=${yelpKey.slice(-4)}`);
     console.log(`Yelp search (reservation, city="${yelpCity}"):`, sp.toString());
     let resp = await fetch(`${YELP_API}/businesses/search?${sp}`, {
       headers: { Authorization: `Bearer ${yelpKey}` },
     });
 
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => "");
+      console.log(`Yelp API error: status=${resp.status}, body=${errBody.slice(0, 300)}`);
+    }
     let businesses = resp.ok ? (await resp.json())?.businesses || [] : [];
 
     // Broaden if few results
@@ -1486,6 +1491,10 @@ async function fetchYelpCandidates(
       const resp2 = await fetch(`${YELP_API}/businesses/search?${sp}`, {
         headers: { Authorization: `Bearer ${yelpKey}` },
       });
+      if (!resp2.ok) {
+        const errBody2 = await resp2.text().catch(() => "");
+        console.log(`Yelp API error (broadened): status=${resp2.status}, body=${errBody2.slice(0, 300)}`);
+      }
       if (resp2.ok) {
         const broaderRaw = (await resp2.json()).businesses || [];
         // For UK, don't filter by restaurant_reservation (US-only transaction type)
