@@ -1555,86 +1555,60 @@ async function fetchYelpCandidates(
       }
     }
 
-    // ─── Extract inline reservation time slots from HTML ───
-    // Yelp search results with reservation params render JS widgets showing available times
-    // per restaurant. We extract these from the HTML to get REAL slots, not operating hours.
+    // ─── Extract reservation time slots and metadata from JSON extraction ───
+    // Firecrawl's LLM-powered JSON extraction captures JS-rendered reservation widgets
+    // that don't appear in static markdown/HTML
     const aliasToSlots = new Map<string, string[]>();
+    const jsonMetadataMap = new Map<string, { rating?: number; reviewCount?: number; priceRange?: string; neighborhood?: string; slots?: string[] }>();
     
-    if (html) {
-      // Strategy 1: Find reservation time buttons/links near each restaurant listing
-      // Yelp renders time slots as buttons/links with times like "5:30 PM", "6:00 PM" etc.
-      // They appear in the context of each business listing
-      
-      // Split HTML by business listing sections — each listing links to /biz/alias
-      // Look for time patterns near each listing
-      const bizSections = html.split(/(?=href="[^"]*\/biz\/[\w-]+)/i);
-      
-      for (const section of bizSections) {
-        // Extract the alias from this section
-        const aliasMatch = section.match(/\/biz\/([\w-]+)/);
-        if (!aliasMatch) continue;
-        const alias = aliasMatch[1];
-        if (!bizAliasSet.has(alias)) continue;
+    if (jsonExtract?.restaurants && Array.isArray(jsonExtract.restaurants)) {
+      for (const jr of jsonExtract.restaurants) {
+        if (!jr.name) continue;
         
-        // Look for reservation time slots in this section
-        // Yelp shows times like "5:30 PM", "6:00 PM" as clickable buttons
-        // These appear within reservation widget containers
-        const timeMatches = section.match(/\b(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\b/g);
-        if (timeMatches && timeMatches.length > 0) {
-          // Normalize times
-          const normalizedTimes = timeMatches
-            .map(t => t.replace(/\s+/g, " ").trim().toUpperCase())
-            .filter((t, i, arr) => arr.indexOf(t) === i); // unique
-          
-          // Filter: must have at least 2 times with 15-30 min granularity to be real slots
-          // (operating hours show as just open/close like "5:00 PM" / "10:00 PM")
-          if (normalizedTimes.length >= 2) {
-            // Check for granular spacing (real slots are 15-30 min apart)
-            const minutes = normalizedTimes.map(t => {
-              const m = t.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/);
-              if (!m) return -1;
-              let h = parseInt(m[1]);
-              const min = parseInt(m[2]);
-              if (m[3] === "PM" && h !== 12) h += 12;
-              if (m[3] === "AM" && h === 12) h = 0;
-              return h * 60 + min;
-            }).filter(m => m >= 0).sort((a, b) => a - b);
-            
-            // Check if any adjacent pair is within 30 min (granular = real slots)
-            let hasGranularPair = false;
-            for (let i = 1; i < minutes.length; i++) {
-              const gap = minutes[i] - minutes[i - 1];
-              if (gap > 0 && gap <= 45) {
-                hasGranularPair = true;
-                break;
-              }
-            }
-            
-            if (hasGranularPair) {
-              aliasToSlots.set(alias, normalizedTimes);
+        // Match JSON restaurant to a biz alias by fuzzy name matching
+        let matchedAlias: string | null = null;
+        const jrNameLower = jr.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+        
+        for (const alias of bizAliasSet) {
+          const aliasName = aliasToName(alias).toLowerCase().replace(/[^a-z0-9]/g, "");
+          // Check if names are similar enough (one contains the other, or >70% overlap)
+          if (aliasName === jrNameLower || aliasName.includes(jrNameLower) || jrNameLower.includes(aliasName)) {
+            matchedAlias = alias;
+            break;
+          }
+        }
+        
+        if (!matchedAlias) {
+          // Try matching by converting jr.name to slug format
+          const jrSlug = jr.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+          for (const alias of bizAliasSet) {
+            if (alias.startsWith(jrSlug) || jrSlug.startsWith(alias.split("-").slice(0, -2).join("-"))) {
+              matchedAlias = alias;
+              break;
             }
           }
         }
-      }
-      
-      // Strategy 2: Also look for reservation links with times embedded
-      // Pattern: /reservations/alias?...time=HHMM
-      const resLinkMatches = html.matchAll(/\/reservations\/([\w-]+)\?[^"]*?time=(\d{4})/g);
-      for (const m of resLinkMatches) {
-        const alias = m[1];
-        const timeCode = m[2];
-        if (!bizAliasSet.has(alias)) continue;
         
-        const h = parseInt(timeCode.slice(0, 2));
-        const min = parseInt(timeCode.slice(2));
-        const displayH = h % 12 || 12;
-        const ampm = h >= 12 ? "PM" : "AM";
-        const formatted = `${displayH}:${min.toString().padStart(2, "0")} ${ampm}`;
-        
-        const existing = aliasToSlots.get(alias) || [];
-        if (!existing.includes(formatted)) {
-          existing.push(formatted);
-          aliasToSlots.set(alias, existing);
+        if (matchedAlias) {
+          // Store metadata
+          jsonMetadataMap.set(matchedAlias, {
+            rating: jr.rating,
+            reviewCount: jr.reviewCount,
+            priceRange: jr.priceRange,
+            neighborhood: jr.neighborhood,
+            slots: jr.reservationSlots,
+          });
+          
+          // Store slots if present and valid
+          if (jr.reservationSlots && Array.isArray(jr.reservationSlots) && jr.reservationSlots.length > 0) {
+            const normalizedSlots = jr.reservationSlots
+              .map((s: string) => s.replace(/\s+/g, " ").trim().toUpperCase())
+              .filter((s: string) => /^\d{1,2}:\d{2}\s*(AM|PM)$/.test(s));
+            
+            if (normalizedSlots.length > 0) {
+              aliasToSlots.set(matchedAlias, normalizedSlots);
+            }
+          }
         }
       }
     }
@@ -1665,10 +1639,10 @@ async function fetchYelpCandidates(
       console.log(`  ${aliasToName(alias)}: ${slots.join(", ")}`);
     }
 
-    // Extract metadata from markdown (rating, price, neighborhood, image)
+    // Build metadata map from JSON extraction + markdown fallback
     const metadataMap = new Map<string, { rating?: number; reviewCount?: number; priceRange?: string; neighborhood?: string; imageUrl?: string }>();
     
-    // Image URLs from markdown: ![Name](https://s3-media...yelpcdn.com/bphoto/...)
+    // Image URLs from markdown
     const imgPatterns = markdown.matchAll(/\[([^\]]*)\]\((https:\/\/s3-media\d*\.fl\.yelpcdn\.com\/bphoto\/[^)]+)\)/g);
     const imagesByName = new Map<string, string>();
     for (const m of imgPatterns) {
@@ -1679,22 +1653,32 @@ async function fetchYelpCandidates(
       }
     }
     
-    // Rating/price/neighborhood from markdown text near restaurant names
     for (const alias of businesses) {
       const name = aliasToName(alias);
+      const jsonMeta = jsonMetadataMap.get(alias);
       const meta: { rating?: number; reviewCount?: number; priceRange?: string; neighborhood?: string; imageUrl?: string } = {};
       
-      // Find image
+      // Prefer JSON extraction metadata, fall back to markdown parsing
+      if (jsonMeta) {
+        meta.rating = jsonMeta.rating;
+        meta.reviewCount = jsonMeta.reviewCount;
+        meta.priceRange = jsonMeta.priceRange;
+        meta.neighborhood = jsonMeta.neighborhood;
+      }
+      
+      // Image from markdown
       if (imagesByName.has(name)) {
         meta.imageUrl = imagesByName.get(name);
       }
       
-      // Rating: "4.4 (756 reviews)" pattern near the restaurant name
-      const nameEscaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const ratingMatch = markdown.match(new RegExp(nameEscaped + "[\\s\\S]{0,300}?(\\d\\.\\d)\\s*\\((\\d[\\d,]*)\\s*reviews?\\)", "i"));
-      if (ratingMatch) {
-        meta.rating = parseFloat(ratingMatch[1]);
-        meta.reviewCount = parseInt(ratingMatch[2].replace(/,/g, ""));
+      // Fallback: parse from markdown if JSON didn't have it
+      if (!meta.rating) {
+        const nameEscaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const ratingMatch = markdown.match(new RegExp(nameEscaped + "[\\s\\S]{0,300}?(\\d\\.\\d)\\s*\\((\\d[\\d,]*)\\s*reviews?\\)", "i"));
+        if (ratingMatch) {
+          meta.rating = parseFloat(ratingMatch[1]);
+          meta.reviewCount = parseInt(ratingMatch[2].replace(/,/g, ""));
+        }
       }
       
       // Price range and neighborhood: "Midtown$$" or "Buckhead$$$"
