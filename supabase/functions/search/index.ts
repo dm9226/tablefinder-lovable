@@ -159,6 +159,7 @@ interface Restaurant {
 // ─── Provider Adapter Interface ───
 interface ApiKeys {
   firecrawlKey: string;
+  aiKey: string;
   _startTime?: number;
 }
 
@@ -190,7 +191,7 @@ serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not configured");
 
-    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, _startTime: startTime };
+    const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, aiKey: LOVABLE_API_KEY, _startTime: startTime };
     const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter, yelpAdapter];
 
     // ─── Extended Search Mode ───
@@ -1408,7 +1409,7 @@ function extractNeighborhoodFromTitle(title: string | undefined, description: st
 
 
 async function fetchYelpCandidates(
-  params: SearchParams, firecrawlKey: string, amenityTerms: string[] = []
+  params: SearchParams, firecrawlKey: string, aiKey: string, amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   try {
     const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
@@ -1463,23 +1464,37 @@ async function fetchYelpCandidates(
       required: ["restaurants"],
     };
 
-    const scrapeResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${firecrawlKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: yelpSearchUrl.toString(),
-        formats: ["extract", "markdown", "links"],
-        extract: {
-          schema: yelpExtractSchema,
-          prompt: "Extract all restaurant search results from this Yelp search page. For each restaurant, get: name, star rating, review count, price range ($-$$$$), neighborhood, cuisine categories (like American, Bars, Seafood), any visible reservation time slot buttons (like '7:00 PM', '7:30 PM'), and the yelp URL. Only include actual restaurant results, not ads or sponsored content headers.",
-        },
-        waitFor: 5000,
-        onlyMainContent: true,
+    // Fire extract + screenshot scrapes in parallel to save time
+    const scrapeHeaders = {
+      Authorization: `Bearer ${firecrawlKey}`,
+      "Content-Type": "application/json",
+    };
+
+    const [scrapeResp, screenshotResp] = await Promise.all([
+      fetch(`${FIRECRAWL_API}/scrape`, {
+        method: "POST",
+        headers: scrapeHeaders,
+        body: JSON.stringify({
+          url: yelpSearchUrl.toString(),
+          formats: ["extract", "links"],
+          extract: {
+            schema: yelpExtractSchema,
+            prompt: "Extract all restaurant search results from this Yelp search page. For each restaurant, get: name, star rating, review count, price range ($-$$$$), neighborhood, cuisine categories (like American, Bars, Seafood), and the yelp URL. Only include actual restaurant results, not ads.",
+          },
+          waitFor: 5000,
+          onlyMainContent: true,
+        }),
       }),
-    });
+      fetch(`${FIRECRAWL_API}/scrape`, {
+        method: "POST",
+        headers: scrapeHeaders,
+        body: JSON.stringify({
+          url: yelpSearchUrl.toString(),
+          formats: ["screenshot"],
+          waitFor: 6000,
+        }),
+      }).catch(e => { console.log(`Yelp screenshot fetch error: ${e}`); return null; }),
+    ]);
 
     if (!scrapeResp.ok) {
       const errBody = await scrapeResp.text().catch(() => "");
@@ -1489,11 +1504,10 @@ async function fetchYelpCandidates(
 
     const scrapeData = await scrapeResp.json();
     const extractData = scrapeData?.data?.extract || scrapeData?.extract;
-    const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
 
     console.log(`Yelp extract response: ${JSON.stringify(extractData).slice(0, 1000)}`);
-    console.log(`Yelp markdown: ${markdown.length} chars, links: ${links.length}`);
+    console.log(`Yelp links: ${links.length}`);
 
     // Parse extracted restaurants
     const extracted = coerceYelpExtractedRestaurants(extractData);
@@ -1512,28 +1526,95 @@ async function fetchYelpCandidates(
       }
     }
 
-    // Parse time slots from markdown as fallback for each restaurant
-    // Yelp search results show times near restaurant names like "7:00 PM  7:30 PM  8:00 PM"
-    const markdownTimesMap = new Map<string, string[]>();
-    for (const rest of extracted) {
-      // Find the restaurant's section in markdown by name
-      const nameEscaped = rest.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const sectionRegex = new RegExp(`${nameEscaped}[\\s\\S]{0,1000}`, 'i');
-      const sectionMatch = markdown.match(sectionRegex);
-      if (sectionMatch) {
-        // Only look at text before the NEXT restaurant (crude: first 600 chars)
-        const section = sectionMatch[0].slice(rest.name.length, 600);
-        const timeMatches = section.match(/\d{1,2}:\d{2}\s*(?:AM|PM)/gi);
-        if (timeMatches && timeMatches.length > 0) {
-          const normalized = timeMatches.map((t: string) => normalizeExtractedTimeLabel(t)).filter(Boolean) as string[];
-          const unique = [...new Set(normalized)];
-          if (unique.length > 0 && unique.length <= 10) {
-            markdownTimesMap.set(rest.name, unique);
+    // ─── AI Vision for time slots from parallel screenshot ───
+    // The extract format misses JS-rendered reservation time buttons.
+    // Use the screenshot (fetched in parallel above) + AI vision to read actual slot buttons.
+    let visionTimesMap = new Map<string, string[]>();
+    try {
+      if (screenshotResp && screenshotResp.ok) {
+        const ssData = await screenshotResp.json();
+        const screenshotBase64 = ssData?.data?.screenshot || ssData?.screenshot;
+        if (screenshotBase64) {
+          // Firecrawl may return a URL or base64 — handle both
+          const isUrl = typeof screenshotBase64 === "string" && screenshotBase64.startsWith("http");
+          const imageUrl = isUrl
+            ? screenshotBase64
+            : screenshotBase64.startsWith("data:")
+              ? screenshotBase64
+              : `data:image/png;base64,${screenshotBase64}`;
+          console.log(`Yelp screenshot captured (${isUrl ? 'URL' : 'base64'}), sending to AI vision`);
+          const restaurantNames = extracted.map(r => r.name);
+          const visionResp = await fetch(AI_GATEWAY, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${aiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "google/gemini-2.5-flash",
+              messages: [{
+                role: "user",
+                content: [
+                  {
+                    type: "image_url",
+                    image_url: { url: imageUrl },
+                  },
+                  {
+                    type: "text",
+                    text: `This is a screenshot of a Yelp search results page showing restaurants with reservation time slot buttons. For each restaurant, extract the clickable reservation time buttons (like "6:30 pm", "6:45 pm", "7:00 pm").
+
+Return ONLY valid JSON in this exact format, no other text:
+{"results": [{"name": "Restaurant Name", "times": ["6:30 PM", "6:45 PM", "7:00 PM"]}, ...]}
+
+These are the restaurant names to look for: ${JSON.stringify(restaurantNames)}
+
+Important: Only extract times that appear as clickable reservation buttons, NOT "Open until" or operating hours text.`,
+                  },
+                ],
+              }],
+              max_tokens: 1000,
+              temperature: 0,
+            }),
+          });
+          if (visionResp.ok) {
+            const visionData = await visionResp.json();
+            const visionText = visionData?.choices?.[0]?.message?.content || "";
+            const jsonMatch = visionText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              try {
+                const parsed = JSON.parse(jsonMatch[0]);
+                const visionResults = parsed.results || parsed.restaurants || [];
+                for (const r of visionResults) {
+                  if (r.name && Array.isArray(r.times) && r.times.length > 0) {
+                    const normalized = r.times
+                      .map((t: string) => normalizeExtractedTimeLabel(t))
+                      .filter(Boolean) as string[];
+                    if (normalized.length > 0) {
+                      const bestMatch = extracted.find(e =>
+                        e.name.toLowerCase() === r.name.toLowerCase() ||
+                        e.name.toLowerCase().includes(r.name.toLowerCase()) ||
+                        r.name.toLowerCase().includes(e.name.toLowerCase())
+                      );
+                      if (bestMatch) {
+                        visionTimesMap.set(bestMatch.name, normalized);
+                      }
+                    }
+                  }
+                }
+                console.log(`Yelp vision extracted times for ${visionTimesMap.size}/${extracted.length} restaurants`);
+              } catch (e) {
+                console.log(`Yelp vision JSON parse error: ${e}`);
+              }
+            } else {
+              console.log(`Yelp vision response had no JSON: ${visionText.slice(0, 200)}`);
+            }
+          } else {
+            console.log(`Yelp vision API error: ${visionResp.status}`);
           }
         }
+      } else {
+        console.log(`Yelp screenshot not available (resp null or error)`);
       }
+    } catch (e) {
+      console.log(`Yelp vision error: ${e}`);
     }
-    console.log(`Yelp markdown time fallback: found times for ${markdownTimesMap.size}/${extracted.length} restaurants`);
 
     // Match extracted restaurants to URLs
     const results: Restaurant[] = [];
@@ -1577,12 +1658,13 @@ async function fetchYelpCandidates(
       bizUrl = bizUrl || bizLinkMap.get(alias) || null;
       const bestUrl = reservationUrl || (bizUrl ? bizUrl.replace("/biz/", "/reservations/") : `https://www.yelp.com/reservations/${alias}`);
 
-      // Merge time slots: extract data + markdown fallback
+      // Merge time slots: vision (primary) > extract (fallback)
+      const visionTimes = visionTimesMap.get(rest.name) || [];
       const extractTimes = rest.availableTimes
         .map(t => normalizeExtractedTimeLabel(t))
         .filter(Boolean) as string[];
-      const mdTimes = markdownTimesMap.get(rest.name) || [];
-      const allTimes = [...new Set([...extractTimes, ...mdTimes])];
+      // Prefer vision times if available; extract times are often wrong (operating hours)
+      const allTimes = visionTimes.length > 0 ? visionTimes : extractTimes;
 
       results.push({
         id: `yelp-${alias}`,
@@ -3013,7 +3095,7 @@ const opentableAdapter: ProviderAdapter = {
 const yelpAdapter: ProviderAdapter = {
   platform: "yelp",
   async discover(params, keys, amenityTerms) {
-    return fetchYelpCandidates(params, keys.firecrawlKey, amenityTerms);
+    return fetchYelpCandidates(params, keys.firecrawlKey, keys.aiKey, amenityTerms);
   },
   async verify(candidates, params, keys, amenityTerms) {
     // ALL Yelp candidates from the search page are pre-verified:
