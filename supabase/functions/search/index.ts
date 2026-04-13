@@ -1666,7 +1666,7 @@ function parseYelpMarkdownResults(markdown: string): Array<{
   return results;
 }
 
-
+function buildYelpAvailabilityUrl(baseUrl: string, params: SearchParams): string {
   try {
     const u = new URL(baseUrl);
     u.searchParams.set("covers", String(params.partySize));
