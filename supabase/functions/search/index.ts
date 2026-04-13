@@ -1947,6 +1947,14 @@ async function verifyAvailability(
           console.log(`✗ ${r.name} [yelp] — redirected away from /reservations/ to: ${scrapedSourceUrl}, skipping`);
           return null;
         }
+        
+        // Content-based validation: check for actual Yelp reservation widget markers.
+        // Pages without these are just business pages that lack a native booking widget.
+        const hasReservationWidget = /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|book\s+a\s+table|party\s+size\s*[:\d]|seats?\s+available|available\s+times?|make\s+a\s+reservation)\b/i.test(markdown);
+        if (!hasReservationWidget) {
+          console.log(`✗ ${r.name} [yelp] — no reservation widget detected on page, skipping`);
+          return null;
+        }
       }
 
       // Extract structured data from Firecrawl JSON extraction (if present)
