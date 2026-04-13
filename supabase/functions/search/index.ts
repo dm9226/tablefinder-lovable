@@ -1444,7 +1444,7 @@ async function fetchYelpCandidates(
       ? `${yelpCity}, UK`
       : `${yelpCity}, ${params.state}`;
 
-    // Build Yelp search URL with reservation filter
+    // Build Yelp search URL with reservation filter AND reservation params
     const searchTerm = `${yelpCuisine}${amenitySuffix} restaurants`.trim();
     const yelpSearchUrl = new URL("https://www.yelp.com/search");
     yelpSearchUrl.searchParams.set("find_desc", searchTerm);
@@ -1452,6 +1452,10 @@ async function fetchYelpCandidates(
     if (params.country !== "gb") {
       yelpSearchUrl.searchParams.set("attrs", "reservation");
     }
+    // Add reservation date/time/party so Yelp filters to restaurants with actual availability
+    yelpSearchUrl.searchParams.set("reservation_date", params.date);
+    yelpSearchUrl.searchParams.set("reservation_time", params.time.replace(":", ""));
+    yelpSearchUrl.searchParams.set("reservation_covers", String(params.partySize));
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
@@ -1935,133 +1939,25 @@ async function verifyAvailability(
         return null;
       }
 
-      // ── YELP: Verify native Yelp reservations OR cross-platform conversion ──
-      // If the restaurant doesn't use Yelp's native reservation system, try to find
-      // OpenTable or Resy links on the page and convert the candidate.
+      // ── YELP: Validate reservation page ──
+      // Since discovery uses Yelp's reservation search (attrs=reservation + date/time/covers),
+      // these restaurants are pre-filtered by Yelp to support reservations.
+      // Only reject if the page clearly redirected away from /reservations/ to a non-booking page.
       if (isYelp) {
         const scrapedSourceUrl = data?.data?.metadata?.sourceURL || data?.metadata?.sourceURL || "";
-        const redirectedAway = scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/");
-        const hasYelpWidget = /select\s+a\s+date|select\s+a\s+time|party\s+size|find\s+a\s+table|request\s+a\s+reservation/i.test(markdown);
-        const usesExternalPlatform = /opentable\.com|resy\.com|powered\s+by\s+opentable|powered\s+by\s+resy|book\s+on\s+opentable|reserve\s+on\s+opentable/i.test(markdown);
+        const redirectedAway = scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/") && !scrapedSourceUrl.includes("/biz/");
         
-        if (redirectedAway || usesExternalPlatform || !hasYelpWidget) {
-          // ── Cross-platform conversion: extract OT/Resy links from the Yelp page ──
-          const allLinks: string[] = data?.data?.links || data?.links || [];
-          const allText = markdown + " " + allLinks.join(" ");
-          
-          // Try OpenTable first (more common)
-          const otMatch = allText.match(/https?:\/\/(?:www\.)?opentable\.com\/r\/([^\s"'<>\])?#]+)/i)
-            || allText.match(/https?:\/\/(?:www\.)?opentable\.co\.uk\/r\/([^\s"'<>\])?#]+)/i);
-          if (otMatch) {
-            const otUrl = otMatch[0].split(/[?#]/)[0]; // strip params
-            const otWithParams = addOTParams(otUrl, params);
-            console.log(`↻ ${r.name} [yelp→opentable] — converting via link: ${otUrl}`);
-            r.platform = "opentable";
-            r.platformUrl = otWithParams;
-            r.id = `ot-xplat-${r.name.toLowerCase().replace(/\s+/g, "-")}`;
-            // Don't return null — continue verification with the new platform URL below
-          } else {
-            // Try Resy
-            const resyMatch = allText.match(/https?:\/\/(?:www\.)?resy\.com\/cities\/([^\s"'<>\])?#]+\/venues\/[^\s"'<>\])?#]+)/i);
-            if (resyMatch) {
-              const resyUrl = `https://resy.com/cities/${resyMatch[1].split(/[?#]/)[0]}`;
-              const resyWithParams = addResyParams(resyUrl, params);
-              console.log(`↻ ${r.name} [yelp→resy] — converting via link: ${resyUrl}`);
-              r.platform = "resy";
-              r.platformUrl = resyWithParams;
-              r.id = `resy-xplat-${r.name.toLowerCase().replace(/\s+/g, "-")}`;
-            } else {
-              // No external booking link found — try name-based lookup
-              // Construct potential OT/Resy URLs from restaurant name
-              const nameSlug = r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-              const citySlug = (params.city || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-              const stateSlug = (params.state || "").toLowerCase();
-              
-              // Try OpenTable name-based URL
-              const otGuessUrl = `https://www.opentable.com/r/${nameSlug}-${citySlug}-${stateSlug}`;
-              const otGuessWithParams = addOTParams(otGuessUrl, params);
-              console.log(`↻ ${r.name} [yelp→opentable?] — trying name-based lookup: ${otGuessUrl}`);
-              r.platform = "opentable";
-              r.platformUrl = otGuessWithParams;
-              r.id = `ot-xplat-${nameSlug}`;
-              r._yelpCrossplatformGuess = true;
-            }
-          }
-          
-          // Re-scrape the new platform URL for verification
-          const xplatAbort = new AbortController();
-          const xplatTimer = setTimeout(() => xplatAbort.abort(), 20_000);
-          try {
-            const xplatResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${firecrawlKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                url: r.platformUrl,
-                formats: r.platform === "opentable" ? ["markdown", "html"] : ["markdown"],
-                onlyMainContent: false,
-                ...(r.platform === "opentable" && { waitFor: 3500 }),
-              }),
-              signal: xplatAbort.signal,
-            });
-            clearTimeout(xplatTimer);
-            
-            if (!xplatResp.ok) {
-              const errBody2 = await xplatResp.text().catch(() => "");
-              // If name-based guess returned 404, this restaurant isn't on OT/Resy
-              console.log(`✗ ${r.name} [yelp→${r.platform}] — scrape failed (${xplatResp.status}), dropping`);
-              return null;
-            }
-            
-            const xplatData = await xplatResp.json();
-            const xplatMarkdown = extractFirecrawlMarkdown(xplatData);
-            const xplatHtml = xplatData?.data?.html || xplatData?.html || "";
-            const xplatMeta = xplatData?.data?.metadata || xplatData?.metadata;
-            
-            if (!xplatMarkdown) {
-              console.log(`✗ ${r.name} [yelp→${r.platform}] — no content from new URL, dropping`);
-              return null;
-            }
-            
-            // For guessed URLs, verify we actually landed on a valid restaurant page
-            if (r._yelpCrossplatformGuess) {
-              const finalUrl = xplatMeta?.sourceURL || "";
-              const is404Page = /not found|page doesn't exist|error 404|we can't find/i.test(xplatMarkdown.slice(0, 500));
-              if (is404Page || xplatMarkdown.length < 200) {
-                console.log(`✗ ${r.name} [yelp→${r.platform}] — name-based guess was invalid, dropping`);
-                return null;
-              }
-              console.log(`✓ ${r.name} [yelp→${r.platform}] — name-based guess found valid page`);
-            }
-            
-            // Update the name from the new platform's metadata
-            const xplatTitle = xplatMeta?.title || xplatMeta?.["og:title"];
-            if (xplatTitle) {
-              r.name = cleanName(xplatTitle, r.platformUrl, r.platform);
-            }
-            
-            // Replace markdown/data references for downstream slot extraction
-            // We use Object.assign to inject into the closure's `data` variable
-            Object.assign(data, xplatData);
-            // Also need to update the markdown variable for slot extraction below
-            // Since markdown is a const, we need to use a mutable wrapper
-            (r as any)._xplatMarkdown = xplatMarkdown;
-            (r as any)._xplatHtml = xplatHtml;
-            (r as any)._xplatMeta = xplatMeta;
-          } catch (xplatErr: any) {
-            clearTimeout(xplatTimer);
-            console.log(`✗ ${r.name} [yelp→${r.platform}] — cross-platform scrape failed: ${xplatErr.name === "AbortError" ? "timeout" : xplatErr}`);
-            return null;
-          }
+        if (redirectedAway) {
+          console.log(`✗ ${r.name} [yelp] — redirected to non-reservation page: ${scrapedSourceUrl}, skipping`);
+          return null;
+        }
+        
+        // If redirected to /biz/ page (no native Yelp reservation widget), 
+        // still try — the page may have reservation info or time slots in the content
+        if (scrapedSourceUrl && scrapedSourceUrl.includes("/biz/") && !scrapedSourceUrl.includes("/reservations/")) {
+          console.log(`  ${r.name} [yelp] — landed on /biz/ page, checking for reservation content...`);
         }
       }
-      
-      // Use cross-platform markdown if available (from Yelp conversion)
-      const effectiveMarkdown = (r as any)._xplatMarkdown || markdown;
-      const effectiveHtml = (r as any)._xplatHtml || "";
-      const effectiveMeta = (r as any)._xplatMeta || (data?.data?.metadata || data?.metadata);
 
       // Extract structured data from Firecrawl JSON extraction (if present)
       const jsonData = data?.data?.extract || data?.extract;
@@ -2091,7 +1987,7 @@ async function verifyAvailability(
           // - Collapse line breaks between street and city/state lines
           // - Replace bullets/middots with spaces
           // - Remove duplicate whitespace
-          const normalizedMd = effectiveMarkdown
+          const normalizedMd = markdown
             .replace(/·/g, " ")           // middots
             .replace(/•/g, " ")           // bullets
             .replace(/\|/g, " ")          // pipes
@@ -2180,7 +2076,7 @@ async function verifyAvailability(
         }
       }
 
-      const lower = effectiveMarkdown.toLowerCase();
+      const lower = markdown.toLowerCase();
 
       // Check for "no availability" signals
       if (NO_AVAILABILITY_SIGNALS.some((signal) => lower.includes(signal))) {
@@ -2302,7 +2198,7 @@ async function verifyAvailability(
 
       // RELEVANCE CHECK: If user searched for an amenity (rooftop, patio, etc.),
       // verify the restaurant page actually mentions it. Zero extra latency — uses already-scraped markdown.
-      if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(effectiveMarkdown, amenityTerms)) {
+      if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(markdown, amenityTerms)) {
         console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${amenityTerms.join(", ")}`);
         return null;
       }
@@ -2311,7 +2207,7 @@ async function verifyAvailability(
 
       // ── Strip non-booking sections from markdown for regex fallback ──
       // Remove "Need to Know", "Hours of Operation", "About", etc. sections
-      let bookingMarkdown = effectiveMarkdown;
+      let bookingMarkdown = markdown;
       const sectionCutMarkers = [
         "need to know", "hours of operation", "about the restaurant",
         "about this restaurant", "cross street", "additional info", "special features",
@@ -2450,18 +2346,14 @@ async function verifyAvailability(
         return slots;
       };
       
-      // For cross-platform converted candidates, use the new platform's identity
-      const effectiveIsOT = r.platform === "opentable";
-      const effectiveIsResy = r.platform === "resy";
-      
-      if (effectiveIsOT) {
+      if (isOT) {
         // First pass: parse OT slots from markdown
-        foundTimes = parseOTSlots(effectiveMarkdown);
+        foundTimes = parseOTSlots(markdown);
         // Populate seenTimes from markdown slots BEFORE HTML merge to avoid dupes
         foundTimes.forEach(t => seenTimes.add(t.time));
         
         // Also try HTML parsing for more complete extraction
-        const scrapeHtml = effectiveHtml || data?.data?.html || data?.html || "";
+        const scrapeHtml = data?.data?.html || data?.html || "";
         if (scrapeHtml) {
           const htmlSlots = parseOTSlotsFromHTML(scrapeHtml);
           for (const slot of htmlSlots) {
@@ -2472,7 +2364,7 @@ async function verifyAvailability(
           }
         }
         
-        const hadSelectSection = effectiveMarkdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
+        const hadSelectSection = markdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
         
         if (foundTimes.length > 0) {
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
@@ -2569,11 +2461,11 @@ async function verifyAvailability(
       }
 
       // ── RESY-SPECIFIC: Parse meal section from markdown directly ──
-      if (effectiveIsResy) {
+      if (isResy) {
         const mealSectionRegex = new RegExp(
           `## (?:${mealLabel}|all day)([\\s\\S]*?)(?=##|$)`, "i"
         );
-        const mealMatch = effectiveMarkdown.match(mealSectionRegex);
+        const mealMatch = markdown.match(mealSectionRegex);
         
         if (mealMatch) {
           const mealSection = mealMatch[1];
@@ -2601,7 +2493,7 @@ async function verifyAvailability(
             return null;
           }
         } else {
-          if (/\bnotify\b/i.test(effectiveMarkdown)) {
+          if (/\bnotify\b/i.test(markdown)) {
             console.log(`✗ ${r.name} [resy] — no "${mealLabel}" section and Notify detected`);
             return null;
           }
@@ -2613,11 +2505,12 @@ async function verifyAvailability(
       const timeSlotRegex24 = /\b((?:[01]?\d|2[0-3]):([0-5]\d))\b/g;
       const hasBookingAction = /\b(book|reserve|select|notify)\b/i.test(bookingMarkdown);
       // Tightened: require actual Yelp widget markers, not just the generic word "reservations"
-      const hasYelpAvailabilityMarker = isYelp && !effectiveIsOT && !effectiveIsResy && /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|request\s+a\s+reservation)\b/i.test(effectiveMarkdown);
+      // Yelp reservation markers — relaxed since discovery uses Yelp's reservation search filter
+      const hasYelpAvailabilityMarker = isYelp && /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|request\s+a\s+reservation|book\s+a\s+table|takes?\s+reservations?|make\s+a\s+reservation|party\s+size|reservation|available\s+times?)\b/i.test(markdown);
 
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
       // ── STRATEGY 2: Regex on cleaned booking markdown (non-Resy only) ──
-      if (!effectiveIsResy && foundTimes.length === 0) {
+      if (!isResy && foundTimes.length === 0) {
         let match12;
         while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
           // Context check: skip times near "notify", "sold out", "waitlist"
@@ -2672,7 +2565,7 @@ async function verifyAvailability(
       // ── YELP TWO-PASS RETRY: if first scrape (waitFor:3000) found no slots, retry with waitFor:5000 ──
       // Skip retry if we're past 80s elapsed to prevent overall timeout
       const yelpRetryElapsed = globalStartTime ? Date.now() - globalStartTime : 0;
-      if (isYelp && !effectiveIsOT && !effectiveIsResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
+      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
         console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms (elapsed: ${yelpRetryElapsed}ms)`);
         const yelpRetryAbort = new AbortController();
         const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
@@ -2734,7 +2627,7 @@ async function verifyAvailability(
           clearTimeout(yelpRetryTimer);
           console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
         }
-      } else if (isYelp && !effectiveIsOT && !effectiveIsResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
+      } else if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
         console.log(`  ${r.name} [yelp]: skipping retry — ${yelpRetryElapsed}ms elapsed (>80s budget)`);
       }
 
@@ -2770,7 +2663,7 @@ async function verifyAvailability(
 
       // OpenTable: Do NOT fabricate fallback times from booking markers.
       // If real slots exist but are outside window, or parser found nothing, reject.
-      if (effectiveIsOT && foundTimes.length === 0) {
+      if (isOT && foundTimes.length === 0) {
         console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback)`);
         return null;
       }
