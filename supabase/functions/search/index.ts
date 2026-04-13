@@ -282,9 +282,6 @@ serve(async (req) => {
     console.log("Parsed params:", JSON.stringify(params));
 
     // Step 2: Discover candidates from all platforms via adapters
-    if (!YELP_API_KEY) {
-      console.warn("YELP_API_KEY missing — skipping Yelp");
-    }
 
     // Detect amenity/experience keywords BEFORE discovery so we can add them to search queries
     const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
