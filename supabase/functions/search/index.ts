@@ -2010,9 +2010,47 @@ async function verifyAvailability(
     try {
       const isYelp = r.platform === "yelp";
 
+      // ── YELP PRE-VERIFIED: slots already extracted from search results page ──
+      // Skip individual page scrape — just apply time window filtering
+      if (isYelp && (r as any)._yelpSearchPageVerified && r.timeSlots.length > 0) {
+        // Parse and filter slots through the same time window logic
+        const requestedMinutes = parseTimeToMinutes(params.time);
+        const { windowStart, windowEnd, mealLabel } = getMealWindow(requestedMinutes);
+        
+        const parsedSlots = r.timeSlots.map(s => {
+          const m = s.time.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+          if (!m) return null;
+          let h = parseInt(m[1]);
+          const min = parseInt(m[2]);
+          const ampm = m[3].toUpperCase();
+          if (ampm === "PM" && h !== 12) h += 12;
+          if (ampm === "AM" && h === 12) h = 0;
+          return { time: s.time, minutes: h * 60 + min };
+        }).filter(Boolean) as { time: string; minutes: number }[];
+        
+        let matchingTimes = parsedSlots.filter(t => t.minutes >= windowStart && t.minutes <= windowEnd);
+        
+        if (matchingTimes.length === 0) {
+          console.log(`✗ ${r.name} [yelp] — search page slots (${r.timeSlots.map(s=>s.time).join(", ")}) outside ${mealLabel} window`);
+          return null;
+        }
+        
+        // Sort by proximity to requested time, keep closest 5
+        matchingTimes.sort((a, b) => Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes));
+        matchingTimes = matchingTimes.slice(0, 5);
+        matchingTimes.sort((a, b) => a.minutes - b.minutes);
+        
+        r.timeSlots = matchingTimes.map(t => ({ time: t.time }));
+        // Clean up internal flags
+        delete (r as any)._yelpSearchPageVerified;
+        delete (r as any)._yelpCategories;
+        
+        console.log(`✓ Verified ${r.name} [yelp] (search page) — ${matchingTimes.length} ${mealLabel} slots: ${matchingTimes.map(t => t.time).join(", ")}`);
+        return r;
+      }
+
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-      // Yelp: onlyMainContent=true (no addresses available anyway)
       // Resy + OT: onlyMainContent=false to capture address/location sections for geocoding
       // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
         const scrapePayload: Record<string, unknown> = {
