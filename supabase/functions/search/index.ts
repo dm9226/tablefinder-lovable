@@ -1464,23 +1464,37 @@ async function fetchYelpCandidates(
       required: ["restaurants"],
     };
 
-    const scrapeResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${firecrawlKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: yelpSearchUrl.toString(),
-        formats: ["extract", "markdown", "links"],
-        extract: {
-          schema: yelpExtractSchema,
-          prompt: "Extract all restaurant search results from this Yelp search page. For each restaurant, get: name, star rating, review count, price range ($-$$$$), neighborhood, cuisine categories (like American, Bars, Seafood), any visible reservation time slot buttons (like '7:00 PM', '7:30 PM'), and the yelp URL. Only include actual restaurant results, not ads or sponsored content headers.",
-        },
-        waitFor: 5000,
-        onlyMainContent: true,
+    // Fire extract + screenshot scrapes in parallel to save time
+    const scrapeHeaders = {
+      Authorization: `Bearer ${firecrawlKey}`,
+      "Content-Type": "application/json",
+    };
+
+    const [scrapeResp, screenshotResp] = await Promise.all([
+      fetch(`${FIRECRAWL_API}/scrape`, {
+        method: "POST",
+        headers: scrapeHeaders,
+        body: JSON.stringify({
+          url: yelpSearchUrl.toString(),
+          formats: ["extract", "links"],
+          extract: {
+            schema: yelpExtractSchema,
+            prompt: "Extract all restaurant search results from this Yelp search page. For each restaurant, get: name, star rating, review count, price range ($-$$$$), neighborhood, cuisine categories (like American, Bars, Seafood), and the yelp URL. Only include actual restaurant results, not ads.",
+          },
+          waitFor: 5000,
+          onlyMainContent: true,
+        }),
       }),
-    });
+      fetch(`${FIRECRAWL_API}/scrape`, {
+        method: "POST",
+        headers: scrapeHeaders,
+        body: JSON.stringify({
+          url: yelpSearchUrl.toString(),
+          formats: ["screenshot"],
+          waitFor: 6000,
+        }),
+      }).catch(e => { console.log(`Yelp screenshot fetch error: ${e}`); return null; }),
+    ]);
 
     if (!scrapeResp.ok) {
       const errBody = await scrapeResp.text().catch(() => "");
@@ -1490,11 +1504,10 @@ async function fetchYelpCandidates(
 
     const scrapeData = await scrapeResp.json();
     const extractData = scrapeData?.data?.extract || scrapeData?.extract;
-    const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
 
     console.log(`Yelp extract response: ${JSON.stringify(extractData).slice(0, 1000)}`);
-    console.log(`Yelp markdown: ${markdown.length} chars, links: ${links.length}`);
+    console.log(`Yelp links: ${links.length}`);
 
     // Parse extracted restaurants
     const extracted = coerceYelpExtractedRestaurants(extractData);
