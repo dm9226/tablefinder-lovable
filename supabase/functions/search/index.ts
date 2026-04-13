@@ -1439,32 +1439,7 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Scrape Yelp search results via Firecrawl using extract to get structured data directly
-    const yelpExtractSchema = {
-      type: "object",
-      properties: {
-        restaurants: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              name: { type: "string", description: "Restaurant name" },
-              rating: { type: "number", description: "Star rating e.g. 4.5" },
-              review_count: { type: "number", description: "Number of reviews" },
-              price_range: { type: "string", description: "Price range like $, $$, $$$, $$$$" },
-              neighborhood: { type: "string", description: "Neighborhood or area name" },
-              cuisine_categories: { type: "array", items: { type: "string" }, description: "Cuisine categories like American, Italian, Seafood" },
-              available_times: { type: "array", items: { type: "string" }, description: "Available reservation time slots shown (e.g. '7:00 PM', '7:30 PM')" },
-              yelp_url: { type: "string", description: "The yelp.com/biz/ or yelp.com/reservations/ URL for this restaurant" },
-            },
-            required: ["name"],
-          },
-        },
-      },
-      required: ["restaurants"],
-    };
-
-    // Single scrape with extract + markdown + links, scrolling past sponsored results
+    // Scrape Yelp search results via Firecrawl — markdown + links only (no extract to avoid timeouts)
     const scrapeHeaders = {
       Authorization: `Bearer ${firecrawlKey}`,
       "Content-Type": "application/json",
@@ -1475,13 +1450,9 @@ async function fetchYelpCandidates(
       headers: scrapeHeaders,
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: ["extract", "links", "markdown"],
-        extract: {
-          schema: yelpExtractSchema,
-          prompt: "Extract all restaurant search results from this Yelp search page. SKIP any results marked 'Sponsored' or 'Ad'. For each organic restaurant, get: name, star rating, review count, price range, neighborhood, cuisine categories, available reservation time slots shown as clickable buttons (like '6:30 PM', '7:00 PM') — these are NOT operating hours — and the yelp URL.",
-        },
-        waitFor: 5000,
-        timeout: 25000,
+        formats: ["markdown", "links"],
+        waitFor: 4000,
+        timeout: 20000,
       }),
     });
 
@@ -1492,33 +1463,21 @@ async function fetchYelpCandidates(
     }
 
     const scrapeData = await scrapeResp.json();
-    const extractData = scrapeData?.data?.extract || scrapeData?.extract;
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
     const markdown: string = scrapeData?.data?.markdown || scrapeData?.markdown || "";
 
-    console.log(`Yelp extract response: ${JSON.stringify(extractData).slice(0, 1000)}`);
-    console.log(`Yelp links: ${links.length}, markdown length: ${markdown.length}`);
+    console.log(`Yelp scrape: links=${links.length}, markdown=${markdown.length} chars`);
 
-    // Parse extracted restaurants
-    const extracted = coerceYelpExtractedRestaurants(extractData);
-    console.log(`Yelp extract parsed ${extracted.length} restaurants`);
+    // Parse restaurants from markdown using regex patterns
+    // Yelp markdown typically has restaurant names as bold or header text followed by ratings, categories, and time slots
+    const extracted = parseYelpMarkdownResults(markdown);
+    console.log(`Yelp markdown parsed ${extracted.length} restaurants`);
 
-    // Build markdown-based time slot map by parsing time patterns near restaurant names
+    // Build markdown-based time slot map (already done during parsing)
     const markdownTimesMap = new Map<string, string[]>();
-    if (markdown) {
-      // Match patterns like "6:30 PM" near restaurant names in the markdown
-      const timePattern = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
-      // Split markdown by restaurant-like headers and extract times from each section
-      for (const rest of extracted) {
-        const nameEscaped = rest.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const sectionRegex = new RegExp(`${nameEscaped}[\\s\\S]*?(?=\\n#{1,3}\\s|$)`, "i");
-        const section = markdown.match(sectionRegex)?.[0] || "";
-        const times = (section.match(timePattern) || [])
-          .map(t => normalizeExtractedTimeLabel(t))
-          .filter(Boolean) as string[];
-        if (times.length > 0) {
-          markdownTimesMap.set(rest.name, times);
-        }
+    for (const rest of extracted) {
+      if (rest.availableTimes.length > 0) {
+        markdownTimesMap.set(rest.name, rest.availableTimes);
       }
     }
 
