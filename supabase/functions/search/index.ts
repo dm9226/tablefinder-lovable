@@ -1515,32 +1515,7 @@ async function fetchYelpCandidates(
       }
     }
 
-    // Also grab markdown for time slot parsing fallback
-    const markdown: string = scrapeData?.data?.markdown || scrapeData?.markdown || "";
-    console.log(`Yelp markdown length: ${markdown.length}, first 500: ${markdown.slice(0, 500)}`);
-
-    // Parse markdown for time slots near restaurant names
-    // Yelp renders time buttons like "6:30 PM  6:45 PM  7:00 PM" near restaurant names
-    const markdownTimesMap = new Map<string, string[]>();
-    if (markdown.length > 0) {
-      for (const rest of extracted) {
-        const nameEsc = rest.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Look for the restaurant name followed by time patterns within ~500 chars
-        const nameIdx = markdown.indexOf(rest.name);
-        if (nameIdx >= 0) {
-          const chunk = markdown.slice(nameIdx, nameIdx + 800);
-          const timeMatches = chunk.match(/\d{1,2}:\d{2}\s*(?:AM|PM)/gi) || [];
-          const normalized = timeMatches
-            .map(t => normalizeExtractedTimeLabel(t))
-            .filter(Boolean) as string[];
-          // Filter out times that look like operating hours (e.g. only 1 time with no :30/:15 granularity)
-          if (normalized.length >= 2) {
-            markdownTimesMap.set(rest.name, normalized);
-          }
-        }
-      }
-      console.log(`Yelp markdown time extraction: found times for ${markdownTimesMap.size} restaurants`);
-    }
+    console.log(`Yelp markdown length: ${markdown.length}`);
 
     // Match extracted restaurants to URLs
     const results: Restaurant[] = [];
