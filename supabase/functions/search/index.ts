@@ -1939,133 +1939,25 @@ async function verifyAvailability(
         return null;
       }
 
-      // ── YELP: Verify native Yelp reservations OR cross-platform conversion ──
-      // If the restaurant doesn't use Yelp's native reservation system, try to find
-      // OpenTable or Resy links on the page and convert the candidate.
+      // ── YELP: Validate reservation page ──
+      // Since discovery uses Yelp's reservation search (attrs=reservation + date/time/covers),
+      // these restaurants are pre-filtered by Yelp to support reservations.
+      // Only reject if the page clearly redirected away from /reservations/ to a non-booking page.
       if (isYelp) {
         const scrapedSourceUrl = data?.data?.metadata?.sourceURL || data?.metadata?.sourceURL || "";
-        const redirectedAway = scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/");
-        const hasYelpWidget = /select\s+a\s+date|select\s+a\s+time|party\s+size|find\s+a\s+table|request\s+a\s+reservation/i.test(markdown);
-        const usesExternalPlatform = /opentable\.com|resy\.com|powered\s+by\s+opentable|powered\s+by\s+resy|book\s+on\s+opentable|reserve\s+on\s+opentable/i.test(markdown);
+        const redirectedAway = scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/") && !scrapedSourceUrl.includes("/biz/");
         
-        if (redirectedAway || usesExternalPlatform || !hasYelpWidget) {
-          // ── Cross-platform conversion: extract OT/Resy links from the Yelp page ──
-          const allLinks: string[] = data?.data?.links || data?.links || [];
-          const allText = markdown + " " + allLinks.join(" ");
-          
-          // Try OpenTable first (more common)
-          const otMatch = allText.match(/https?:\/\/(?:www\.)?opentable\.com\/r\/([^\s"'<>\])?#]+)/i)
-            || allText.match(/https?:\/\/(?:www\.)?opentable\.co\.uk\/r\/([^\s"'<>\])?#]+)/i);
-          if (otMatch) {
-            const otUrl = otMatch[0].split(/[?#]/)[0]; // strip params
-            const otWithParams = addOTParams(otUrl, params);
-            console.log(`↻ ${r.name} [yelp→opentable] — converting via link: ${otUrl}`);
-            r.platform = "opentable";
-            r.platformUrl = otWithParams;
-            r.id = `ot-xplat-${r.name.toLowerCase().replace(/\s+/g, "-")}`;
-            // Don't return null — continue verification with the new platform URL below
-          } else {
-            // Try Resy
-            const resyMatch = allText.match(/https?:\/\/(?:www\.)?resy\.com\/cities\/([^\s"'<>\])?#]+\/venues\/[^\s"'<>\])?#]+)/i);
-            if (resyMatch) {
-              const resyUrl = `https://resy.com/cities/${resyMatch[1].split(/[?#]/)[0]}`;
-              const resyWithParams = addResyParams(resyUrl, params);
-              console.log(`↻ ${r.name} [yelp→resy] — converting via link: ${resyUrl}`);
-              r.platform = "resy";
-              r.platformUrl = resyWithParams;
-              r.id = `resy-xplat-${r.name.toLowerCase().replace(/\s+/g, "-")}`;
-            } else {
-              // No external booking link found — try name-based lookup
-              // Construct potential OT/Resy URLs from restaurant name
-              const nameSlug = r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-              const citySlug = (params.city || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-              const stateSlug = (params.state || "").toLowerCase();
-              
-              // Try OpenTable name-based URL
-              const otGuessUrl = `https://www.opentable.com/r/${nameSlug}-${citySlug}-${stateSlug}`;
-              const otGuessWithParams = addOTParams(otGuessUrl, params);
-              console.log(`↻ ${r.name} [yelp→opentable?] — trying name-based lookup: ${otGuessUrl}`);
-              r.platform = "opentable";
-              r.platformUrl = otGuessWithParams;
-              r.id = `ot-xplat-${nameSlug}`;
-              r._yelpCrossplatformGuess = true;
-            }
-          }
-          
-          // Re-scrape the new platform URL for verification
-          const xplatAbort = new AbortController();
-          const xplatTimer = setTimeout(() => xplatAbort.abort(), 20_000);
-          try {
-            const xplatResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${firecrawlKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                url: r.platformUrl,
-                formats: r.platform === "opentable" ? ["markdown", "html"] : ["markdown"],
-                onlyMainContent: false,
-                ...(r.platform === "opentable" && { waitFor: 3500 }),
-              }),
-              signal: xplatAbort.signal,
-            });
-            clearTimeout(xplatTimer);
-            
-            if (!xplatResp.ok) {
-              const errBody2 = await xplatResp.text().catch(() => "");
-              // If name-based guess returned 404, this restaurant isn't on OT/Resy
-              console.log(`✗ ${r.name} [yelp→${r.platform}] — scrape failed (${xplatResp.status}), dropping`);
-              return null;
-            }
-            
-            const xplatData = await xplatResp.json();
-            const xplatMarkdown = extractFirecrawlMarkdown(xplatData);
-            const xplatHtml = xplatData?.data?.html || xplatData?.html || "";
-            const xplatMeta = xplatData?.data?.metadata || xplatData?.metadata;
-            
-            if (!xplatMarkdown) {
-              console.log(`✗ ${r.name} [yelp→${r.platform}] — no content from new URL, dropping`);
-              return null;
-            }
-            
-            // For guessed URLs, verify we actually landed on a valid restaurant page
-            if (r._yelpCrossplatformGuess) {
-              const finalUrl = xplatMeta?.sourceURL || "";
-              const is404Page = /not found|page doesn't exist|error 404|we can't find/i.test(xplatMarkdown.slice(0, 500));
-              if (is404Page || xplatMarkdown.length < 200) {
-                console.log(`✗ ${r.name} [yelp→${r.platform}] — name-based guess was invalid, dropping`);
-                return null;
-              }
-              console.log(`✓ ${r.name} [yelp→${r.platform}] — name-based guess found valid page`);
-            }
-            
-            // Update the name from the new platform's metadata
-            const xplatTitle = xplatMeta?.title || xplatMeta?.["og:title"];
-            if (xplatTitle) {
-              r.name = cleanName(xplatTitle, r.platformUrl, r.platform);
-            }
-            
-            // Replace markdown/data references for downstream slot extraction
-            // We use Object.assign to inject into the closure's `data` variable
-            Object.assign(data, xplatData);
-            // Also need to update the markdown variable for slot extraction below
-            // Since markdown is a const, we need to use a mutable wrapper
-            (r as any)._xplatMarkdown = xplatMarkdown;
-            (r as any)._xplatHtml = xplatHtml;
-            (r as any)._xplatMeta = xplatMeta;
-          } catch (xplatErr: any) {
-            clearTimeout(xplatTimer);
-            console.log(`✗ ${r.name} [yelp→${r.platform}] — cross-platform scrape failed: ${xplatErr.name === "AbortError" ? "timeout" : xplatErr}`);
-            return null;
-          }
+        if (redirectedAway) {
+          console.log(`✗ ${r.name} [yelp] — redirected to non-reservation page: ${scrapedSourceUrl}, skipping`);
+          return null;
+        }
+        
+        // If redirected to /biz/ page (no native Yelp reservation widget), 
+        // still try — the page may have reservation info or time slots in the content
+        if (scrapedSourceUrl && scrapedSourceUrl.includes("/biz/") && !scrapedSourceUrl.includes("/reservations/")) {
+          console.log(`  ${r.name} [yelp] — landed on /biz/ page, checking for reservation content...`);
         }
       }
-      
-      // Use cross-platform markdown if available (from Yelp conversion)
-      const effectiveMarkdown = (r as any)._xplatMarkdown || markdown;
-      const effectiveHtml = (r as any)._xplatHtml || "";
-      const effectiveMeta = (r as any)._xplatMeta || (data?.data?.metadata || data?.metadata);
 
       // Extract structured data from Firecrawl JSON extraction (if present)
       const jsonData = data?.data?.extract || data?.extract;
