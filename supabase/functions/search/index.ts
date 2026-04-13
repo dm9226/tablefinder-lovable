@@ -2107,9 +2107,9 @@ async function verifyAvailability(
           ...(isOT && { waitFor: 3500 }),    // OT booking widget — HTML parser compensates if markdown misses slots
         };
 
-      // Per-scrape timeout: 25s max to prevent a single hung request from consuming the entire budget
+      // Per-scrape timeout: 25s for Resy/OT, 35s for Yelp (needs longer waitFor + LLM extraction)
       const scrapeAbort = new AbortController();
-      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
+      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 35_000 : 25_000);
       let resp: Response;
       try {
         resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -2182,13 +2182,9 @@ async function verifyAvailability(
           return null;
         }
         
-        // Content-based validation: check for actual Yelp reservation widget markers.
-        // Pages without these are just business pages that lack a native booking widget.
-        const hasReservationWidget = /\b(find\s+a\s+table|select\s+(a\s+)?time|choose\s+(a\s+)?time|book\s+a\s+table|party\s+size\s*[:\d]|seats?\s+available|available\s+times?|make\s+a\s+reservation)\b/i.test(markdown);
-        if (!hasReservationWidget) {
-          console.log(`✗ ${r.name} [yelp] — no reservation widget detected on page, skipping`);
-          return null;
-        }
+        // Widget detection skipped — Yelp's reservation widgets are JS-rendered and invisible
+        // in scraped markdown. Instead, we rely on the LLM extract to find actual slots downstream.
+        // If the extract returns no slots, the restaurant is rejected at the time-slot check below.
       }
 
       // Extract structured data from Firecrawl JSON extraction (if present)
