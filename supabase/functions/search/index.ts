@@ -342,6 +342,8 @@ serve(async (req) => {
         params, keys, amenityTerms
       ))
     )).flat();
+    // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
+    verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
 
     // Yelp fallback: if zero Yelp results survived but untested candidates exist, try more
