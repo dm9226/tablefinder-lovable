@@ -1460,7 +1460,6 @@ async function fetchYelpCandidates(
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
     // Scrape Yelp search results via Firecrawl
-    // Use JSON extraction to capture JS-rendered reservation time slots per restaurant
     const scrapeResp = await fetch(`${FIRECRAWL_API}/scrape`, {
       method: "POST",
       headers: {
@@ -1469,34 +1468,8 @@ async function fetchYelpCandidates(
       },
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: [
-          "markdown",
-          "links",
-          {
-            type: "json",
-            prompt: "Extract all restaurants shown on this Yelp search results page. For each restaurant, extract the name, rating (number), review count (number), price range (like $ or $$ or $$$), neighborhood, and any available reservation time slots shown (like '5:30 PM', '6:00 PM'). Only include times that appear as clickable reservation buttons, NOT operating hours.",
-            schema: {
-              type: "object",
-              properties: {
-                restaurants: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      name: { type: "string" },
-                      rating: { type: "number" },
-                      reviewCount: { type: "number" },
-                      priceRange: { type: "string" },
-                      neighborhood: { type: "string" },
-                      reservationSlots: { type: "array", items: { type: "string" } }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        ],
-        waitFor: 5000,
+        formats: ["markdown", "links"],
+        waitFor: 3000,
         onlyMainContent: true,
       }),
     });
@@ -1510,19 +1483,6 @@ async function fetchYelpCandidates(
     const scrapeData = await scrapeResp.json();
     const markdown = scrapeData?.data?.markdown || scrapeData?.markdown || "";
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
-    const jsonExtract = scrapeData?.data?.json || scrapeData?.json || scrapeData?.data?.extract || scrapeData?.extract || null;
-    
-    // Log JSON extraction results
-    if (jsonExtract?.restaurants) {
-      console.log(`Yelp JSON extraction: ${jsonExtract.restaurants.length} restaurants extracted`);
-      for (const r of jsonExtract.restaurants) {
-        if (r.reservationSlots?.length > 0) {
-          console.log(`  ${r.name}: ${r.reservationSlots.join(", ")}`);
-        }
-      }
-    } else {
-      console.log(`Yelp JSON extraction: no structured data returned`);
-    }
 
     // Extract restaurant aliases from yelp.com/biz/ links
     const bizAliasSet = new Set<string>();
