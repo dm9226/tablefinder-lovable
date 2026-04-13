@@ -1861,48 +1861,6 @@ async function verifyAvailability(
     try {
       const isYelp = r.platform === "yelp";
 
-      // ── YELP PRE-VERIFIED: slots already extracted from search results page ──
-      // Skip individual page scrape — just apply time window filtering
-      if (isYelp && (r as any)._yelpSearchPageVerified && r.timeSlots.length > 0) {
-        // Parse time window (same logic as main verification)
-        const [reqH, reqMin] = params.time.split(":").map(Number);
-        const requestedMinutes = reqH * 60 + (reqMin || 0);
-        const windowStart = Math.max(0, requestedMinutes - 120);
-        const windowEnd = Math.min(1439, requestedMinutes + 120);
-        const mealLabel = reqH < 10 ? "breakfast" : reqH < 12 ? "brunch" : reqH < 16 ? "lunch" : "dinner";
-        
-        const parsedSlots = r.timeSlots.map(s => {
-          const m = s.time.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-          if (!m) return null;
-          let h = parseInt(m[1]);
-          const min = parseInt(m[2]);
-          const ampm = m[3].toUpperCase();
-          if (ampm === "PM" && h !== 12) h += 12;
-          if (ampm === "AM" && h === 12) h = 0;
-          return { time: s.time, minutes: h * 60 + min };
-        }).filter(Boolean) as { time: string; minutes: number }[];
-        
-        let matchingTimes = parsedSlots.filter(t => t.minutes >= windowStart && t.minutes <= windowEnd);
-        
-        if (matchingTimes.length === 0) {
-          console.log(`✗ ${r.name} [yelp] — search page slots (${r.timeSlots.map(s=>s.time).join(", ")}) outside ${mealLabel} window`);
-          return null;
-        }
-        
-        // Sort by proximity to requested time, keep closest 5
-        matchingTimes.sort((a, b) => Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes));
-        matchingTimes = matchingTimes.slice(0, 5);
-        matchingTimes.sort((a, b) => a.minutes - b.minutes);
-        
-        r.timeSlots = matchingTimes.map(t => ({ time: t.time }));
-        // Clean up internal flags
-        delete (r as any)._yelpSearchPageVerified;
-        delete (r as any)._yelpCategories;
-        
-        console.log(`✓ Verified ${r.name} [yelp] (search page) — ${matchingTimes.length} ${mealLabel} slots: ${matchingTimes.map(t => t.time).join(", ")}`);
-        return r;
-      }
-
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
       // Resy + OT: onlyMainContent=false to capture address/location sections for geocoding
