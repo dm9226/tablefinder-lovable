@@ -1439,32 +1439,7 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Scrape Yelp search results via Firecrawl using extract to get structured data directly
-    const yelpExtractSchema = {
-      type: "object",
-      properties: {
-        restaurants: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              name: { type: "string", description: "Restaurant name" },
-              rating: { type: "number", description: "Star rating e.g. 4.5" },
-              review_count: { type: "number", description: "Number of reviews" },
-              price_range: { type: "string", description: "Price range like $, $$, $$$, $$$$" },
-              neighborhood: { type: "string", description: "Neighborhood or area name" },
-              cuisine_categories: { type: "array", items: { type: "string" }, description: "Cuisine categories like American, Italian, Seafood" },
-              available_times: { type: "array", items: { type: "string" }, description: "Available reservation time slots shown (e.g. '7:00 PM', '7:30 PM')" },
-              yelp_url: { type: "string", description: "The yelp.com/biz/ or yelp.com/reservations/ URL for this restaurant" },
-            },
-            required: ["name"],
-          },
-        },
-      },
-      required: ["restaurants"],
-    };
-
-    // Single scrape with extract + markdown + links, scrolling past sponsored results
+    // Scrape Yelp search results via Firecrawl — markdown + links only (no extract to avoid timeouts)
     const scrapeHeaders = {
       Authorization: `Bearer ${firecrawlKey}`,
       "Content-Type": "application/json",
@@ -1475,13 +1450,9 @@ async function fetchYelpCandidates(
       headers: scrapeHeaders,
       body: JSON.stringify({
         url: yelpSearchUrl.toString(),
-        formats: ["extract", "links", "markdown"],
-        extract: {
-          schema: yelpExtractSchema,
-          prompt: "Extract all restaurant search results from this Yelp search page. SKIP 'Sponsored' results. For each restaurant, get: name, star rating, review count, price range, neighborhood, cuisine categories, available reservation time slots shown as clickable buttons (like '6:30 PM', '7:00 PM') — NOT operating hours — and the yelp URL.",
-        },
-        waitFor: 5000,
-        onlyMainContent: true,
+        formats: ["markdown", "links"],
+        waitFor: 4000,
+        timeout: 20000,
       }),
     });
 
@@ -1492,15 +1463,23 @@ async function fetchYelpCandidates(
     }
 
     const scrapeData = await scrapeResp.json();
-    const extractData = scrapeData?.data?.extract || scrapeData?.extract;
     const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
+    const markdown: string = scrapeData?.data?.markdown || scrapeData?.markdown || "";
 
-    console.log(`Yelp extract response: ${JSON.stringify(extractData).slice(0, 1000)}`);
-    console.log(`Yelp links: ${links.length}`);
+    console.log(`Yelp scrape: links=${links.length}, markdown=${markdown.length} chars`);
 
-    // Parse extracted restaurants
-    const extracted = coerceYelpExtractedRestaurants(extractData);
-    console.log(`Yelp extract parsed ${extracted.length} restaurants`);
+    // Parse restaurants from markdown using regex patterns
+    // Yelp markdown typically has restaurant names as bold or header text followed by ratings, categories, and time slots
+    const extracted = parseYelpMarkdownResults(markdown);
+    console.log(`Yelp markdown parsed ${extracted.length} restaurants`);
+
+    // Build markdown-based time slot map (already done during parsing)
+    const markdownTimesMap = new Map<string, string[]>();
+    for (const rest of extracted) {
+      if (rest.availableTimes.length > 0) {
+        markdownTimesMap.set(rest.name, rest.availableTimes);
+      }
+    }
 
     // Build alias map from links for URL construction
     const reservationLinkMap = new Map<string, string>();
@@ -1514,8 +1493,6 @@ async function fetchYelpCandidates(
         if (!bizLinkMap.has(alias)) bizLinkMap.set(alias, link);
       }
     }
-
-    console.log(`Yelp markdown length: ${markdown.length}`);
 
     // Match extracted restaurants to URLs
     const results: Restaurant[] = [];
@@ -1559,12 +1536,8 @@ async function fetchYelpCandidates(
       bizUrl = bizUrl || bizLinkMap.get(alias) || null;
       const bestUrl = reservationUrl || (bizUrl ? bizUrl.replace("/biz/", "/reservations/") : `https://www.yelp.com/reservations/${alias}`);
 
-      // Prefer markdown-parsed times (more reliable), fall back to extract times
-      const mdTimes = markdownTimesMap.get(rest.name) || [];
-      const extractTimes = rest.availableTimes
-        .map(t => normalizeExtractedTimeLabel(t))
-        .filter(Boolean) as string[];
-      const allTimes = mdTimes.length > 0 ? mdTimes : extractTimes;
+      // Use times from parsing
+      const allTimes = rest.availableTimes;
 
       results.push({
         id: `yelp-${alias}`,
@@ -1592,6 +1565,111 @@ async function fetchYelpCandidates(
     console.error("Yelp scrape error:", err);
     return [];
   }
+}
+// Parse Yelp search results from markdown text (no LLM needed — pure regex)
+// Yelp markdown format: "1. [Restaurant Name](https://www.yelp.com/biz/alias-city)\n...details..."
+function parseYelpMarkdownResults(markdown: string): Array<{
+  name: string;
+  neighborhood?: string;
+  rating?: number;
+  reviewCount?: number;
+  priceRange?: string;
+  cuisineCategories: string[];
+  availableTimes: string[];
+  reservationUrl?: string;
+  businessUrl?: string;
+}> {
+  if (!markdown || markdown.length < 50) return [];
+
+  const results: Array<{
+    name: string;
+    neighborhood?: string;
+    rating?: number;
+    reviewCount?: number;
+    priceRange?: string;
+    cuisineCategories: string[];
+    availableTimes: string[];
+    reservationUrl?: string;
+    businessUrl?: string;
+  }> = [];
+
+  // Non-restaurant headings to skip
+  const SKIP_NAMES = /^(skip|top \d|can't find|trending|seasonal|more nearby|browse|popular brands|nearby cities|neighborhoods|streets|campuses|related)/i;
+
+  // Match numbered list items: "1. [Name](yelp-url)" — each is a restaurant entry
+  // Split into blocks at each numbered item that links to yelp.com
+  const entryRegex = /\d+\.\s+\[([^\]]+)\]\((https?:\/\/www\.yelp\.com\/biz\/[^\s)]+)\)/g;
+  const entries: Array<{ name: string; url: string; startIdx: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = entryRegex.exec(markdown)) !== null) {
+    entries.push({ name: m[1].trim(), url: m[2], startIdx: m.index });
+  }
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (SKIP_NAMES.test(entry.name)) continue;
+
+    // Get the block of text for this entry (until the next entry or end)
+    const blockEnd = i + 1 < entries.length ? entries[i + 1].startIdx : Math.min(entry.startIdx + 2000, markdown.length);
+    const block = markdown.slice(entry.startIdx, blockEnd);
+
+    // Skip sponsored
+    if (/sponsored|^\s*ad\b/i.test(block.slice(0, 300))) continue;
+
+    // Extract alias from URL
+    const aliasMatch = entry.url.match(/\/biz\/([^?#]+)/);
+    const alias = aliasMatch?.[1] || "";
+
+    // Extract rating: look for "X.X" pattern near star indicators
+    const ratingMatch = block.match(/(\d\.\d)\s*(?:\(|star|★)/i) || block.match(/★\s*(\d\.\d)/);
+    const rating = ratingMatch ? parseFloat(ratingMatch[1]) : undefined;
+
+    // Extract review count: "123 reviews" or "(1.2k reviews)"
+    const reviewMatch = block.match(/([\d,]+(?:\.\d+)?k?)\s*review/i);
+    let reviewCount: number | undefined;
+    if (reviewMatch) {
+      const raw = reviewMatch[1].replace(/,/g, "");
+      reviewCount = raw.endsWith("k") ? Math.round(parseFloat(raw) * 1000) : parseInt(raw);
+    }
+
+    // Extract price range: "$" to "$$$$"
+    const priceMatch = block.match(/(\${1,4})(?:\s|·|,|\n)/);
+    const priceRange = priceMatch ? priceMatch[1] : undefined;
+
+    // Extract neighborhood — often after price or categories, like "· Midtown" or "in Buckhead"
+    const hoodMatch = block.match(/·\s*([A-Z][a-zA-Z\s]{2,25})(?:\s*·|\s*\n|$)/m);
+    const neighborhood = hoodMatch ? hoodMatch[1].trim() : undefined;
+
+    // Extract cuisine categories — comma/· separated items like "American, Seafood"
+    // Often appears as "American · $$$ · Midtown" or similar
+    const catLine = block.match(/(?:^|\n)([A-Z][a-zA-Z, ·&]+?)(?:\s*·\s*\${1,4}|\s*·\s*[A-Z]|\s*\n)/m);
+    const cuisineCategories: string[] = [];
+    if (catLine) {
+      const cats = catLine[1].split(/[·,]/).map(c => c.trim()).filter(c => c.length > 1 && c.length < 30 && !/^\$/.test(c));
+      cuisineCategories.push(...cats);
+    }
+
+    // Extract time slots — look for time patterns like "6:30 PM"
+    const timePattern = /\b(\d{1,2}:\d{2}\s*(?:AM|PM))\b/gi;
+    const rawTimes = block.match(timePattern) || [];
+    const availableTimes = [...new Set(
+      rawTimes.map(t => normalizeExtractedTimeLabel(t)).filter(Boolean) as string[]
+    )];
+
+    results.push({
+      name: entry.name,
+      neighborhood,
+      rating,
+      reviewCount,
+      priceRange,
+      cuisineCategories,
+      availableTimes,
+      reservationUrl: undefined, // Will be constructed from alias in the caller
+      businessUrl: entry.url,
+    });
+  }
+
+  return results;
 }
 
 function buildYelpAvailabilityUrl(baseUrl: string, params: SearchParams): string {
