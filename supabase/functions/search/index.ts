@@ -2669,7 +2669,7 @@ async function verifyAvailability(
       // ── YELP TWO-PASS RETRY: if first scrape (waitFor:3000) found no slots, retry with waitFor:5000 ──
       // Skip retry if we're past 80s elapsed to prevent overall timeout
       const yelpRetryElapsed = globalStartTime ? Date.now() - globalStartTime : 0;
-      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
+      if (isYelp && !effectiveIsOT && !effectiveIsResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
         console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms (elapsed: ${yelpRetryElapsed}ms)`);
         const yelpRetryAbort = new AbortController();
         const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
@@ -2731,7 +2731,7 @@ async function verifyAvailability(
           clearTimeout(yelpRetryTimer);
           console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
         }
-      } else if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
+      } else if (isYelp && !effectiveIsOT && !effectiveIsResy && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
         console.log(`  ${r.name} [yelp]: skipping retry — ${yelpRetryElapsed}ms elapsed (>80s budget)`);
       }
 
@@ -2767,7 +2767,7 @@ async function verifyAvailability(
 
       // OpenTable: Do NOT fabricate fallback times from booking markers.
       // If real slots exist but are outside window, or parser found nothing, reject.
-      if (isOT && foundTimes.length === 0) {
+      if (effectiveIsOT && foundTimes.length === 0) {
         console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback)`);
         return null;
       }
