@@ -2177,7 +2177,7 @@ async function verifyAvailability(
         }
       }
 
-      const lower = markdown.toLowerCase();
+      const lower = effectiveMarkdown.toLowerCase();
 
       // Check for "no availability" signals
       if (NO_AVAILABILITY_SIGNALS.some((signal) => lower.includes(signal))) {
@@ -2299,7 +2299,7 @@ async function verifyAvailability(
 
       // RELEVANCE CHECK: If user searched for an amenity (rooftop, patio, etc.),
       // verify the restaurant page actually mentions it. Zero extra latency — uses already-scraped markdown.
-      if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(markdown, amenityTerms)) {
+      if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(effectiveMarkdown, amenityTerms)) {
         console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${amenityTerms.join(", ")}`);
         return null;
       }
@@ -2308,7 +2308,7 @@ async function verifyAvailability(
 
       // ── Strip non-booking sections from markdown for regex fallback ──
       // Remove "Need to Know", "Hours of Operation", "About", etc. sections
-      let bookingMarkdown = markdown;
+      let bookingMarkdown = effectiveMarkdown;
       const sectionCutMarkers = [
         "need to know", "hours of operation", "about the restaurant",
         "about this restaurant", "cross street", "additional info", "special features",
@@ -2447,9 +2447,13 @@ async function verifyAvailability(
         return slots;
       };
       
-      if (isOT) {
+      // For cross-platform converted candidates, use the new platform's identity
+      const effectiveIsOT = r.platform === "opentable";
+      const effectiveIsResy = r.platform === "resy";
+      
+      if (effectiveIsOT) {
         // First pass: parse OT slots from markdown
-        foundTimes = parseOTSlots(markdown);
+        foundTimes = parseOTSlots(effectiveMarkdown);
         // Populate seenTimes from markdown slots BEFORE HTML merge to avoid dupes
         foundTimes.forEach(t => seenTimes.add(t.time));
         
