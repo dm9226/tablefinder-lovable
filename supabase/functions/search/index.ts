@@ -2346,10 +2346,6 @@ async function verifyAvailability(
         return slots;
       };
       
-      // For cross-platform converted candidates, use the new platform's identity
-      const isOT = r.platform === "opentable";
-      const isResy = r.platform === "resy";
-      
       if (isOT) {
         // First pass: parse OT slots from markdown
         foundTimes = parseOTSlots(markdown);
@@ -2357,7 +2353,7 @@ async function verifyAvailability(
         foundTimes.forEach(t => seenTimes.add(t.time));
         
         // Also try HTML parsing for more complete extraction
-        const scrapeHtml = scrapeHtmlFallback || data?.data?.html || data?.html || "";
+        const scrapeHtml = data?.data?.html || data?.html || "";
         if (scrapeHtml) {
           const htmlSlots = parseOTSlotsFromHTML(scrapeHtml);
           for (const slot of htmlSlots) {
