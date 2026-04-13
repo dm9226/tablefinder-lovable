@@ -2749,74 +2749,7 @@ async function verifyAvailability(
         }
       }
 
-      // ── YELP TWO-PASS RETRY: if first scrape (waitFor:3000) found no slots, retry with waitFor:5000 ──
-      // Skip retry if we're past 80s elapsed to prevent overall timeout
-      const yelpRetryElapsed = globalStartTime ? Date.now() - globalStartTime : 0;
-      if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && (!globalStartTime || yelpRetryElapsed < 80_000)) {
-        console.log(`  ${r.name} [yelp]: no slots on first pass (waitFor:3000) — retrying with waitFor: 5000ms (elapsed: ${yelpRetryElapsed}ms)`);
-        const yelpRetryAbort = new AbortController();
-        const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
-        try {
-          const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${firecrawlKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              url: r.platformUrl,
-              formats: ["markdown"],
-              onlyMainContent: true,
-              waitFor: 4000,
-            }),
-            signal: yelpRetryAbort.signal,
-          });
-          clearTimeout(yelpRetryTimer);
-
-          if (retryResp.ok) {
-            const retryData = await retryResp.json();
-            const retryMarkdown = extractFirecrawlMarkdown(retryData);
-            if (retryMarkdown) {
-              bookingMarkdown = retryMarkdown;
-              // Re-parse times from retry markdown
-              const retryTimeRegex = /\b(\d{1,2}):(\d{2})\s?(am|pm)\b/gi;
-              let retryMatch;
-              while ((retryMatch = retryTimeRegex.exec(retryMarkdown)) !== null) {
-                const ctxStart = Math.max(0, retryMatch.index - 60);
-                const ctxEnd = Math.min(retryMarkdown.length, retryMatch.index + retryMatch[0].length + 60);
-                const context = retryMarkdown.substring(ctxStart, ctxEnd).toLowerCase();
-                if (/notify|sold\s*out|waitlist|wait\s*list|unavailable/i.test(context)) continue;
-                const rawH = parseInt(retryMatch[1]);
-                const m = parseInt(retryMatch[2]);
-                const ampm = retryMatch[3].toLowerCase();
-                let h24 = rawH;
-                if (ampm === "pm" && rawH !== 12) h24 += 12;
-                if (ampm === "am" && rawH === 12) h24 = 0;
-                const totalMin = h24 * 60 + m;
-                const displayH = h24 % 12 || 12;
-                const displayAmpm = h24 >= 12 ? "PM" : "AM";
-                const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${displayAmpm}`;
-                if (seenTimes.has(formatted)) continue;
-                seenTimes.add(formatted);
-                foundTimes.push({ time: formatted, minutes: totalMin });
-              }
-              if (foundTimes.length > 0) {
-                console.log(`  ${r.name} [yelp] RETRY SUCCESS: extracted ${foundTimes.length} times: ${foundTimes.map(t=>t.time).join(", ")}`);
-              } else {
-                console.log(`  ${r.name} [yelp] RETRY: still no slots after waitFor:5000`);
-              }
-            }
-          } else {
-            console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
-            await retryResp.text().catch(() => {});
-          }
-        } catch (retryErr: any) {
-          clearTimeout(yelpRetryTimer);
-          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
-        }
-      } else if (isYelp && foundTimes.length === 0 && !hasYelpAvailabilityMarker && globalStartTime && yelpRetryElapsed >= 80_000) {
-        console.log(`  ${r.name} [yelp]: skipping retry — ${yelpRetryElapsed}ms elapsed (>80s budget)`);
-      }
+      // Yelp two-pass retry removed — slots now extracted from search results page during discovery
 
       // C. Filter times to those within the meal window
       let matchingTimes = foundTimes.filter((t) =>
