@@ -2831,11 +2831,7 @@ async function verifyAvailability(
 
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
       // ── STRATEGY 2: Regex on cleaned booking markdown (non-Resy only) ──
-      if (!isResy && foundTimes.length === 0) {
-        if (isYelp) {
-          console.log(`✗ ${r.name} [yelp] — skipping generic regex fallback because no concrete widget evidence was captured`);
-          return null;
-        }
+      if (!isResy && !isYelp && foundTimes.length === 0) {
         let match12;
         while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
           // Context check: skip times near "notify", "sold out", "waitlist"
@@ -2930,9 +2926,12 @@ async function verifyAvailability(
             for (const line of retryLines) {
               if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(line.trim())) retryTimeLineCount++;
             }
-            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryTimeLineCount} dedicated time-button lines`);
-            if (retryTimeLineCount < 3) {
-              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still not rendered (${retryTimeLineCount} time lines)`);
+            const retryReservationSectionPattern = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
+            const retryReservationSectionPresent = retryReservationSectionPattern.test(retryMd) || retryReservationSectionPattern.test(retryHtml || "");
+            const retryHasConcreteSlotEvidence = retryTimeLineCount >= 2 || (retryReservationSectionPresent && retryTimeLineCount >= 1);
+            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryTimeLineCount} dedicated time-button lines, reservationSection=${retryReservationSectionPresent}`);
+            if (!retryHasConcreteSlotEvidence) {
+              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still lacks concrete reservation slot evidence`);
               // Don't use these hallucinated times
             } else {
               for (const retryTime of retryTimes) {
@@ -2955,6 +2954,11 @@ async function verifyAvailability(
         } catch (retryErr: any) {
           console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
         }
+      }
+
+      if (isYelp && foundTimes.length === 0) {
+        console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after direct extract + retry`);
+        return null;
       }
 
       // C. Filter times to those within the meal window
