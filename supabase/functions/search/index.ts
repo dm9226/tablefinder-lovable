@@ -2272,8 +2272,9 @@ async function verifyAvailability(
           try { ws.close(); } catch (_) {}
 
           // Check for redirect away from /reservations/
-          if (finalUrl && !finalUrl.includes("/reservations/")) {
+           if (finalUrl && !finalUrl.includes("/reservations/")) {
             console.log(`✗ ${r.name} [yelp] — redirected to: ${finalUrl}, skipping`);
+            releaseBBSlot();
             return null;
           }
 
