@@ -2303,11 +2303,14 @@ async function verifyAvailability(
             console.log(`  ${r.name} [yelp] Browserbase found times: ${renderedTimes.slice(0, 10).join(", ")}`);
           }
 
-          if (!yelpHasConcreteSlotEvidence) {
+           if (!yelpHasConcreteSlotEvidence) {
             console.log(`✗ ${r.name} [yelp] — rejected: Browserbase stealth browser found no concrete slot evidence`);
+            releaseBBSlot();
             return null;
           }
+          releaseBBSlot();
         } catch (bbErr: any) {
+          releaseBBSlot();
           console.log(`✗ ${r.name} [yelp] — Browserbase error: ${bbErr.message || bbErr}`);
           return null;
         }
