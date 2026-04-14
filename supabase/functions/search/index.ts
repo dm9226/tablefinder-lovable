@@ -2922,6 +2922,12 @@ async function verifyAvailability(
               console.log(`✗ ${r.name} [yelp] — retry rejected: Yelp reservation page is powered by an external booking provider`);
               return null;
             }
+            // Also check LLM-detected booking provider on retry
+            const retryProvider = (retryExtract?.booking_provider || "").toLowerCase().trim();
+            if (retryProvider === "opentable" || retryProvider === "resy") {
+              console.log(`✗ ${r.name} [yelp] — retry rejected: LLM detected external booking provider: ${retryProvider}`);
+              return null;
+            }
 
             for (const retryTime of retryTimes) {
               const parsed = parseTimeStr(retryTime);
