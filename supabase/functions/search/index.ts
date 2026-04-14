@@ -2391,6 +2391,12 @@ async function verifyAvailability(
       // ── YELP: Firecrawl reservation-page scrape ──
       let yelpSteelHtml = "";
       let yelpHasConcreteSlotEvidence = false;
+      let markdown = "";
+      let html = "";
+      let links: string[] = [];
+      let jsonData: any = null;
+      let data: any = null;
+
       if (isYelp) {
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
@@ -2444,12 +2450,6 @@ async function verifyAvailability(
           onlyMainContent: false,
           ...(isOT && { waitFor: 3500 }),
         };
-
-      let markdown = "";
-      let html = "";
-      let links: string[] = [];
-      let jsonData: any = null;
-      let data: any = null;
 
       if (!isYelp) {
         const scrapeAbort = new AbortController();
