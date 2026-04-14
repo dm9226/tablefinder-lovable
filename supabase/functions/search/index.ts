@@ -1460,8 +1460,8 @@ async function fetchYelpCandidates(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          useProxy: true,
-          solveCaptcha: true,
+          useProxy: false,
+          solveCaptcha: false,
         }),
       });
       if (!sessionResp.ok) {
@@ -2258,8 +2258,8 @@ async function verifyAvailability(
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              useProxy: true,
-              solveCaptcha: true,
+              useProxy: false,
+              solveCaptcha: false,
             }),
           });
           if (!sessionResp.ok) {
