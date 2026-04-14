@@ -1476,6 +1476,7 @@ async function fetchYelpCandidates(
         console.log("Yelp discovery Steel session missing id");
         return [];
       }
+      console.log(`[YELP_STEEL] Session created: ${steelSessionId}`);
 
       // 2. Connect via CDP WebSocket
       const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
