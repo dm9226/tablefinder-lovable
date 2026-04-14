@@ -2551,6 +2551,16 @@ async function verifyAvailability(
       };
 
       if (isYelp) {
+        // Check if the LLM detected an external booking provider
+        const bookingProvider = (jsonData?.booking_provider || "").toLowerCase().trim();
+        if (bookingProvider === "opentable" || bookingProvider === "resy") {
+          console.log(`✗ ${r.name} [yelp] — rejected: LLM detected external booking provider: ${bookingProvider}`);
+          return null;
+        }
+        if (bookingProvider && bookingProvider !== "yelp") {
+          console.log(`  ${r.name} [yelp]: LLM booking_provider="${bookingProvider}" (not opentable/resy, continuing)`);
+        }
+
         const extractTimes: string[] = Array.isArray(jsonData?.available_times) ? jsonData.available_times
           : Array.isArray(jsonData?.available_reservation_times) ? jsonData.available_reservation_times
           : [];
