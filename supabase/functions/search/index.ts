@@ -1440,34 +1440,143 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Scrape Yelp search results via Firecrawl — markdown + links only (no extract to avoid timeouts)
-    const scrapeHeaders = {
-      Authorization: `Bearer ${firecrawlKey}`,
-      "Content-Type": "application/json",
-    };
-
-    const scrapeResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-      method: "POST",
-      headers: scrapeHeaders,
-      body: JSON.stringify({
-        url: yelpSearchUrl.toString(),
-        formats: ["markdown", "links"],
-        waitFor: 4000,
-        timeout: 20000,
-      }),
-    });
-
-    if (!scrapeResp.ok) {
-      const errBody = await scrapeResp.text().catch(() => "");
-      console.log(`Yelp scrape error: status=${scrapeResp.status}, body=${errBody.slice(0, 300)}`);
+    // Scrape Yelp search results via Steel.dev stealth browser (Firecrawl can't bypass DataDome)
+    const steelApiKey = Deno.env.get("STEEL_API_KEY");
+    if (!steelApiKey) {
+      console.log("Yelp discovery skipped: STEEL_API_KEY not configured");
       return [];
     }
 
-    const scrapeData = await scrapeResp.json();
-    const links: string[] = scrapeData?.data?.links || scrapeData?.links || [];
-    const markdown: string = scrapeData?.data?.markdown || scrapeData?.markdown || "";
+    let markdown = "";
+    let links: string[] = [];
+    let steelSessionId: string | null = null;
 
-    console.log(`Yelp scrape: links=${links.length}, markdown=${markdown.length} chars`);
+    try {
+      // 1. Create Steel session with proxy + captcha solving
+      const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
+        method: "POST",
+        headers: {
+          "steel-api-key": steelApiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          useProxy: true,
+          solveCaptcha: true,
+        }),
+      });
+      if (!sessionResp.ok) {
+        const errText = await sessionResp.text().catch(() => "");
+        console.log(`Yelp discovery Steel session failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
+        return [];
+      }
+      const sessionData = await sessionResp.json();
+      steelSessionId = sessionData.id;
+      if (!steelSessionId) {
+        console.log("Yelp discovery Steel session missing id");
+        return [];
+      }
+
+      // 2. Connect via CDP WebSocket
+      const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
+      const ws = new WebSocket(connectUrl);
+      let cdpId = 1;
+      const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+      let cdpSessionId: string | null = null;
+
+      const cdpSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
+        return new Promise((resolve, reject) => {
+          const id = cdpId++;
+          pending.set(id, { resolve, reject });
+          const msg: Record<string, unknown> = { id, method, params };
+          if (cdpSessionId) msg.sessionId = cdpSessionId;
+          ws.send(JSON.stringify(msg));
+          setTimeout(() => {
+            if (pending.has(id)) {
+              pending.delete(id);
+              reject(new Error(`CDP timeout: ${method}`));
+            }
+          }, 30000);
+        });
+      };
+
+      await new Promise<void>((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = (e) => reject(e);
+        setTimeout(() => reject(new Error("WS connect timeout")), 15000);
+      });
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(typeof event.data === "string" ? event.data : "{}");
+          if (msg.id && pending.has(msg.id)) {
+            const p = pending.get(msg.id)!;
+            pending.delete(msg.id);
+            if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
+            else p.resolve(msg.result);
+          }
+        } catch (_) {}
+      };
+
+      // 3. Create target, attach, navigate
+      const targetResult = await cdpSend("Target.createTarget", { url: "about:blank" });
+      const targetId = targetResult?.targetId;
+      if (!targetId) throw new Error("Failed to create browser target");
+
+      const attachResult = await cdpSend("Target.attachToTarget", { targetId, flatten: true });
+      cdpSessionId = attachResult?.sessionId;
+      if (!cdpSessionId) throw new Error("Failed to attach to target");
+
+      await cdpSend("Page.enable");
+      await cdpSend("Runtime.enable");
+      await cdpSend("Page.navigate", { url: yelpSearchUrl.toString() });
+
+      // Wait for page to render
+      await new Promise(resolve => setTimeout(resolve, 8000));
+
+      // 4. Scroll down to load more results
+      for (let i = 0; i < 3; i++) {
+        await cdpSend("Runtime.evaluate", {
+          expression: `window.scrollBy(0, 1500); 'scrolled-${i}'`,
+          returnByValue: true,
+        });
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+
+      // 5. Extract page text content and all links
+      const extractResult = await cdpSend("Runtime.evaluate", {
+        expression: `
+          (function() {
+            const anchors = Array.from(document.querySelectorAll('a[href]'));
+            const hrefs = anchors.map(a => a.href).filter(h => h.includes('yelp.com'));
+            const text = document.body.innerText || document.body.textContent || '';
+            return JSON.stringify({ text: text, links: hrefs });
+          })()
+        `,
+        returnByValue: true,
+      });
+
+      const extracted = JSON.parse(extractResult?.result?.value || '{"text":"","links":[]}');
+      markdown = extracted.text || "";
+      links = extracted.links || [];
+
+      // Close WebSocket
+      try { ws.close(); } catch (_) {}
+
+      console.log(`Yelp Steel discovery: links=${links.length}, markdown=${markdown.length} chars`);
+      console.log(`[DEBUG] Yelp Steel discovery text (first 1500 chars):\n${markdown.slice(0, 1500)}`);
+    } catch (steelErr: any) {
+      console.log(`Yelp discovery Steel error: ${steelErr.message || steelErr}`);
+    } finally {
+      // Release Steel session
+      if (steelSessionId) {
+        try {
+          await fetch(`https://api.steel.dev/v1/sessions/${steelSessionId}/release`, {
+            method: "POST",
+            headers: { "steel-api-key": steelApiKey! },
+          });
+        } catch (_) {}
+      }
+    }
 
     // Parse restaurants from markdown using regex patterns
     // Yelp markdown typically has restaurant names as bold or header text followed by ratings, categories, and time slots
