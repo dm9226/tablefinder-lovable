@@ -2219,15 +2219,6 @@ async function verifyAvailability(
           console.log(`✗ ${r.name} [yelp] — redirected away from /reservations/ to: ${scrapedSourceUrl}, skipping`);
           return null;
         }
-        if (hasExternalBookingProviderOnYelpPage({
-          markdown,
-          html,
-          links,
-          sourceUrl: scrapedSourceUrl || r.platformUrl,
-        })) {
-          console.log(`✗ ${r.name} [yelp] — rejected: Yelp reservation page is powered by an external booking provider`);
-          return null;
-        }
       }
 
       // Extract structured data from Firecrawl JSON extraction (if present)
@@ -2900,15 +2891,6 @@ async function verifyAvailability(
                 ? retryExtract.available_reservation_times
                 : extractStructuredTimeLabels(retryExtract);
             if (retryMarkdown) bookingMarkdown = retryMarkdown;
-            if (hasExternalBookingProviderOnYelpPage({
-              markdown: retryMarkdown,
-              html: retryHtml,
-              links: retryLinks,
-              sourceUrl: retryData?.data?.metadata?.sourceURL || retryData?.metadata?.sourceURL || r.platformUrl,
-            })) {
-              console.log(`✗ ${r.name} [yelp] — retry rejected: Yelp reservation page is powered by an external booking provider`);
-              return null;
-            }
 
             for (const retryTime of retryTimes) {
               const parsed = parseTimeStr(retryTime);
