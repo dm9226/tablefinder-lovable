@@ -1827,8 +1827,7 @@ function hasExternalBookingProviderOnYelpPage(input: {
   sourceUrl?: string;
 }): boolean {
   const combined = [input.markdown || "", input.html || "", input.sourceUrl || "", ...(input.links || [])]
-    .join("
-")
+    .join("\n")
     .toLowerCase();
 
   return /opentable\.com|opentable\.co\.uk|opentable\.ca|resy\.com|widget\.resy\.com|powered\s+by\s+opentable|book\s+on\s+opentable|reserve\s+with\s+opentable|powered\s+by\s+resy|book\s+on\s+resy|reserve\s+with\s+resy/.test(combined);
