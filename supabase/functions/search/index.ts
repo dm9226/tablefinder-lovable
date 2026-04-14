@@ -2207,6 +2207,22 @@ async function verifyAvailability(
           console.log(`✗ ${r.name} [yelp] — redirected away from /reservations/ to: ${scrapedSourceUrl}, skipping`);
           return null;
         }
+        // Guard: if the reservation widget never rendered (all "Loading..." placeholders),
+        // reject — the LLM will hallucinate times from operating hours
+        const mdText = markdown || "";
+        const loadingCount = (mdText.match(/Loading\.\.\./g) || []).length;
+        // Strip operating hours lines (e.g. "Open5:00 PM - 9:00 PM"), nav links, and Loading... to isolate real time buttons
+        const strippedMd = mdText
+          .replace(/^.*?(Open|Closed)\s*\d{1,2}:\d{2}\s*(AM|PM).*$/gim, "")
+          .replace(/Loading\.\.\./g, "")
+          .replace(/\[.*?\]\(.*?\)/g, "");
+        const standaloneTimePattern = /\b\d{1,2}:\d{2}\s*(AM|PM)\b/gi;
+        const standaloneTimes = strippedMd.match(standaloneTimePattern) || [];
+        console.log(`  ${r.name} [yelp] widget render check: ${loadingCount} "Loading..." placeholders, ${standaloneTimes.length} standalone time buttons in markdown`);
+        if (loadingCount >= 5 && standaloneTimes.length === 0) {
+          console.log(`✗ ${r.name} [yelp] — rejected: reservation widget did not render (${loadingCount} "Loading...", 0 time buttons). LLM extraction would hallucinate from operating hours.`);
+          return null;
+        }
       }
 
       // Extract structured data from Firecrawl JSON extraction (if present)
