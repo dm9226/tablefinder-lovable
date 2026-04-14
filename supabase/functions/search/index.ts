@@ -2193,7 +2193,7 @@ async function verifyAvailability(
 
       // Per-scrape timeout: 25s for Resy/OT, 35s for Yelp (needs longer waitFor + LLM extraction)
       const scrapeAbort = new AbortController();
-      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 35_000 : 25_000);
+      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 45_000 : 25_000);
       let resp: Response;
       try {
         resp = await fetch(`${FIRECRAWL_API}/scrape`, {
