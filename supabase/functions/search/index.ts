@@ -1413,6 +1413,7 @@ async function fetchYelpCandidates(
   params: SearchParams, firecrawlKey: string, aiKey: string, amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   try {
+    console.log(">>> YELP DISCOVERY FUNCTION ENTERED <<<");
     const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
     const MEAL_AS_CUISINE_YELP = new Set(["brunch", "breakfast"]);
     const YELP_MEAL_STRIP = /\b(dinner|lunch|breakfast|supper|brunch|meal|dining)\b/gi;
