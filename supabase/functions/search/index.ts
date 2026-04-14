@@ -2093,6 +2093,60 @@ async function verifyAvailability(
   const checked = await Promise.all(candidates.map(async (r) => {
     try {
       const isYelp = r.platform === "yelp";
+
+      // ── YELP FAST PATH: trust search-page time slots ──
+      // Yelp search results (with reservation_date/time/covers params) already show
+      // verified availability. If discovery extracted slots, apply the ±2h window
+      // and return immediately — no individual page scrape needed.
+      if (isYelp && r.timeSlots && r.timeSlots.length > 0) {
+        const [reqH, reqM] = params.time.split(":").map(Number);
+        const requestedMin = reqH * 60 + (reqM || 0);
+        const winStart = Math.max(0, requestedMin - 120);
+        const winEnd = Math.min(1439, requestedMin + 120);
+
+        const parseSlotTime = (raw: string): { time: string; minutes: number } | null => {
+          const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+          if (!m12) return null;
+          const rawH = parseInt(m12[1]);
+          const mins = parseInt(m12[2]);
+          const ampm = m12[3].toLowerCase();
+          let h24 = rawH;
+          if (ampm === "pm" && rawH !== 12) h24 += 12;
+          if (ampm === "am" && rawH === 12) h24 = 0;
+          const totalMin = h24 * 60 + mins;
+          const displayH = h24 % 12 || 12;
+          const displayAmpm = h24 >= 12 ? "PM" : "AM";
+          return { time: `${displayH}:${mins.toString().padStart(2, "0")} ${displayAmpm}`, minutes: totalMin };
+        };
+
+        const parsed = r.timeSlots.map(s => parseSlotTime(s.time)).filter(Boolean) as { time: string; minutes: number }[];
+        let inWindow = parsed.filter(t => t.minutes >= winStart && t.minutes <= winEnd);
+
+        // Apply operating-hours rejection (same logic as main path)
+        if (inWindow.length <= 2) {
+          if (inWindow.length === 2) {
+            const gap = Math.abs(inWindow[1].minutes - inWindow[0].minutes);
+            if (gap >= 180) {
+              console.log(`✗ ${r.name} [yelp/fast] — rejected: 2 slots ${gap}min apart (likely operating hours)`);
+              return null;
+            }
+          } else if (inWindow.length === 1) {
+            console.log(`✗ ${r.name} [yelp/fast] — rejected: only 1 slot (likely operating hours): ${inWindow[0].time}`);
+            return null;
+          }
+        }
+
+        if (inWindow.length > 0) {
+          inWindow.sort((a, b) => Math.abs(a.minutes - requestedMin) - Math.abs(b.minutes - requestedMin));
+          const top5 = inWindow.slice(0, 5).sort((a, b) => a.minutes - b.minutes);
+          r.timeSlots = top5.map(t => ({ time: t.time }));
+          console.log(`✓ Verified ${r.name} [yelp/fast] — ${top5.length} slots from search page: ${top5.map(t => t.time).join(", ")}`);
+          return r;
+        }
+        // If search-page slots are outside window, fall through to individual scrape
+        console.log(`  ${r.name} [yelp]: search-page slots outside ±2h window, falling through to individual scrape`);
+      }
+
       const yelpExtractPrompt = "Extract only the visible, currently bookable reservation times from this Yelp reservation page. Exclude operating hours, opening/closing times, waitlist times, sold-out times, and anything from Location & Hours or About sections. Also extract address if visible. Return JSON with available_times (array of time strings like '6:30 PM') and address if present.";
 
       const isResy = r.platform === "resy";
