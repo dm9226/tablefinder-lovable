@@ -1451,6 +1451,7 @@ async function fetchYelpCandidates(
     let links: string[] = [];
     let steelSessionId: string | null = null;
 
+      console.log("[YELP_STEEL] Starting Steel.dev discovery session...");
     try {
       // 1. Create Steel session with proxy + captcha solving
       const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
