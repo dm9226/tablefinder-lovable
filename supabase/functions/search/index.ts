@@ -183,7 +183,24 @@ serve(async (req) => {
   const startTime = Date.now();
 
   try {
-    const { query, lat, lng, location, extended, remainingCandidates: incomingCandidates, extendedParams } = await req.json();
+    const body = await req.json();
+
+    // ── TEST ROUTE: Yelp Openings API ──
+    if (body.action === "test_yelp_openings") {
+      const yelpKey = Deno.env.get("YELP_API_KEY") || "";
+      const alias = body.alias || "south-city-kitchen-midtown-atlanta-2";
+      const testUrl = `https://api.yelp.com/v3/bookings/${alias}/openings?date=2026-04-14&time=19:00&covers=2`;
+      console.log(`Testing Yelp Openings API: ${testUrl}, key len=${yelpKey.length}`);
+      const resp = await fetch(testUrl, { headers: { Authorization: `Bearer ${yelpKey}` } });
+      const respBody = await resp.text();
+      return new Response(JSON.stringify({
+        status: resp.status,
+        body: respBody.slice(0, 2000),
+        keyLen: yelpKey.length,
+      }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    const { query, lat, lng, location, extended, remainingCandidates: incomingCandidates, extendedParams } = body;
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
     
