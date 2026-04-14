@@ -1451,6 +1451,7 @@ async function fetchYelpCandidates(
     let links: string[] = [];
     let steelSessionId: string | null = null;
 
+      console.log("[YELP_STEEL] Starting Steel.dev discovery session...");
     try {
       // 1. Create Steel session with proxy + captcha solving
       const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
@@ -1460,8 +1461,8 @@ async function fetchYelpCandidates(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          useProxy: true,
-          solveCaptcha: true,
+          useProxy: false,
+          solveCaptcha: false,
         }),
       });
       if (!sessionResp.ok) {
@@ -1475,6 +1476,7 @@ async function fetchYelpCandidates(
         console.log("Yelp discovery Steel session missing id");
         return [];
       }
+      console.log(`[YELP_STEEL] Session created: ${steelSessionId}`);
 
       // 2. Connect via CDP WebSocket
       const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
@@ -2258,8 +2260,8 @@ async function verifyAvailability(
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              useProxy: true,
-              solveCaptcha: true,
+              useProxy: false,
+              solveCaptcha: false,
             }),
           });
           if (!sessionResp.ok) {
