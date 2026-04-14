@@ -1754,7 +1754,7 @@ function extractStructuredTimeLabels(value: unknown): string[] {
     }
     if (typeof input === "object") {
       const obj = input as Record<string, unknown>;
-      for (const key of ["available_times", "times", "time_slots", "slots", "reservation_times"]) {
+      for (const key of ["available_times", "available_reservation_times", "times", "time_slots", "slots", "reservation_times"]) {
         collect(obj[key]);
       }
     }
