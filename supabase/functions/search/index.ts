@@ -2102,24 +2102,24 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
-  // Browserbase concurrency limiter (free plan: 3 concurrent sessions, use 2 to be safe)
-  let bbActiveCount = 0;
-  const bbQueue: (() => void)[] = [];
-  const BB_MAX_CONCURRENT = 2;
-  const acquireBBSlot = (): Promise<void> => {
-    if (bbActiveCount < BB_MAX_CONCURRENT) {
-      bbActiveCount++;
+  // Steel.dev concurrency limiter (hobby tier: be conservative)
+  let steelActiveCount = 0;
+  const steelQueue: (() => void)[] = [];
+  const STEEL_MAX_CONCURRENT = 2;
+  const acquireSteelSlot = (): Promise<void> => {
+    if (steelActiveCount < STEEL_MAX_CONCURRENT) {
+      steelActiveCount++;
       return Promise.resolve();
     }
-    return new Promise<void>(resolve => bbQueue.push(resolve));
+    return new Promise<void>(resolve => steelQueue.push(resolve));
   };
-  const releaseBBSlot = () => {
-    bbActiveCount--;
-    const next = bbQueue.shift();
-    if (next) { bbActiveCount++; next(); }
+  const releaseSteelSlot = () => {
+    steelActiveCount--;
+    const next = steelQueue.shift();
+    if (next) { steelActiveCount++; next(); }
   };
 
-  // Run ALL scrapes in parallel (Firecrawl handles concurrency, Browserbase is rate-limited)
+  // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
      try {
        const isYelp = r.platform === "yelp";
@@ -2127,50 +2127,48 @@ async function verifyAvailability(
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
 
-      // ── YELP: Browserbase stealth browser scrape ──
-      // Firecrawl can't bypass Yelp's DataDome. Use Browserbase CDP for Yelp.
-      let yelpBrowserbaseHtml = "";
+      // ── YELP: Steel.dev stealth browser scrape ──
+      // Firecrawl can't bypass Yelp's DataDome. Use Steel.dev CDP for Yelp.
+      let yelpSteelHtml = "";
       let yelpHasConcreteSlotEvidence = false;
        if (isYelp) {
-        await acquireBBSlot();
-        const bbApiKey = Deno.env.get("BROWSERBASE_API_KEY");
-        const bbProjectId = Deno.env.get("BROWSERBASE_PROJECT_ID");
-        if (!bbApiKey || !bbProjectId) {
-          releaseBBSlot();
-          console.log(`✗ ${r.name} [yelp] — skipped: BROWSERBASE_API_KEY or BROWSERBASE_PROJECT_ID not configured`);
+        await acquireSteelSlot();
+        const steelApiKey = Deno.env.get("STEEL_API_KEY");
+        if (!steelApiKey) {
+          releaseSteelSlot();
+          console.log(`✗ ${r.name} [yelp] — skipped: STEEL_API_KEY not configured`);
           return null;
         }
         try {
-          console.log(`  ${r.name} [yelp] — starting Browserbase stealth session for: ${r.platformUrl}`);
-          // 1. Create session
-          const sessionResp = await fetch("https://api.browserbase.com/v1/sessions", {
+          console.log(`  ${r.name} [yelp] — starting Steel.dev stealth session for: ${r.platformUrl}`);
+          // 1. Create session via Steel REST API
+          const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
             method: "POST",
             headers: {
-              "x-bb-api-key": bbApiKey,
+              "steel-api-key": steelApiKey,
               "Content-Type": "application/json",
             },
-             body: JSON.stringify({
-              projectId: bbProjectId,
-              proxies: true,
-              browserSettings: { solveCaptchas: true },
+            body: JSON.stringify({
+              useProxy: true,
+              solveCaptcha: true,
             }),
           });
-           if (!sessionResp.ok) {
+          if (!sessionResp.ok) {
             const errText = await sessionResp.text().catch(() => "");
-            console.log(`✗ ${r.name} [yelp] — Browserbase session create failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
-            releaseBBSlot();
+            console.log(`✗ ${r.name} [yelp] — Steel session create failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
+            releaseSteelSlot();
             return null;
           }
           const sessionData = await sessionResp.json();
-          const connectUrl = sessionData.connectUrl;
-          const sessionId = sessionData.id;
-          if (!connectUrl) {
-            console.log(`✗ ${r.name} [yelp] — Browserbase session missing connectUrl`);
-            releaseBBSlot();
+          const steelSessionId = sessionData.id;
+          if (!steelSessionId) {
+            console.log(`✗ ${r.name} [yelp] — Steel session missing id`);
+            releaseSteelSlot();
             return null;
           }
 
-           // 2. Connect via CDP WebSocket (browser-level)
+          // 2. Connect via CDP WebSocket
+          const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
           const ws = new WebSocket(connectUrl);
           let cdpId = 1;
           const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
@@ -2261,9 +2259,9 @@ async function verifyAvailability(
             expression: "document.documentElement.outerHTML",
             returnByValue: true,
           });
-          yelpBrowserbaseHtml = docResult?.result?.value || "";
-           console.log(`  ${r.name} [yelp] Browserbase extracted ${yelpBrowserbaseHtml.length} chars of HTML`);
-          console.log(`  [DEBUG] ${r.name} [yelp] Browserbase HTML (first 2000 chars):\n${yelpBrowserbaseHtml.slice(0, 2000)}`);
+          yelpSteelHtml = docResult?.result?.value || "";
+          console.log(`  ${r.name} [yelp] Steel extracted ${yelpSteelHtml.length} chars of HTML`);
+          console.log(`  [DEBUG] ${r.name} [yelp] Steel HTML (first 2000 chars):\n${yelpSteelHtml.slice(0, 2000)}`);
 
           // Check final URL (redirect detection)
           const locationResult = await cdpSend("Runtime.evaluate", {
@@ -2274,26 +2272,31 @@ async function verifyAvailability(
 
           // Close session
           try { ws.close(); } catch (_) {}
+          // Release Steel session via API
+          try {
+            await fetch(`https://api.steel.dev/v1/sessions/${steelSessionId}/release`, {
+              method: "POST",
+              headers: { "steel-api-key": steelApiKey },
+            });
+          } catch (_) {}
 
           // Check for redirect away from /reservations/
-           if (finalUrl && !finalUrl.includes("/reservations/")) {
+          if (finalUrl && !finalUrl.includes("/reservations/")) {
             console.log(`✗ ${r.name} [yelp] — redirected to: ${finalUrl}, skipping`);
-            releaseBBSlot();
+            releaseSteelSlot();
             return null;
           }
 
-          // 6. Parse HTML for time slot buttons
-          // Look for standalone time patterns in the HTML that indicate rendered reservation buttons
-          // Real Yelp widgets render times as buttons/links like <button>5:00 PM</button>
+          // 7. Parse HTML for time slot buttons
           const timeButtonRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
           const renderedTimes: string[] = [];
           let tbMatch;
-          while ((tbMatch = timeButtonRegex.exec(yelpBrowserbaseHtml)) !== null) {
+          while ((tbMatch = timeButtonRegex.exec(yelpSteelHtml)) !== null) {
             renderedTimes.push(tbMatch[1].trim());
           }
 
-          // Also check for standalone time text lines (text content extraction)
-          const textContent = yelpBrowserbaseHtml.replace(/<[^>]+>/g, "\n");
+          // Also check for standalone time text lines
+          const textContent = yelpSteelHtml.replace(/<[^>]+>/g, "\n");
           const textLines = textContent.split("\n");
           let standaloneTimeLines = 0;
           for (const line of textLines) {
@@ -2301,24 +2304,24 @@ async function verifyAvailability(
           }
 
           const reservationKeywords = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
-          const hasReservationSection = reservationKeywords.test(yelpBrowserbaseHtml);
+          const hasReservationSection = reservationKeywords.test(yelpSteelHtml);
 
           yelpHasConcreteSlotEvidence = renderedTimes.length >= 2 || standaloneTimeLines >= 2 || (hasReservationSection && (renderedTimes.length >= 1 || standaloneTimeLines >= 1));
 
-          console.log(`  ${r.name} [yelp] Browserbase widget check: ${renderedTimes.length} button times, ${standaloneTimeLines} standalone time lines, reservationSection=${hasReservationSection}, evidence=${yelpHasConcreteSlotEvidence}`);
+          console.log(`  ${r.name} [yelp] Steel widget check: ${renderedTimes.length} button times, ${standaloneTimeLines} standalone time lines, reservationSection=${hasReservationSection}, evidence=${yelpHasConcreteSlotEvidence}`);
           if (renderedTimes.length > 0) {
-            console.log(`  ${r.name} [yelp] Browserbase found times: ${renderedTimes.slice(0, 10).join(", ")}`);
+            console.log(`  ${r.name} [yelp] Steel found times: ${renderedTimes.slice(0, 10).join(", ")}`);
           }
 
-           if (!yelpHasConcreteSlotEvidence) {
-            console.log(`✗ ${r.name} [yelp] — rejected: Browserbase stealth browser found no concrete slot evidence`);
-            releaseBBSlot();
+          if (!yelpHasConcreteSlotEvidence) {
+            console.log(`✗ ${r.name} [yelp] — rejected: Steel stealth browser found no concrete slot evidence`);
+            releaseSteelSlot();
             return null;
           }
-          releaseBBSlot();
-        } catch (bbErr: any) {
-          releaseBBSlot();
-          console.log(`✗ ${r.name} [yelp] — Browserbase error: ${bbErr.message || bbErr}`);
+          releaseSteelSlot();
+        } catch (steelErr: any) {
+          releaseSteelSlot();
+          console.log(`✗ ${r.name} [yelp] — Steel error: ${steelErr.message || steelErr}`);
           return null;
         }
       }
