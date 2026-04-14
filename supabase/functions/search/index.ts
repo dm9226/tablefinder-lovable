@@ -2578,7 +2578,7 @@ async function verifyAvailability(
           }
         }
 
-        console.log(`  ${r.name} [yelp]: extract jsonData keys: ${jsonData ? Object.keys(jsonData).join(", ") : "null"}`);
+        console.log(`  ${r.name} [yelp]: extract jsonData keys: ${jsonData ? Object.keys(jsonData).join(", ") : "null"}, available_times value: ${JSON.stringify(jsonData?.available_times || jsonData?.available_reservation_times || "missing").slice(0, 300)}`);
         const extractedTimes = extractStructuredTimeLabels(jsonData);
         console.log(`  ${r.name} [yelp]: extractStructuredTimeLabels returned ${extractedTimes.length} times: ${extractedTimes.join(", ")}`);
         for (const extractedTime of extractedTimes) {
