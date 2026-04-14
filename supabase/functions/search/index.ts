@@ -2899,11 +2899,23 @@ async function verifyAvailability(
         }
       }
 
-      if (isYelp && foundTimes.length === 0) {
-        console.log(`  ${r.name} [yelp]: no structured slots on first pass — retrying with longer wait`);
+       if (isYelp && foundTimes.length === 0) {
+        console.log(`  ${r.name} [yelp]: no slots on first pass — retrying with aggressive browser actions`);
         try {
           const yelpRetryAbort = new AbortController();
-          const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
+          const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 55_000);
+
+          // More aggressive action sequence for retry: multiple clicks + longer waits
+          const retryActions = [
+            { type: "wait", milliseconds: 5000 },
+            { type: "scroll", direction: "down", amount: 5 },
+            { type: "wait", milliseconds: 3000 },
+            { type: "click", selector: "[class*='reservation'], [data-testid*='reservation'], [aria-label*='reservation'], button:has-text('Find a Table'), a:has-text('Make a Reservation'), [class*='time-picker'], [class*='timepicker']" },
+            { type: "wait", milliseconds: 8000 },
+            { type: "scroll", direction: "up", amount: 2 },
+            { type: "wait", milliseconds: 3000 },
+          ];
+
           const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
             method: "POST",
             headers: {
@@ -2914,8 +2926,8 @@ async function verifyAvailability(
               url: r.platformUrl,
               formats: ["markdown", "html", "links", "extract"],
               onlyMainContent: false,
-              waitFor: 18000,
-              timeout: 35000,
+              actions: retryActions,
+              timeout: 45000,
               extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema },
             }),
             signal: yelpRetryAbort.signal,
@@ -2926,7 +2938,6 @@ async function verifyAvailability(
             const retryData = await retryResp.json();
             const retryMarkdown = extractFirecrawlMarkdown(retryData);
             const retryHtml = extractFirecrawlHtml(retryData);
-            const retryLinks = extractFirecrawlLinks(retryData);
             const retryExtract = retryData?.data?.extract || retryData?.extract;
             const retryTimes: string[] = Array.isArray(retryExtract?.available_times)
               ? retryExtract.available_times
@@ -2935,7 +2946,7 @@ async function verifyAvailability(
                 : extractStructuredTimeLabels(retryExtract);
             if (retryMarkdown) bookingMarkdown = retryMarkdown;
 
-            // Apply same widget-render guard on retry: count dedicated time-button lines
+            // Apply same widget-render guard on retry
             const retryMd = retryMarkdown || "";
             const retryLines = retryMd.split("\n");
             let retryTimeLineCount = 0;
@@ -2945,10 +2956,9 @@ async function verifyAvailability(
             const retryReservationSectionPattern = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
             const retryReservationSectionPresent = retryReservationSectionPattern.test(retryMd) || retryReservationSectionPattern.test(retryHtml || "");
             const retryHasConcreteSlotEvidence = retryTimeLineCount >= 2 || (retryReservationSectionPresent && retryTimeLineCount >= 1);
-            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryTimeLineCount} dedicated time-button lines, reservationSection=${retryReservationSectionPresent}`);
+            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryTimeLineCount} time-button lines, reservationSection=${retryReservationSectionPresent}`);
             if (!retryHasConcreteSlotEvidence) {
-              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still lacks concrete reservation slot evidence`);
-              // Don't use these hallucinated times
+              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still lacks concrete slot evidence after browser actions`);
             } else {
               for (const retryTime of retryTimes) {
                 const parsed = parseTimeStr(retryTime);
@@ -2957,18 +2967,18 @@ async function verifyAvailability(
                   foundTimes.push(parsed);
                 }
               }
-
               if (retryTimes.length > 0) {
-                console.log(`  ${r.name} [yelp] RETRY SUCCESS: ${retryTimes.join(", ")}`);
+                console.log(`  ${r.name} [yelp] RETRY SUCCESS (browser actions): ${retryTimes.join(", ")}`);
               } else {
                 console.log(`  ${r.name} [yelp] RETRY: still no structured slots found`);
               }
             }
           } else {
-            console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
+            const errBody = await retryResp.text().catch(() => "");
+            console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status}): ${errBody.slice(0, 200)}`);
           }
         } catch (retryErr: any) {
-          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
+          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout" : retryErr}`);
         }
       }
 
