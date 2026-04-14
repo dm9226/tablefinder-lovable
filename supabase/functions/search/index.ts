@@ -1449,6 +1449,7 @@ async function fetchYelpCandidates(
 
     let markdown = "";
     let links: string[] = [];
+    let domCards: Array<Record<string, string>> = [];
     let steelSessionId: string | null = null;
 
       console.log("[YELP_STEEL] Starting Steel.dev discovery session...");
@@ -1544,28 +1545,65 @@ async function fetchYelpCandidates(
         await new Promise(resolve => setTimeout(resolve, 1500));
       }
 
-      // 5. Extract page text content and all links
+      // 5. Extract visible text, links, and lightweight result cards from the rendered Yelp page
       const extractResult = await cdpSend("Runtime.evaluate", {
         expression: `
           (function() {
             const anchors = Array.from(document.querySelectorAll('a[href]'));
             const hrefs = anchors.map(a => a.href).filter(h => h.includes('yelp.com'));
+            const skipName = /^(skip|filters?|sort|more filters|sponsored|ad|map|delivery|takeout|open now|yelp)$/i;
+            const cardsByAlias = new Map();
+
+            for (const anchor of anchors) {
+              const href = anchor.href || '';
+              if (!/\/(?:biz|reservations)\//i.test(href)) continue;
+
+              const rawName = (anchor.textContent || '').replace(/\s+/g, ' ').trim();
+              if (!rawName || rawName.length < 2 || rawName.length > 120 || skipName.test(rawName)) continue;
+
+              const aliasMatch = href.match(/\/(?:biz|reservations)\/([^/?#]+)/i);
+              const alias = (aliasMatch?.[1] || rawName.toLowerCase().replace(/[^a-z0-9]+/g, '-')).toLowerCase();
+              const container = anchor.closest('li, article, [role="article"]') || anchor.parentElement || anchor;
+              const snippet = (container?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 700);
+
+              const existing = cardsByAlias.get(alias) || {
+                alias,
+                name: rawName,
+                businessUrl: '',
+                reservationUrl: '',
+                snippet: '',
+              };
+
+              if (/\/reservations\//i.test(href)) existing.reservationUrl = href;
+              if (/\/biz\//i.test(href)) existing.businessUrl = href;
+              if (!existing.name || rawName.length > existing.name.length) existing.name = rawName;
+              if (snippet.length > (existing.snippet || '').length) existing.snippet = snippet;
+              cardsByAlias.set(alias, existing);
+            }
+
             const text = document.body.innerText || document.body.textContent || '';
-            return JSON.stringify({ text: text, links: hrefs });
+            return JSON.stringify({
+              text,
+              links: hrefs,
+              cards: Array.from(cardsByAlias.values()),
+            });
           })()
         `,
         returnByValue: true,
       });
 
-      const extracted = JSON.parse(extractResult?.result?.value || '{"text":"","links":[]}');
-      markdown = extracted.text || "";
-      links = extracted.links || [];
+      const extracted = JSON.parse(extractResult?.result?.value || '{"text":"","links":[],"cards":[]}');
+      markdown = typeof extracted.text === "string" ? extracted.text : "";
+      links = Array.isArray(extracted.links) ? extracted.links : [];
+      domCards = Array.isArray(extracted.cards) ? extracted.cards : [];
 
       // Close WebSocket
       try { ws.close(); } catch (_) {}
 
-      console.log(`Yelp Steel discovery: links=${links.length}, markdown=${markdown.length} chars`);
-      console.log(`[DEBUG] Yelp Steel discovery text (first 1500 chars):\n${markdown.slice(0, 1500)}`);
+      console.log(`Yelp Steel discovery: links=${links.length}, cards=${domCards.length}, text=${markdown.length} chars`);
+      console.log(`[DEBUG] Yelp Steel discovery text (first 1500 chars):
+${markdown.slice(0, 1500)}`);
+    } catch (steelErr: any) {
     } catch (steelErr: any) {
       console.log(`Yelp discovery Steel error: ${steelErr.message || steelErr}`);
     } finally {
@@ -1580,19 +1618,20 @@ async function fetchYelpCandidates(
       }
     }
 
-    // Parse restaurants from markdown using regex patterns
-    // Yelp markdown typically has restaurant names as bold or header text followed by ratings, categories, and time slots
-    const extracted = parseYelpMarkdownResults(markdown);
-    console.log(`Yelp markdown parsed ${extracted.length} restaurants`);
+    const extractedFromCards = parseYelpDomCards(domCards);
+    const extractedFromMarkdown = parseYelpMarkdownResults(markdown);
+    const extracted = extractedFromCards.length > 0 ? extractedFromCards : extractedFromMarkdown;
+    console.log(`Yelp discovery parsed cards=${extractedFromCards.length}, markdown=${extractedFromMarkdown.length}, using=${extracted.length}`);
 
-    // Build markdown-based time slot map (already done during parsing)
     const markdownTimesMap = new Map<string, string[]>();
-    for (const rest of extracted) {
-      if (rest.availableTimes.length > 0) {
-        markdownTimesMap.set(rest.name, rest.availableTimes);
+    for (const rest of extractedFromMarkdown) {
+      const key = normalizeRestaurantNameForMatch(rest.name);
+      if (key && rest.availableTimes.length > 0) {
+        markdownTimesMap.set(key, rest.availableTimes);
       }
     }
 
+    // Build alias map from links for URL construction
     // Build alias map from links for URL construction
     const reservationLinkMap = new Map<string, string>();
     const bizLinkMap = new Map<string, string>();
@@ -1641,15 +1680,17 @@ async function fetchYelpCandidates(
       }
 
       if (!alias) {
-        alias = rest.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        alias = typeof (rest as any).alias === "string"
+          ? (rest as any).alias.toLowerCase()
+          : rest.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       }
 
       reservationUrl = reservationUrl || reservationLinkMap.get(alias) || null;
       bizUrl = bizUrl || bizLinkMap.get(alias) || null;
       const bestUrl = reservationUrl || (bizUrl ? bizUrl.replace("/biz/", "/reservations/") : `https://www.yelp.com/reservations/${alias}`);
 
-      // Use times from parsing
-      const allTimes = rest.availableTimes;
+      const markdownTimes = markdownTimesMap.get(normalizeRestaurantNameForMatch(rest.name)) || [];
+      const allTimes = rest.availableTimes.length > 0 ? rest.availableTimes : markdownTimes;
 
       results.push({
         id: `yelp-${alias}`,
@@ -1775,6 +1816,84 @@ function parseYelpMarkdownResults(markdown: string): Array<{
       availableTimes,
       reservationUrl: undefined, // Will be constructed from alias in the caller
       businessUrl: entry.url,
+    });
+  }
+
+  return results;
+}
+
+function parseYelpDomCards(cards: Array<Record<string, string>>): Array<{
+  alias?: string;
+  name: string;
+  neighborhood?: string;
+  rating?: number;
+  reviewCount?: number;
+  priceRange?: string;
+  cuisineCategories: string[];
+  availableTimes: string[];
+  reservationUrl?: string;
+  businessUrl?: string;
+}> {
+  if (!Array.isArray(cards) || cards.length === 0) return [];
+
+  const results: Array<{
+    alias?: string;
+    name: string;
+    neighborhood?: string;
+    rating?: number;
+    reviewCount?: number;
+    priceRange?: string;
+    cuisineCategories: string[];
+    availableTimes: string[];
+    reservationUrl?: string;
+    businessUrl?: string;
+  }> = [];
+
+  const seen = new Set<string>();
+  const SKIP_NAMES = /^(skip|top \d|can't find|trending|seasonal|more nearby|browse|popular brands|nearby cities|neighborhoods|streets|campuses|related|more filters|filters|sort|sponsored|ad)$/i;
+
+  for (const card of cards) {
+    const name = typeof card?.name === "string" ? card.name.replace(/\s+/g, " ").trim() : "";
+    if (!name || name.length < 2 || name.length > 120 || SKIP_NAMES.test(name)) continue;
+
+    const businessUrl = typeof card?.businessUrl === "string" && card.businessUrl ? card.businessUrl : undefined;
+    const reservationUrl = typeof card?.reservationUrl === "string" && card.reservationUrl ? card.reservationUrl : undefined;
+    const alias = typeof card?.alias === "string" && card.alias
+      ? card.alias.toLowerCase()
+      : extractYelpAliasFromUrl(reservationUrl || businessUrl || "") || normalizeRestaurantNameForMatch(name);
+
+    if (!alias || seen.has(alias)) continue;
+    seen.add(alias);
+
+    const snippet = typeof card?.snippet === "string" ? card.snippet : "";
+    const ratingMatch = snippet.match(/(?:^|\s)([1-5]\.\d)(?=\s*(?:star|stars|rating|\(|\d+(?:\.\d+)?k?\s*reviews?))/i) || snippet.match(/★\s*([1-5]\.\d)/);
+    const rating = ratingMatch ? parseFloat(ratingMatch[1]) : undefined;
+
+    const reviewMatch = snippet.match(/([\d,]+(?:\.\d+)?k?)\s*reviews?/i);
+    let reviewCount: number | undefined;
+    if (reviewMatch) {
+      const raw = reviewMatch[1].replace(/,/g, "");
+      reviewCount = raw.endsWith("k") ? Math.round(parseFloat(raw) * 1000) : parseInt(raw);
+    }
+
+    const priceRange = snippet.match(/(\${1,4})/)?.[1];
+    const neighborhood = snippet.match(/·\s*([A-Z][a-zA-Z\s]{2,25})(?:\s*·|\s*$)/m)?.[1]?.trim();
+    const rawTimes = snippet.match(/\d{1,2}:\d{2}\s*(?:AM|PM)/gi) || [];
+    const availableTimes = [...new Set(
+      rawTimes.map((value) => normalizeExtractedTimeLabel(value)).filter(Boolean) as string[]
+    )];
+
+    results.push({
+      alias,
+      name,
+      neighborhood,
+      rating,
+      reviewCount,
+      priceRange,
+      cuisineCategories: [],
+      availableTimes,
+      reservationUrl,
+      businessUrl,
     });
   }
 
