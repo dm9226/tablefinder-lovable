@@ -2132,10 +2132,12 @@ async function verifyAvailability(
       // Firecrawl can't bypass Yelp's DataDome. Use Browserbase CDP for Yelp.
       let yelpBrowserbaseHtml = "";
       let yelpHasConcreteSlotEvidence = false;
-      if (isYelp) {
+       if (isYelp) {
+        await acquireBBSlot();
         const bbApiKey = Deno.env.get("BROWSERBASE_API_KEY");
         const bbProjectId = Deno.env.get("BROWSERBASE_PROJECT_ID");
         if (!bbApiKey || !bbProjectId) {
+          releaseBBSlot();
           console.log(`✗ ${r.name} [yelp] — skipped: BROWSERBASE_API_KEY or BROWSERBASE_PROJECT_ID not configured`);
           return null;
         }
