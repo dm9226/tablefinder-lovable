@@ -2100,10 +2100,43 @@ async function verifyAvailability(
   amenityTerms: string[] = [],
   globalStartTime?: number
 ): Promise<Restaurant[]> {
-  if (candidates.length === 0) return [];
+   if (candidates.length === 0) return [];
 
-  // Run ALL scrapes in parallel (Firecrawl handles concurrency)
-  const checked = await Promise.all(candidates.map(async (r) => {
+  // Split Yelp from non-Yelp: Yelp uses Browserbase with concurrency limits (max 2 at a time)
+  const yelpCandidates = candidates.filter(c => c.platform === "yelp");
+  const nonYelpCandidates = candidates.filter(c => c.platform !== "yelp");
+
+  // Process non-Yelp in parallel, Yelp in batches of 2
+  const verifySingle = async (r: Restaurant): Promise<Restaurant | null> => {
+    try {
+
+  // Shared verification logic (extracted into verifySingle)
+  const checked = await Promise.all(nonYelpCandidates.map(verifySingle));
+
+  // Process Yelp in serial batches of 2 to respect Browserbase concurrency
+  const yelpResults: (Restaurant | null)[] = [];
+  for (let i = 0; i < yelpCandidates.length; i += 2) {
+    const batch = yelpCandidates.slice(i, i + 2);
+    const batchResults = await Promise.all(batch.map(verifySingle));
+    yelpResults.push(...batchResults);
+  }
+
+  const allChecked = [...checked, ...yelpResults];
+  return allChecked.filter((r): r is Restaurant => r !== null);
+}
+
+// ── Shared single-restaurant verification logic ──
+async function verifySingleRestaurant(
+  r: Restaurant,
+  params: SearchParams,
+  firecrawlKey: string,
+  amenityTerms: string[],
+  globalStartTime?: number
+): Promise<Restaurant | null> {
+  try {
+  const checked_placeholder = [r]; // never used — just to keep TS happy with the old closing structure
+  // The actual verification starts here:
+  {
     try {
        const isYelp = r.platform === "yelp";
 
