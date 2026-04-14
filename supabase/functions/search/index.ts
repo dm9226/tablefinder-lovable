@@ -2208,19 +2208,31 @@ async function verifyAvailability(
           return null;
         }
         // Guard: if the reservation widget never rendered (all "Loading..." placeholders),
-        // reject — the LLM will hallucinate times from operating hours
+        // reject — the LLM will hallucinate times from operating hours.
+        // We check the markdown for actual reservation-widget time buttons.
+        // Real Yelp reservation widgets render times like "5:00 PM" "5:15 PM" as clickable buttons
+        // in a specific reservation section. Operating hours appear as "Open5:00 PM - 9:00 PM" or
+        // "Closed11:00 AM - 2:30 PM, 5:00 PM - 9:00 PM" on a single line with Open/Closed prefix.
+        // Review text can also mention times. We need to find a CLUSTER of times (3+) appearing
+        // close together that are NOT part of operating hours.
         const mdText = markdown || "";
         const loadingCount = (mdText.match(/Loading\.\.\./g) || []).length;
-        // Strip operating hours lines (e.g. "Open5:00 PM - 9:00 PM"), nav links, and Loading... to isolate real time buttons
-        const strippedMd = mdText
-          .replace(/^.*?(Open|Closed)\s*\d{1,2}:\d{2}\s*(AM|PM).*$/gim, "")
-          .replace(/Loading\.\.\./g, "")
-          .replace(/\[.*?\]\(.*?\)/g, "");
-        const standaloneTimePattern = /\b\d{1,2}:\d{2}\s*(AM|PM)\b/gi;
-        const standaloneTimes = strippedMd.match(standaloneTimePattern) || [];
-        console.log(`  ${r.name} [yelp] widget render check: ${loadingCount} "Loading..." placeholders, ${standaloneTimes.length} standalone time buttons in markdown`);
-        if (loadingCount >= 5 && standaloneTimes.length === 0) {
-          console.log(`✗ ${r.name} [yelp] — rejected: reservation widget did not render (${loadingCount} "Loading...", 0 time buttons). LLM extraction would hallucinate from operating hours.`);
+        
+        // Split into lines, find lines that are JUST a time (reservation button) vs embedded in text
+        const mdLines = mdText.split("\n");
+        let reservationTimeLines = 0;
+        for (const line of mdLines) {
+          const trimmed = line.trim();
+          // A reservation time button line is very short and contains a time pattern
+          // e.g. "5:00 PM" or "7:30 PM" — not embedded in a sentence
+          if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
+            reservationTimeLines++;
+          }
+        }
+        
+        console.log(`  ${r.name} [yelp] widget render check: ${loadingCount} "Loading...", ${reservationTimeLines} dedicated time-button lines`);
+        if (reservationTimeLines < 3) {
+          console.log(`✗ ${r.name} [yelp] — rejected: reservation widget did not render (only ${reservationTimeLines} time-button lines found, need ≥3). LLM extraction would hallucinate from operating hours.`);
           return null;
         }
       }
