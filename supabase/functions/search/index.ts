@@ -1025,12 +1025,13 @@ async function searchFirecrawl(
         ];
       })()
     : [
-        `site:yelp.com/reservations ${cityState} best${cuisine}`,
-        `site:yelp.com/biz ${cityState} top rated${cuisine} reservation`,
+        `site:yelp.com/reservations ${cityState}${cuisine} restaurant`,
+        `site:yelp.com/reservations ${cityState} best rated${cuisine} restaurant`,
+        `site:yelp.com/reservations ${cityState} find open tables${cuisine}`,
         ...(needsCuisineTypeQuery ? [
-          `site:yelp.com/biz ${cityState}${cuisineTypeSuffix} restaurant reservation`,
+          `site:yelp.com/reservations ${cityState}${cuisineTypeSuffix} restaurant`,
         ] : []),
-        ...(amenitySuffix ? [`site:yelp.com/biz ${cityState}${amenitySuffix} restaurant reservation`] : []),
+        ...(amenitySuffix ? [`site:yelp.com/reservations ${cityState}${amenitySuffix} restaurant`] : []),
       ];
 
   if (hasDishKeyword) {
@@ -1301,7 +1302,7 @@ function normalizeCandidates(
         ? addResyParams(canonUrl, params)
         : platform === "opentable"
         ? addOTParams(canonUrl, params)
-        : canonUrl;
+        : buildYelpAvailabilityUrl(canonUrl, params);
 
       return {
         id: `${platform}-${hashKey(canonUrl)}`,
@@ -2387,203 +2388,59 @@ async function verifyAvailability(
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
 
-      // ── YELP: Steel.dev stealth browser scrape ──
-      // Firecrawl can't bypass Yelp's DataDome. Use Steel.dev CDP for Yelp.
+      // ── YELP: Firecrawl reservation-page scrape ──
       let yelpSteelHtml = "";
       let yelpHasConcreteSlotEvidence = false;
-       if (isYelp) {
-        await acquireSteelSlot();
-        const steelApiKey = Deno.env.get("STEEL_API_KEY");
-        if (!steelApiKey) {
-          releaseSteelSlot();
-          console.log(`✗ ${r.name} [yelp] — skipped: STEEL_API_KEY not configured`);
-          return null;
-        }
+      let markdown = "";
+      let html = "";
+      let links: string[] = [];
+      let jsonData: any = null;
+      let data: any = null;
+
+      if (isYelp) {
+        const scrapeAbort = new AbortController();
+        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
+        let yelpResp: Response;
         try {
-          console.log(`  ${r.name} [yelp] — starting Steel.dev stealth session for: ${r.platformUrl}`);
-          // 1. Create session via Steel REST API
-          const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
+          yelpResp = await fetch(`${FIRECRAWL_API}/scrape`, {
             method: "POST",
             headers: {
-              "steel-api-key": steelApiKey,
+              Authorization: `Bearer ${firecrawlKey}`,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              useProxy: false,
-              solveCaptcha: false,
+              url: r.platformUrl,
+              formats: ["markdown", "html"],
+              onlyMainContent: false,
+              waitFor: 5000,
             }),
+            signal: scrapeAbort.signal,
           });
-          if (!sessionResp.ok) {
-            const errText = await sessionResp.text().catch(() => "");
-            console.log(`✗ ${r.name} [yelp] — Steel session create failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
-            releaseSteelSlot();
-            return null;
-          }
-          const sessionData = await sessionResp.json();
-          const steelSessionId = sessionData.id;
-          if (!steelSessionId) {
-            console.log(`✗ ${r.name} [yelp] — Steel session missing id`);
-            releaseSteelSlot();
-            return null;
-          }
-
-          // 2. Connect via CDP WebSocket
-          const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
-          const ws = new WebSocket(connectUrl);
-          let cdpId = 1;
-          const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
-          let cdpSessionId: string | null = null;
-
-          const cdpSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
-            return new Promise((resolve, reject) => {
-              const id = cdpId++;
-              pending.set(id, { resolve, reject });
-              const msg: Record<string, unknown> = { id, method, params };
-              if (cdpSessionId) msg.sessionId = cdpSessionId;
-              ws.send(JSON.stringify(msg));
-              setTimeout(() => {
-                if (pending.has(id)) {
-                  pending.delete(id);
-                  reject(new Error(`CDP timeout: ${method}`));
-                }
-              }, 30000);
-            });
-          };
-
-          await new Promise<void>((resolve, reject) => {
-            ws.onopen = () => resolve();
-            ws.onerror = (e) => reject(e);
-            setTimeout(() => reject(new Error("WS connect timeout")), 15000);
-          });
-
-          ws.onmessage = (event) => {
-            try {
-              const msg = JSON.parse(typeof event.data === "string" ? event.data : "{}");
-              if (msg.id && pending.has(msg.id)) {
-                const p = pending.get(msg.id)!;
-                pending.delete(msg.id);
-                if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
-                else p.resolve(msg.result);
-              }
-            } catch (_) { /* ignore parse errors */ }
-          };
-
-          // 3. Create a new page target and attach to it with flatten=true
-          const targetResult = await cdpSend("Target.createTarget", { url: "about:blank" });
-          const targetId = targetResult?.targetId;
-          if (!targetId) throw new Error("Failed to create browser target");
-
-          const attachResult = await cdpSend("Target.attachToTarget", { targetId, flatten: true });
-          cdpSessionId = attachResult?.sessionId;
-          if (!cdpSessionId) throw new Error("Failed to attach to target");
-
-          // 4. Navigate to the Yelp reservation URL
-          await cdpSend("Page.enable");
-          await cdpSend("Runtime.enable");
-          await cdpSend("Page.navigate", { url: r.platformUrl });
-
-          // Wait for page load
-          await new Promise(resolve => setTimeout(resolve, 10000));
-
-          // 5. Scroll down to trigger lazy-loaded reservation widget
-          await cdpSend("Runtime.evaluate", {
-            expression: "window.scrollBy(0, 1500); 'scrolled'",
-            returnByValue: true,
-          });
-          await new Promise(resolve => setTimeout(resolve, 3000));
-
-          // Try clicking reservation-related elements
-          const clickResult = await cdpSend("Runtime.evaluate", {
-            expression: `
-              (function() {
-                const btns = document.querySelectorAll('button, a, [role="button"]');
-                for (const b of btns) {
-                  const text = (b.textContent || '').toLowerCase();
-                  if (text.includes('find a table') || text.includes('make a reservation') || text.includes('check availability')) {
-                    b.click();
-                    return 'clicked: ' + text.trim().slice(0, 50);
-                  }
-                }
-                return 'no reservation button found';
-              })()
-            `,
-            returnByValue: true,
-          }).catch(() => ({ result: { value: "click failed" } }));
-          console.log(`  ${r.name} [yelp] click result: ${JSON.stringify(clickResult?.result?.value)}`);
-
-          // Wait for widget to render after click
-          await new Promise(resolve => setTimeout(resolve, 6000));
-
-          // 6. Extract the full page HTML
-          const docResult = await cdpSend("Runtime.evaluate", {
-            expression: "document.documentElement.outerHTML",
-            returnByValue: true,
-          });
-          yelpSteelHtml = docResult?.result?.value || "";
-          console.log(`  ${r.name} [yelp] Steel extracted ${yelpSteelHtml.length} chars of HTML`);
-          console.log(`  [DEBUG] ${r.name} [yelp] Steel HTML (first 2000 chars):\n${yelpSteelHtml.slice(0, 2000)}`);
-
-          // Check final URL (redirect detection)
-          const locationResult = await cdpSend("Runtime.evaluate", {
-            expression: "window.location.href",
-            returnByValue: true,
-          });
-          const finalUrl = locationResult?.result?.value || "";
-
-          // Close session
-          try { ws.close(); } catch (_) {}
-          // Release Steel session via API
-          try {
-            await fetch(`https://api.steel.dev/v1/sessions/${steelSessionId}/release`, {
-              method: "POST",
-              headers: { "steel-api-key": steelApiKey },
-            });
-          } catch (_) {}
-
-          // Check for redirect away from /reservations/
-          if (finalUrl && !finalUrl.includes("/reservations/")) {
-            console.log(`✗ ${r.name} [yelp] — redirected to: ${finalUrl}, skipping`);
-            releaseSteelSlot();
-            return null;
-          }
-
-          // 7. Parse HTML for time slot buttons
-          const timeButtonRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
-          const renderedTimes: string[] = [];
-          let tbMatch;
-          while ((tbMatch = timeButtonRegex.exec(yelpSteelHtml)) !== null) {
-            renderedTimes.push(tbMatch[1].trim());
-          }
-
-          // Also check for standalone time text lines
-          const textContent = yelpSteelHtml.replace(/<[^>]+>/g, "\n");
-          const textLines = textContent.split("\n");
-          let standaloneTimeLines = 0;
-          for (const line of textLines) {
-            if (/^\s*\d{1,2}:\d{2}\s*(AM|PM)\s*$/i.test(line)) standaloneTimeLines++;
-          }
-
-          const reservationKeywords = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
-          const hasReservationSection = reservationKeywords.test(yelpSteelHtml);
-
-          yelpHasConcreteSlotEvidence = renderedTimes.length >= 2 || standaloneTimeLines >= 2 || (hasReservationSection && (renderedTimes.length >= 1 || standaloneTimeLines >= 1));
-
-          console.log(`  ${r.name} [yelp] Steel widget check: ${renderedTimes.length} button times, ${standaloneTimeLines} standalone time lines, reservationSection=${hasReservationSection}, evidence=${yelpHasConcreteSlotEvidence}`);
-          if (renderedTimes.length > 0) {
-            console.log(`  ${r.name} [yelp] Steel found times: ${renderedTimes.slice(0, 10).join(", ")}`);
-          }
-
-          if (!yelpHasConcreteSlotEvidence) {
-            console.log(`✗ ${r.name} [yelp] — rejected: Steel stealth browser found no concrete slot evidence`);
-            releaseSteelSlot();
-            return null;
-          }
-          releaseSteelSlot();
-        } catch (steelErr: any) {
-          releaseSteelSlot();
-          console.log(`✗ ${r.name} [yelp] — Steel error: ${steelErr.message || steelErr}`);
+        } catch (fetchErr: any) {
+          clearTimeout(scrapeTimer);
+          console.log(`✗ ${r.name} [yelp] — Firecrawl fetch error: ${fetchErr.name === "AbortError" ? "timeout" : fetchErr}`);
           return null;
         }
+        clearTimeout(scrapeTimer);
+
+        if (!yelpResp.ok) {
+          const errBody = await yelpResp.text().catch(() => "");
+          console.log(`✗ ${r.name} [yelp] — Firecrawl scrape failed (${yelpResp.status}): ${errBody.slice(0, 300)}`);
+          return null;
+        }
+
+        const yelpData = await yelpResp.json();
+        const yelpMarkdown = extractFirecrawlMarkdown(yelpData);
+        const yelpHtml = extractFirecrawlHtml(yelpData);
+        markdown = yelpMarkdown;
+        html = yelpHtml;
+        yelpSteelHtml = yelpHtml;
+
+        const lowerYelp = `${yelpMarkdown}\n${yelpHtml}`.toLowerCase();
+        const reservationKeywords = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
+        const buttonOrInlineTimes = [...new Set((`${yelpMarkdown}\n${yelpHtml}`.match(/\b\d{1,2}:\d{2}\s*(?:AM|PM)\b/gi) || []).map(v => v.trim()))];
+        yelpHasConcreteSlotEvidence = reservationKeywords.test(lowerYelp) || buttonOrInlineTimes.length >= 2;
+        console.log(`  ${r.name} [yelp] Firecrawl evidence: times=${buttonOrInlineTimes.length}, reservationSection=${reservationKeywords.test(lowerYelp)}, evidence=${yelpHasConcreteSlotEvidence}`);
       }
 
       // ── Non-Yelp: Firecrawl scrape (Resy / OpenTable) ──
@@ -2594,19 +2451,7 @@ async function verifyAvailability(
           ...(isOT && { waitFor: 3500 }),
         };
 
-      let markdown = "";
-      let html = "";
-      let links: string[] = [];
-      let jsonData: any = null;
-      let data: any = null;
-
-      if (isYelp) {
-        // For Yelp, convert Browserbase HTML to pseudo-markdown for downstream parsing
-        const textContent = yelpSteelHtml.replace(/<[^>]+>/g, "\n").replace(/\n{3,}/g, "\n\n");
-        markdown = textContent;
-        html = yelpSteelHtml;
-      } else {
-        // Firecrawl for Resy/OT
+      if (!isYelp) {
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
         let resp: Response;
@@ -2631,9 +2476,7 @@ async function verifyAvailability(
         }
         clearTimeout(scrapeTimer);
 
-        // Retry once on 408
         if (resp.status === 408) {
-          const errBody408 = await resp.text().catch(() => "(no body)");
           console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
           const retryAbort = new AbortController();
           const retryTimer = setTimeout(() => retryAbort.abort(), 20_000);
@@ -2990,50 +2833,29 @@ async function verifyAvailability(
       };
 
        if (isYelp) {
-        // Extract times from Browserbase HTML — look for time patterns in button/link elements
-        // and standalone time lines from the rendered page
         const timeRegex = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
-        const allTimesInHtml = (yelpSteelHtml || "").match(timeRegex) || [];
-        
-        // Deduplicate and filter out operating hours patterns
-        // Operating hours typically appear as ranges "5:00 PM - 9:00 PM"
-        // Reservation buttons appear as standalone times
+        const source = `${markdown}\n${html}`;
+        const allTimesInSource = source.match(timeRegex) || [];
+
         const hoursRangeRegex = /\d{1,2}:\d{2}\s*(?:AM|PM)\s*[-–—]\s*\d{1,2}:\d{2}\s*(?:AM|PM)/gi;
-        const hoursRanges = (yelpSteelHtml || "").match(hoursRangeRegex) || [];
+        const hoursRanges = source.match(hoursRangeRegex) || [];
         const hoursTimesSet = new Set<string>();
         for (const range of hoursRanges) {
           const rangeMatches = range.match(timeRegex) || [];
           for (const t of rangeMatches) hoursTimesSet.add(t.trim().toUpperCase());
         }
 
-        // Use button-context times (from the Browserbase evidence check above)
-        const buttonTimeRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
-        let btMatch;
-        while ((btMatch = buttonTimeRegex.exec(yelpSteelHtml || "")) !== null) {
-          const rawTime = btMatch[1].trim();
-          if (hoursTimesSet.has(rawTime.toUpperCase())) continue; // skip operating hours times
-          const parsed = parseTimeStr(rawTime);
+        for (const rawTime of allTimesInSource) {
+          const trimmed = rawTime.trim();
+          if (hoursTimesSet.has(trimmed.toUpperCase())) continue;
+          const parsed = parseTimeStr(trimmed);
           if (parsed && !seenTimes.has(parsed.time)) {
             seenTimes.add(parsed.time);
             foundTimes.push(parsed);
           }
         }
 
-        // Also check standalone time text lines
-        const textLines = (yelpSteelHtml || "").replace(/<[^>]+>/g, "\n").split("\n");
-        for (const line of textLines) {
-          const trimmed = line.trim();
-          if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
-            if (hoursTimesSet.has(trimmed.toUpperCase())) continue;
-            const parsed = parseTimeStr(trimmed);
-            if (parsed && !seenTimes.has(parsed.time)) {
-              seenTimes.add(parsed.time);
-              foundTimes.push(parsed);
-            }
-          }
-        }
-
-        console.log(`  ${r.name} [yelp]: Browserbase extracted times: ${foundTimes.length} — ${foundTimes.map(t => t.time).slice(0, 8).join(", ")}`);
+        console.log(`  ${r.name} [yelp]: Firecrawl extracted times: ${foundTimes.length} — ${foundTimes.map(t => t.time).slice(0, 8).join(", ")}`);
 
         if (!yelpHasConcreteSlotEvidence) {
           foundTimes = [];
@@ -3339,10 +3161,10 @@ async function verifyAvailability(
         }
       }
 
-       // Yelp retry not needed — Browserbase already does full stealth rendering with scroll+click+wait
-
       if (isYelp && foundTimes.length === 0) {
-        console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after direct extract + retry`);
+        console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after Firecrawl extraction`);
+        return null;
+      }
         return null;
       }
 
@@ -3531,7 +3353,8 @@ const opentableAdapter: ProviderAdapter = {
 const yelpAdapter: ProviderAdapter = {
   platform: "yelp",
   async discover(params, keys, amenityTerms) {
-    return fetchYelpCandidates(params, keys.firecrawlKey, keys.aiKey, amenityTerms);
+    const raw = await searchFirecrawl(params, keys.firecrawlKey, "yelp", amenityTerms);
+    return normalizeCandidates("yelp", raw, params);
   },
   async verify(candidates, params, keys, amenityTerms) {
     console.log(`Yelp verify: checking ${candidates.length} candidates on reservation pages for real time slots`);
