@@ -2145,16 +2145,19 @@ async function verifyAvailability(
             return null;
           }
 
-          // 2. Connect via CDP WebSocket
+           // 2. Connect via CDP WebSocket (browser-level)
           const ws = new WebSocket(connectUrl);
           let cdpId = 1;
           const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+          let cdpSessionId: string | null = null;
 
           const cdpSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
             return new Promise((resolve, reject) => {
               const id = cdpId++;
               pending.set(id, { resolve, reject });
-              ws.send(JSON.stringify({ id, method, params }));
+              const msg: Record<string, unknown> = { id, method, params };
+              if (cdpSessionId) msg.sessionId = cdpSessionId;
+              ws.send(JSON.stringify(msg));
               setTimeout(() => {
                 if (pending.has(id)) {
                   pending.delete(id);
@@ -2182,15 +2185,24 @@ async function verifyAvailability(
             } catch (_) { /* ignore parse errors */ }
           };
 
-          // 3. Enable page events and navigate
+          // 3. Create a new page target and attach to it with flatten=true
+          const targetResult = await cdpSend("Target.createTarget", { url: "about:blank" });
+          const targetId = targetResult?.targetId;
+          if (!targetId) throw new Error("Failed to create browser target");
+
+          const attachResult = await cdpSend("Target.attachToTarget", { targetId, flatten: true });
+          cdpSessionId = attachResult?.sessionId;
+          if (!cdpSessionId) throw new Error("Failed to attach to target");
+
+          // 4. Navigate to the Yelp reservation URL
           await cdpSend("Page.enable");
           await cdpSend("Runtime.enable");
           await cdpSend("Page.navigate", { url: r.platformUrl });
 
           // Wait for page load
-          await new Promise(resolve => setTimeout(resolve, 8000));
+          await new Promise(resolve => setTimeout(resolve, 10000));
 
-          // 4. Scroll down to trigger lazy-loaded reservation widget
+          // 5. Scroll down to trigger lazy-loaded reservation widget
           await cdpSend("Runtime.evaluate", {
             expression: "window.scrollBy(0, 1500); 'scrolled'",
             returnByValue: true,
@@ -2198,7 +2210,7 @@ async function verifyAvailability(
           await new Promise(resolve => setTimeout(resolve, 3000));
 
           // Try clicking reservation-related elements
-          await cdpSend("Runtime.evaluate", {
+          const clickResult = await cdpSend("Runtime.evaluate", {
             expression: `
               (function() {
                 const btns = document.querySelectorAll('button, a, [role="button"]');
@@ -2213,13 +2225,13 @@ async function verifyAvailability(
               })()
             `,
             returnByValue: true,
-          }).then(r => console.log(`  ${r.name || ''} [yelp] click result: ${JSON.stringify(r?.result?.value)}`))
-            .catch(() => {});
+          }).catch(() => ({ result: { value: "click failed" } }));
+          console.log(`  ${r.name} [yelp] click result: ${JSON.stringify(clickResult?.result?.value)}`);
 
           // Wait for widget to render after click
           await new Promise(resolve => setTimeout(resolve, 6000));
 
-          // 5. Extract the full page HTML
+          // 6. Extract the full page HTML
           const docResult = await cdpSend("Runtime.evaluate", {
             expression: "document.documentElement.outerHTML",
             returnByValue: true,
