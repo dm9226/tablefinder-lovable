@@ -1656,15 +1656,9 @@ async function fetchYelpCandidates(
         console.log("[YELP_FALLBACK] No STEEL_API_KEY configured, skipping Steel fallback");
       }
     }
-    console.log(`Yelp discovery parsed cards=${extractedFromCards.length}, markdown=${extractedFromMarkdown.length}, using=${extracted.length}`);
+    console.log(`Yelp discovery: extracted=${extracted.length} restaurants`);
 
     const markdownTimesMap = new Map<string, string[]>();
-    for (const rest of extractedFromMarkdown) {
-      const key = normalizeRestaurantNameForMatch(rest.name);
-      if (key && rest.availableTimes.length > 0) {
-        markdownTimesMap.set(key, rest.availableTimes);
-      }
-    }
 
     // Build alias map from links for URL construction
     // Build alias map from links for URL construction
