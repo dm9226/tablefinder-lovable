@@ -2112,7 +2112,7 @@ async function verifyAvailability(
       // Yelp candidates must always pass a full reservation-page scrape.
       // Discovery/search-page slots are hints only and are never trusted directly.
 
-      const yelpExtractPrompt = "Extract only genuinely bookable clickable reservation time slots from this Yelp reservation page. Do NOT infer times from operating hours, opening hours, service windows, review text, or any repeated 30-minute pattern. If the page only shows loading placeholders or hours, return an empty array.";
+       const yelpExtractPrompt = "Extract only genuinely bookable clickable reservation time slots from this Yelp reservation page. Do NOT infer times from operating hours, opening hours, service windows, review text, or any repeated 30-minute pattern. If the page only shows loading placeholders or hours, return an empty array.";
       const yelpExtractSchema = {
         type: "object",
         properties: {
@@ -2126,19 +2126,35 @@ async function verifyAvailability(
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-      // Resy + OT: onlyMainContent=false to capture address/location sections for geocoding
-      // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
-        const scrapePayload: Record<string, unknown> = {
+
+      // ── YELP: browser-actions-driven scrape ──
+      // Instead of passively waiting, use Firecrawl actions to scroll to the
+      // reservation widget, click it to trigger rendering, then wait for slots.
+      const yelpActions = [
+        { type: "wait", milliseconds: 3000 },                         // initial page load
+        { type: "scroll", direction: "down", amount: 3 },             // scroll to reservation section
+        { type: "wait", milliseconds: 2000 },
+        { type: "click", selector: "[class*='reservation'], [data-testid*='reservation'], [aria-label*='reservation'], button:has-text('Find a Table'), a:has-text('Make a Reservation')" },
+        { type: "wait", milliseconds: 5000 },                         // wait for widget to render slots
+        { type: "scroll", direction: "down", amount: 1 },             // reveal any below-fold slots
+        { type: "wait", milliseconds: 3000 },
+      ];
+
+      const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
-          formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "html", "links", "extract"] : ["markdown"],  // Yelp also needs HTML/links so we can reject embedded OpenTable/Resy pages
-          onlyMainContent: isYelp ? false : false,  // Yelp needs full-page context for reservation widget extraction; Resy/OT need full page for addresses
-          ...(isYelp && { waitFor: 15000, timeout: 35000, extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema } }),  // Yelp reservation widgets need longer wait + schema-constrained extraction
-          ...(isOT && { waitFor: 3500 }),    // OT booking widget — HTML parser compensates if markdown misses slots
+          formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "html", "links", "extract"] : ["markdown"],
+          onlyMainContent: false,
+          ...(isYelp && {
+            actions: yelpActions,
+            timeout: 45000,
+            extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema },
+          }),
+          ...(isOT && { waitFor: 3500 }),
         };
 
-      // Per-scrape timeout: 25s for Resy/OT, 35s for Yelp (needs longer waitFor + LLM extraction)
+      // Per-scrape timeout: 25s for Resy/OT, 55s for Yelp (actions take longer)
       const scrapeAbort = new AbortController();
-      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 45_000 : 25_000);
+      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 55_000 : 25_000);
       let resp: Response;
       try {
         resp = await fetch(`${FIRECRAWL_API}/scrape`, {
