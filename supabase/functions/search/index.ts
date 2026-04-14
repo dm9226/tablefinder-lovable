@@ -2908,17 +2908,16 @@ async function verifyAvailability(
                 : extractStructuredTimeLabels(retryExtract);
             if (retryMarkdown) bookingMarkdown = retryMarkdown;
 
-            // Apply same widget-render guard on retry
+            // Apply same widget-render guard on retry: count dedicated time-button lines
             const retryMd = retryMarkdown || "";
-            const retryLoadingCount = (retryMd.match(/Loading\.\.\./g) || []).length;
-            const retryStripped = retryMd
-              .replace(/^.*?(Open|Closed)\s*\d{1,2}:\d{2}\s*(AM|PM).*$/gim, "")
-              .replace(/Loading\.\.\./g, "")
-              .replace(/\[.*?\]\(.*?\)/g, "");
-            const retryStandaloneTimes = retryStripped.match(/\b\d{1,2}:\d{2}\s*(AM|PM)\b/gi) || [];
-            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryLoadingCount} "Loading...", ${retryStandaloneTimes.length} time buttons`);
-            if (retryLoadingCount >= 5 && retryStandaloneTimes.length === 0) {
-              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still not rendered`);
+            const retryLines = retryMd.split("\n");
+            let retryTimeLineCount = 0;
+            for (const line of retryLines) {
+              if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(line.trim())) retryTimeLineCount++;
+            }
+            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryTimeLineCount} dedicated time-button lines`);
+            if (retryTimeLineCount < 3) {
+              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still not rendered (${retryTimeLineCount} time lines)`);
               // Don't use these hallucinated times
             } else {
               for (const retryTime of retryTimes) {
