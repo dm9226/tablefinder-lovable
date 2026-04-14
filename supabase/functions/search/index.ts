@@ -2578,11 +2578,14 @@ async function verifyAvailability(
           }
         }
 
-        console.log(`  ${r.name} [yelp]: extract jsonData keys: ${jsonData ? Object.keys(jsonData).join(", ") : "null"}, available_times value: ${JSON.stringify(jsonData?.available_times || jsonData?.available_reservation_times || "missing").slice(0, 300)}`);
-        const extractedTimes = extractStructuredTimeLabels(jsonData);
-        console.log(`  ${r.name} [yelp]: extractStructuredTimeLabels returned ${extractedTimes.length} times: ${extractedTimes.join(", ")}`);
-        for (const extractedTime of extractedTimes) {
-          const parsed = parseTimeStr(extractedTime);
+        // Parse extract times directly — bypass extractStructuredTimeLabels which has issues
+        const extractTimes: string[] = Array.isArray(jsonData?.available_times) ? jsonData.available_times
+          : Array.isArray(jsonData?.available_reservation_times) ? jsonData.available_reservation_times
+          : [];
+        console.log(`  ${r.name} [yelp]: direct extract times: ${extractTimes.length} — ${extractTimes.slice(0, 8).join(", ")}`);
+        for (const rawTime of extractTimes) {
+          if (typeof rawTime !== "string") continue;
+          const parsed = parseTimeStr(rawTime);
           if (parsed && !seenTimes.has(parsed.time)) {
             seenTimes.add(parsed.time);
             foundTimes.push(parsed);
