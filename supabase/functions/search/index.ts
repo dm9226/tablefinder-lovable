@@ -2203,6 +2203,8 @@ async function verifyAvailability(
 
       if (isYelp) {
         const scrapedSourceUrl = data?.data?.metadata?.sourceURL || data?.metadata?.sourceURL || "";
+        console.log(`  [DEBUG] ${r.name} [yelp] scraped markdown (first 3000 chars):\n${(markdown || "").slice(0, 3000)}`);
+        console.log(`  [DEBUG] ${r.name} [yelp] extract JSON: ${JSON.stringify(jsonData).slice(0, 1000)}`);
         if (scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/")) {
           console.log(`✗ ${r.name} [yelp] — redirected away from /reservations/ to: ${scrapedSourceUrl}, skipping`);
           return null;
