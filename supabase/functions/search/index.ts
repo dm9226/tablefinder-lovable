@@ -183,7 +183,8 @@ serve(async (req) => {
   const startTime = Date.now();
 
   try {
-    const { query, lat, lng, location, extended, remainingCandidates: incomingCandidates, extendedParams } = await req.json();
+    const body = await req.json();
+    const { query, lat, lng, location, extended, remainingCandidates: incomingCandidates, extendedParams } = body;
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
     
@@ -1734,7 +1735,7 @@ function extractStructuredTimeLabels(value: unknown): string[] {
     }
     if (typeof input === "object") {
       const obj = input as Record<string, unknown>;
-      for (const key of ["available_times", "times", "time_slots", "slots", "reservation_times"]) {
+      for (const key of ["available_times", "available_reservation_times", "times", "time_slots", "slots", "reservation_times"]) {
         collect(obj[key]);
       }
     }
@@ -2147,7 +2148,17 @@ async function verifyAvailability(
         console.log(`  ${r.name} [yelp]: search-page slots outside ±2h window, falling through to individual scrape`);
       }
 
-      const yelpExtractPrompt = "Extract only the visible, currently bookable reservation times from this Yelp reservation page. Exclude operating hours, opening/closing times, waitlist times, sold-out times, and anything from Location & Hours or About sections. Also extract address if visible. Return JSON with available_times (array of time strings like '6:30 PM') and address if present.";
+      const yelpExtractPrompt = "Extract the clickable reservation time slots from this Yelp reservation page. These are the specific bookable times shown as buttons near the date/party size picker (e.g. 5:30 PM, 6:00 PM, 6:30 PM). Do NOT include business/operating hours. Return JSON with available_times array.";
+      const yelpExtractSchema = {
+        type: "object",
+        properties: {
+          available_times: {
+            type: "array",
+            items: { type: "string" },
+            description: "Clickable reservation time slot buttons, NOT business hours"
+          }
+        }
+      };
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
@@ -2157,13 +2168,13 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "extract"] : ["markdown"],  // OT: also get HTML for more reliable slot extraction
           onlyMainContent: isYelp ? false : false,  // Yelp needs full-page context for reservation widget extraction; Resy/OT need full page for addresses
-          ...(isYelp && { waitFor: 9000, timeout: 28000, extract: { prompt: yelpExtractPrompt } }),  // Yelp reservation widgets need a longer wait and full-page extraction
+          ...(isYelp && { waitFor: 15000, timeout: 35000, extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema } }),  // Yelp reservation widgets need longer wait + schema-constrained extraction
           ...(isOT && { waitFor: 3500 }),    // OT booking widget — HTML parser compensates if markdown misses slots
         };
 
       // Per-scrape timeout: 25s for Resy/OT, 35s for Yelp (needs longer waitFor + LLM extraction)
       const scrapeAbort = new AbortController();
-      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 35_000 : 25_000);
+      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 45_000 : 25_000);
       let resp: Response;
       try {
         resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -2567,9 +2578,14 @@ async function verifyAvailability(
           }
         }
 
-        const extractedTimes = extractStructuredTimeLabels(jsonData);
-        for (const extractedTime of extractedTimes) {
-          const parsed = parseTimeStr(extractedTime);
+        // Parse extract times directly — bypass extractStructuredTimeLabels which has issues
+        const extractTimes: string[] = Array.isArray(jsonData?.available_times) ? jsonData.available_times
+          : Array.isArray(jsonData?.available_reservation_times) ? jsonData.available_reservation_times
+          : [];
+        console.log(`  ${r.name} [yelp]: direct extract times: ${extractTimes.length} — ${extractTimes.slice(0, 8).join(", ")}`);
+        for (const rawTime of extractTimes) {
+          if (typeof rawTime !== "string") continue;
+          const parsed = parseTimeStr(rawTime);
           if (parsed && !seenTimes.has(parsed.time)) {
             seenTimes.add(parsed.time);
             foundTimes.push(parsed);
@@ -2895,9 +2911,9 @@ async function verifyAvailability(
               url: r.platformUrl,
               formats: ["markdown", "extract"],
               onlyMainContent: false,
-              waitFor: 12000,
-              timeout: 28000,
-              extract: { prompt: yelpExtractPrompt },
+              waitFor: 18000,
+              timeout: 35000,
+              extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema },
             }),
             signal: yelpRetryAbort.signal,
           });
