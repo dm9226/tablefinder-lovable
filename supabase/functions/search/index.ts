@@ -2112,7 +2112,7 @@ async function verifyAvailability(
       // Yelp candidates must always pass a full reservation-page scrape.
       // Discovery/search-page slots are hints only and are never trusted directly.
 
-      const yelpExtractPrompt = "Extract the clickable reservation time slots from this Yelp reservation page (bookable times shown as buttons, e.g. 5:30 PM, 6:00 PM). Do NOT include business/operating hours.";
+      const yelpExtractPrompt = "Extract only genuinely bookable clickable reservation time slots from this Yelp reservation page. Do NOT infer times from operating hours, opening hours, service windows, review text, or any repeated 30-minute pattern. If the page only shows loading placeholders or hours, return an empty array.";
       const yelpExtractSchema = {
         type: "object",
         properties: {
@@ -2201,6 +2201,7 @@ async function verifyAvailability(
         return null;
       }
 
+      let yelpHasConcreteSlotEvidence = false;
       if (isYelp) {
         const scrapedSourceUrl = data?.data?.metadata?.sourceURL || data?.metadata?.sourceURL || "";
         console.log(`  [DEBUG] ${r.name} [yelp] scraped markdown (first 3000 chars):\n${(markdown || "").slice(0, 3000)}`);
@@ -2232,9 +2233,13 @@ async function verifyAvailability(
           }
         }
         
-        console.log(`  ${r.name} [yelp] widget render check: ${loadingCount} "Loading...", ${reservationTimeLines} dedicated time-button lines`);
-        if (reservationTimeLines < 3) {
-          console.log(`✗ ${r.name} [yelp] — rejected: reservation widget did not render (only ${reservationTimeLines} time-button lines found, need ≥3). LLM extraction would hallucinate from operating hours.`);
+        const reservationSectionPattern = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
+        const reservationSectionPresent = reservationSectionPattern.test(mdText) || reservationSectionPattern.test(html || "");
+        yelpHasConcreteSlotEvidence = reservationTimeLines >= 2 || (reservationSectionPresent && reservationTimeLines >= 1);
+
+        console.log(`  ${r.name} [yelp] widget render check: ${loadingCount} "Loading...", ${reservationTimeLines} dedicated time-button lines, reservationSection=${reservationSectionPresent}`);
+        if (!yelpHasConcreteSlotEvidence) {
+          console.log(`✗ ${r.name} [yelp] — rejected: no concrete reservation slot evidence on page; avoiding inferred/hallucinated times.`);
           return null;
         }
       }
@@ -2573,6 +2578,10 @@ async function verifyAvailability(
         if (foundTimes.length > 0) {
           console.log(`  ${r.name} [yelp]: verified structured times: ${foundTimes.map(t => t.time).join(", ")}`);
         }
+
+        if (!yelpHasConcreteSlotEvidence) {
+          foundTimes = [];
+        }
       }
 
       // ── OPENTABLE-SPECIFIC: Parse "Select a time" section ──
@@ -2823,6 +2832,10 @@ async function verifyAvailability(
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
       // ── STRATEGY 2: Regex on cleaned booking markdown (non-Resy only) ──
       if (!isResy && foundTimes.length === 0) {
+        if (isYelp) {
+          console.log(`✗ ${r.name} [yelp] — skipping generic regex fallback because no concrete widget evidence was captured`);
+          return null;
+        }
         let match12;
         while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
           // Context check: skip times near "notify", "sold out", "waitlist"
