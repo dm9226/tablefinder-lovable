@@ -2100,89 +2100,253 @@ async function verifyAvailability(
   amenityTerms: string[] = [],
   globalStartTime?: number
 ): Promise<Restaurant[]> {
-  if (candidates.length === 0) return [];
+   if (candidates.length === 0) return [];
 
-  // Run ALL scrapes in parallel (Firecrawl handles concurrency)
+  // Browserbase concurrency limiter (free plan: 3 concurrent sessions, use 2 to be safe)
+  let bbActiveCount = 0;
+  const bbQueue: (() => void)[] = [];
+  const BB_MAX_CONCURRENT = 2;
+  const acquireBBSlot = (): Promise<void> => {
+    if (bbActiveCount < BB_MAX_CONCURRENT) {
+      bbActiveCount++;
+      return Promise.resolve();
+    }
+    return new Promise<void>(resolve => bbQueue.push(resolve));
+  };
+  const releaseBBSlot = () => {
+    bbActiveCount--;
+    const next = bbQueue.shift();
+    if (next) { bbActiveCount++; next(); }
+  };
+
+  // Run ALL scrapes in parallel (Firecrawl handles concurrency, Browserbase is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
-    try {
-      const isYelp = r.platform === "yelp";
-
-      // ── YELP FAST PATH: trust search-page time slots ──
-      // Yelp search results (with reservation_date/time/covers params) already show
-      // Yelp candidates must always pass a full reservation-page scrape.
-      // Discovery/search-page slots are hints only and are never trusted directly.
-
-       const yelpExtractPrompt = "Extract only genuinely bookable clickable reservation time slots from this Yelp reservation page. Do NOT infer times from operating hours, opening hours, service windows, review text, or any repeated 30-minute pattern. If the page only shows loading placeholders or hours, return an empty array.";
-      const yelpExtractSchema = {
-        type: "object",
-        properties: {
-          available_times: {
-            type: "array",
-            items: { type: "string" },
-            description: "Clickable reservation time slot buttons, NOT business hours"
-          }
-        }
-      };
+     try {
+       const isYelp = r.platform === "yelp";
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
 
-      // ── YELP: browser-actions-driven scrape ──
-      // Instead of passively waiting, use Firecrawl actions to scroll to the
-      // reservation widget, click it to trigger rendering, then wait for slots.
-      const yelpActions = [
-        { type: "wait", milliseconds: 3000 },                         // initial page load
-        { type: "scroll", direction: "down", amount: 3 },             // scroll to reservation section
-        { type: "wait", milliseconds: 2000 },
-        { type: "click", selector: "[class*='reservation'], [data-testid*='reservation'], [aria-label*='reservation'], button:has-text('Find a Table'), a:has-text('Make a Reservation')" },
-        { type: "wait", milliseconds: 5000 },                         // wait for widget to render slots
-        { type: "scroll", direction: "down", amount: 1 },             // reveal any below-fold slots
-        { type: "wait", milliseconds: 3000 },
-      ];
+      // ── YELP: Browserbase stealth browser scrape ──
+      // Firecrawl can't bypass Yelp's DataDome. Use Browserbase CDP for Yelp.
+      let yelpBrowserbaseHtml = "";
+      let yelpHasConcreteSlotEvidence = false;
+       if (isYelp) {
+        await acquireBBSlot();
+        const bbApiKey = Deno.env.get("BROWSERBASE_API_KEY");
+        const bbProjectId = Deno.env.get("BROWSERBASE_PROJECT_ID");
+        if (!bbApiKey || !bbProjectId) {
+          releaseBBSlot();
+          console.log(`✗ ${r.name} [yelp] — skipped: BROWSERBASE_API_KEY or BROWSERBASE_PROJECT_ID not configured`);
+          return null;
+        }
+        try {
+          console.log(`  ${r.name} [yelp] — starting Browserbase stealth session for: ${r.platformUrl}`);
+          // 1. Create session
+          const sessionResp = await fetch("https://api.browserbase.com/v1/sessions", {
+            method: "POST",
+            headers: {
+              "x-bb-api-key": bbApiKey,
+              "Content-Type": "application/json",
+            },
+             body: JSON.stringify({
+              projectId: bbProjectId,
+              proxies: true,
+              browserSettings: { solveCaptchas: true },
+            }),
+          });
+           if (!sessionResp.ok) {
+            const errText = await sessionResp.text().catch(() => "");
+            console.log(`✗ ${r.name} [yelp] — Browserbase session create failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
+            releaseBBSlot();
+            return null;
+          }
+          const sessionData = await sessionResp.json();
+          const connectUrl = sessionData.connectUrl;
+          const sessionId = sessionData.id;
+          if (!connectUrl) {
+            console.log(`✗ ${r.name} [yelp] — Browserbase session missing connectUrl`);
+            releaseBBSlot();
+            return null;
+          }
 
+           // 2. Connect via CDP WebSocket (browser-level)
+          const ws = new WebSocket(connectUrl);
+          let cdpId = 1;
+          const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+          let cdpSessionId: string | null = null;
+
+          const cdpSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
+            return new Promise((resolve, reject) => {
+              const id = cdpId++;
+              pending.set(id, { resolve, reject });
+              const msg: Record<string, unknown> = { id, method, params };
+              if (cdpSessionId) msg.sessionId = cdpSessionId;
+              ws.send(JSON.stringify(msg));
+              setTimeout(() => {
+                if (pending.has(id)) {
+                  pending.delete(id);
+                  reject(new Error(`CDP timeout: ${method}`));
+                }
+              }, 30000);
+            });
+          };
+
+          await new Promise<void>((resolve, reject) => {
+            ws.onopen = () => resolve();
+            ws.onerror = (e) => reject(e);
+            setTimeout(() => reject(new Error("WS connect timeout")), 15000);
+          });
+
+          ws.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(typeof event.data === "string" ? event.data : "{}");
+              if (msg.id && pending.has(msg.id)) {
+                const p = pending.get(msg.id)!;
+                pending.delete(msg.id);
+                if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
+                else p.resolve(msg.result);
+              }
+            } catch (_) { /* ignore parse errors */ }
+          };
+
+          // 3. Create a new page target and attach to it with flatten=true
+          const targetResult = await cdpSend("Target.createTarget", { url: "about:blank" });
+          const targetId = targetResult?.targetId;
+          if (!targetId) throw new Error("Failed to create browser target");
+
+          const attachResult = await cdpSend("Target.attachToTarget", { targetId, flatten: true });
+          cdpSessionId = attachResult?.sessionId;
+          if (!cdpSessionId) throw new Error("Failed to attach to target");
+
+          // 4. Navigate to the Yelp reservation URL
+          await cdpSend("Page.enable");
+          await cdpSend("Runtime.enable");
+          await cdpSend("Page.navigate", { url: r.platformUrl });
+
+          // Wait for page load
+          await new Promise(resolve => setTimeout(resolve, 10000));
+
+          // 5. Scroll down to trigger lazy-loaded reservation widget
+          await cdpSend("Runtime.evaluate", {
+            expression: "window.scrollBy(0, 1500); 'scrolled'",
+            returnByValue: true,
+          });
+          await new Promise(resolve => setTimeout(resolve, 3000));
+
+          // Try clicking reservation-related elements
+          const clickResult = await cdpSend("Runtime.evaluate", {
+            expression: `
+              (function() {
+                const btns = document.querySelectorAll('button, a, [role="button"]');
+                for (const b of btns) {
+                  const text = (b.textContent || '').toLowerCase();
+                  if (text.includes('find a table') || text.includes('make a reservation') || text.includes('check availability')) {
+                    b.click();
+                    return 'clicked: ' + text.trim().slice(0, 50);
+                  }
+                }
+                return 'no reservation button found';
+              })()
+            `,
+            returnByValue: true,
+          }).catch(() => ({ result: { value: "click failed" } }));
+          console.log(`  ${r.name} [yelp] click result: ${JSON.stringify(clickResult?.result?.value)}`);
+
+          // Wait for widget to render after click
+          await new Promise(resolve => setTimeout(resolve, 6000));
+
+          // 6. Extract the full page HTML
+          const docResult = await cdpSend("Runtime.evaluate", {
+            expression: "document.documentElement.outerHTML",
+            returnByValue: true,
+          });
+          yelpBrowserbaseHtml = docResult?.result?.value || "";
+           console.log(`  ${r.name} [yelp] Browserbase extracted ${yelpBrowserbaseHtml.length} chars of HTML`);
+          console.log(`  [DEBUG] ${r.name} [yelp] Browserbase HTML (first 2000 chars):\n${yelpBrowserbaseHtml.slice(0, 2000)}`);
+
+          // Check final URL (redirect detection)
+          const locationResult = await cdpSend("Runtime.evaluate", {
+            expression: "window.location.href",
+            returnByValue: true,
+          });
+          const finalUrl = locationResult?.result?.value || "";
+
+          // Close session
+          try { ws.close(); } catch (_) {}
+
+          // Check for redirect away from /reservations/
+           if (finalUrl && !finalUrl.includes("/reservations/")) {
+            console.log(`✗ ${r.name} [yelp] — redirected to: ${finalUrl}, skipping`);
+            releaseBBSlot();
+            return null;
+          }
+
+          // 6. Parse HTML for time slot buttons
+          // Look for standalone time patterns in the HTML that indicate rendered reservation buttons
+          // Real Yelp widgets render times as buttons/links like <button>5:00 PM</button>
+          const timeButtonRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
+          const renderedTimes: string[] = [];
+          let tbMatch;
+          while ((tbMatch = timeButtonRegex.exec(yelpBrowserbaseHtml)) !== null) {
+            renderedTimes.push(tbMatch[1].trim());
+          }
+
+          // Also check for standalone time text lines (text content extraction)
+          const textContent = yelpBrowserbaseHtml.replace(/<[^>]+>/g, "\n");
+          const textLines = textContent.split("\n");
+          let standaloneTimeLines = 0;
+          for (const line of textLines) {
+            if (/^\s*\d{1,2}:\d{2}\s*(AM|PM)\s*$/i.test(line)) standaloneTimeLines++;
+          }
+
+          const reservationKeywords = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
+          const hasReservationSection = reservationKeywords.test(yelpBrowserbaseHtml);
+
+          yelpHasConcreteSlotEvidence = renderedTimes.length >= 2 || standaloneTimeLines >= 2 || (hasReservationSection && (renderedTimes.length >= 1 || standaloneTimeLines >= 1));
+
+          console.log(`  ${r.name} [yelp] Browserbase widget check: ${renderedTimes.length} button times, ${standaloneTimeLines} standalone time lines, reservationSection=${hasReservationSection}, evidence=${yelpHasConcreteSlotEvidence}`);
+          if (renderedTimes.length > 0) {
+            console.log(`  ${r.name} [yelp] Browserbase found times: ${renderedTimes.slice(0, 10).join(", ")}`);
+          }
+
+           if (!yelpHasConcreteSlotEvidence) {
+            console.log(`✗ ${r.name} [yelp] — rejected: Browserbase stealth browser found no concrete slot evidence`);
+            releaseBBSlot();
+            return null;
+          }
+          releaseBBSlot();
+        } catch (bbErr: any) {
+          releaseBBSlot();
+          console.log(`✗ ${r.name} [yelp] — Browserbase error: ${bbErr.message || bbErr}`);
+          return null;
+        }
+      }
+
+      // ── Non-Yelp: Firecrawl scrape (Resy / OpenTable) ──
       const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
-          formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "html", "links", "extract"] : ["markdown"],
+          formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          ...(isYelp && {
-            actions: yelpActions,
-            timeout: 45000,
-            extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema },
-          }),
           ...(isOT && { waitFor: 3500 }),
         };
 
-      // Per-scrape timeout: 25s for Resy/OT, 55s for Yelp (actions take longer)
-      const scrapeAbort = new AbortController();
-      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 55_000 : 25_000);
-      let resp: Response;
-      try {
-        resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${firecrawlKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(scrapePayload),
-          signal: scrapeAbort.signal,
-        });
-      } catch (fetchErr: any) {
-        clearTimeout(scrapeTimer);
-        if (fetchErr.name === "AbortError") {
-          console.log(`Scrape timeout (25s abort) for ${r.name} [${r.platform}]`);
-        } else {
-          console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
-        }
-        return null;
-      }
-      clearTimeout(scrapeTimer);
+      let markdown = "";
+      let html = "";
+      let links: string[] = [];
+      let jsonData: any = null;
+      let data: any = null;
 
-      // Retry once on 408 (scrape timeout) with a shorter timeout
-      if (resp.status === 408) {
-        const errBody408 = await resp.text().catch(() => "(no body)");
-        console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
-        const retryAbort = new AbortController();
-        const retryTimer = setTimeout(() => retryAbort.abort(), 20_000);
+      if (isYelp) {
+        // For Yelp, convert Browserbase HTML to pseudo-markdown for downstream parsing
+        const textContent = yelpBrowserbaseHtml.replace(/<[^>]+>/g, "\n").replace(/\n{3,}/g, "\n\n");
+        markdown = textContent;
+        html = yelpBrowserbaseHtml;
+      } else {
+        // Firecrawl for Resy/OT
+        const scrapeAbort = new AbortController();
+        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
+        let resp: Response;
         try {
           resp = await fetch(`${FIRECRAWL_API}/scrape`, {
             method: "POST",
@@ -2190,74 +2354,60 @@ async function verifyAvailability(
               Authorization: `Bearer ${firecrawlKey}`,
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
-            signal: retryAbort.signal,
+            body: JSON.stringify(scrapePayload),
+            signal: scrapeAbort.signal,
           });
-        } catch (retryFetchErr: any) {
-          clearTimeout(retryTimer);
-          console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}]: ${retryFetchErr.name === "AbortError" ? "timeout" : retryFetchErr}`);
+        } catch (fetchErr: any) {
+          clearTimeout(scrapeTimer);
+          if (fetchErr.name === "AbortError") {
+            console.log(`Scrape timeout (25s abort) for ${r.name} [${r.platform}]`);
+          } else {
+            console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+          }
           return null;
         }
-        clearTimeout(retryTimer);
+        clearTimeout(scrapeTimer);
+
+        // Retry once on 408
+        if (resp.status === 408) {
+          const errBody408 = await resp.text().catch(() => "(no body)");
+          console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
+          const retryAbort = new AbortController();
+          const retryTimer = setTimeout(() => retryAbort.abort(), 20_000);
+          try {
+            resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${firecrawlKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
+              signal: retryAbort.signal,
+            });
+          } catch (retryFetchErr: any) {
+            clearTimeout(retryTimer);
+            console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}]: ${retryFetchErr.name === "AbortError" ? "timeout" : retryFetchErr}`);
+            return null;
+          }
+          clearTimeout(retryTimer);
+        }
+
+        if (!resp.ok) {
+          const errBody = await resp.text().catch(() => "(no body)");
+          console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
+          return null;
+        }
+
+        data = await resp.json();
+        markdown = extractFirecrawlMarkdown(data);
+        html = extractFirecrawlHtml(data);
+        links = extractFirecrawlLinks(data);
+        jsonData = data?.data?.extract || data?.extract;
       }
 
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => "(no body)");
-        console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
-        return null;
-      }
-
-      const data = await resp.json();
-      const markdown = extractFirecrawlMarkdown(data);
-      const html = extractFirecrawlHtml(data);
-      const links = extractFirecrawlLinks(data);
-      const jsonData = data?.data?.extract || data?.extract;
       if (!markdown && !html && !jsonData) {
         console.log(`No content for ${r.name} [${r.platform}]`);
         return null;
-      }
-
-      let yelpHasConcreteSlotEvidence = false;
-      if (isYelp) {
-        const scrapedSourceUrl = data?.data?.metadata?.sourceURL || data?.metadata?.sourceURL || "";
-        console.log(`  [DEBUG] ${r.name} [yelp] scraped markdown (first 3000 chars):\n${(markdown || "").slice(0, 3000)}`);
-        console.log(`  [DEBUG] ${r.name} [yelp] extract JSON: ${JSON.stringify(jsonData).slice(0, 1000)}`);
-        if (scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/")) {
-          console.log(`✗ ${r.name} [yelp] — redirected away from /reservations/ to: ${scrapedSourceUrl}, skipping`);
-          return null;
-        }
-        // Guard: if the reservation widget never rendered (all "Loading..." placeholders),
-        // reject — the LLM will hallucinate times from operating hours.
-        // We check the markdown for actual reservation-widget time buttons.
-        // Real Yelp reservation widgets render times like "5:00 PM" "5:15 PM" as clickable buttons
-        // in a specific reservation section. Operating hours appear as "Open5:00 PM - 9:00 PM" or
-        // "Closed11:00 AM - 2:30 PM, 5:00 PM - 9:00 PM" on a single line with Open/Closed prefix.
-        // Review text can also mention times. We need to find a CLUSTER of times (3+) appearing
-        // close together that are NOT part of operating hours.
-        const mdText = markdown || "";
-        const loadingCount = (mdText.match(/Loading\.\.\./g) || []).length;
-        
-        // Split into lines, find lines that are JUST a time (reservation button) vs embedded in text
-        const mdLines = mdText.split("\n");
-        let reservationTimeLines = 0;
-        for (const line of mdLines) {
-          const trimmed = line.trim();
-          // A reservation time button line is very short and contains a time pattern
-          // e.g. "5:00 PM" or "7:30 PM" — not embedded in a sentence
-          if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
-            reservationTimeLines++;
-          }
-        }
-        
-        const reservationSectionPattern = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
-        const reservationSectionPresent = reservationSectionPattern.test(mdText) || reservationSectionPattern.test(html || "");
-        yelpHasConcreteSlotEvidence = reservationTimeLines >= 2 || (reservationSectionPresent && reservationTimeLines >= 1);
-
-        console.log(`  ${r.name} [yelp] widget render check: ${loadingCount} "Loading...", ${reservationTimeLines} dedicated time-button lines, reservationSection=${reservationSectionPresent}`);
-        if (!yelpHasConcreteSlotEvidence) {
-          console.log(`✗ ${r.name} [yelp] — rejected: no concrete reservation slot evidence on page; avoiding inferred/hallucinated times.`);
-          return null;
-        }
       }
 
       // Extract structured data from Firecrawl JSON extraction (if present)
@@ -2576,14 +2726,29 @@ async function verifyAvailability(
         return { time: formatted, minutes: totalMin };
       };
 
-      if (isYelp) {
+       if (isYelp) {
+        // Extract times from Browserbase HTML — look for time patterns in button/link elements
+        // and standalone time lines from the rendered page
+        const timeRegex = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
+        const allTimesInHtml = (yelpBrowserbaseHtml || "").match(timeRegex) || [];
+        
+        // Deduplicate and filter out operating hours patterns
+        // Operating hours typically appear as ranges "5:00 PM - 9:00 PM"
+        // Reservation buttons appear as standalone times
+        const hoursRangeRegex = /\d{1,2}:\d{2}\s*(?:AM|PM)\s*[-–—]\s*\d{1,2}:\d{2}\s*(?:AM|PM)/gi;
+        const hoursRanges = (yelpBrowserbaseHtml || "").match(hoursRangeRegex) || [];
+        const hoursTimesSet = new Set<string>();
+        for (const range of hoursRanges) {
+          const rangeMatches = range.match(timeRegex) || [];
+          for (const t of rangeMatches) hoursTimesSet.add(t.trim().toUpperCase());
+        }
 
-        const extractTimes: string[] = Array.isArray(jsonData?.available_times) ? jsonData.available_times
-          : Array.isArray(jsonData?.available_reservation_times) ? jsonData.available_reservation_times
-          : [];
-        console.log(`  ${r.name} [yelp]: direct extract times: ${extractTimes.length} — ${extractTimes.slice(0, 8).join(", ")}`);
-        for (const rawTime of extractTimes) {
-          if (typeof rawTime !== "string") continue;
+        // Use button-context times (from the Browserbase evidence check above)
+        const buttonTimeRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
+        let btMatch;
+        while ((btMatch = buttonTimeRegex.exec(yelpBrowserbaseHtml || "")) !== null) {
+          const rawTime = btMatch[1].trim();
+          if (hoursTimesSet.has(rawTime.toUpperCase())) continue; // skip operating hours times
           const parsed = parseTimeStr(rawTime);
           if (parsed && !seenTimes.has(parsed.time)) {
             seenTimes.add(parsed.time);
@@ -2591,9 +2756,21 @@ async function verifyAvailability(
           }
         }
 
-        if (foundTimes.length > 0) {
-          console.log(`  ${r.name} [yelp]: verified structured times: ${foundTimes.map(t => t.time).join(", ")}`);
+        // Also check standalone time text lines
+        const textLines = (yelpBrowserbaseHtml || "").replace(/<[^>]+>/g, "\n").split("\n");
+        for (const line of textLines) {
+          const trimmed = line.trim();
+          if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
+            if (hoursTimesSet.has(trimmed.toUpperCase())) continue;
+            const parsed = parseTimeStr(trimmed);
+            if (parsed && !seenTimes.has(parsed.time)) {
+              seenTimes.add(parsed.time);
+              foundTimes.push(parsed);
+            }
+          }
         }
+
+        console.log(`  ${r.name} [yelp]: Browserbase extracted times: ${foundTimes.length} — ${foundTimes.map(t => t.time).slice(0, 8).join(", ")}`);
 
         if (!yelpHasConcreteSlotEvidence) {
           foundTimes = [];
@@ -2899,88 +3076,7 @@ async function verifyAvailability(
         }
       }
 
-       if (isYelp && foundTimes.length === 0) {
-        console.log(`  ${r.name} [yelp]: no slots on first pass — retrying with aggressive browser actions`);
-        try {
-          const yelpRetryAbort = new AbortController();
-          const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 55_000);
-
-          // More aggressive action sequence for retry: multiple clicks + longer waits
-          const retryActions = [
-            { type: "wait", milliseconds: 5000 },
-            { type: "scroll", direction: "down", amount: 5 },
-            { type: "wait", milliseconds: 3000 },
-            { type: "click", selector: "[class*='reservation'], [data-testid*='reservation'], [aria-label*='reservation'], button:has-text('Find a Table'), a:has-text('Make a Reservation'), [class*='time-picker'], [class*='timepicker']" },
-            { type: "wait", milliseconds: 8000 },
-            { type: "scroll", direction: "up", amount: 2 },
-            { type: "wait", milliseconds: 3000 },
-          ];
-
-          const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${firecrawlKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              url: r.platformUrl,
-              formats: ["markdown", "html", "links", "extract"],
-              onlyMainContent: false,
-              actions: retryActions,
-              timeout: 45000,
-              extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema },
-            }),
-            signal: yelpRetryAbort.signal,
-          });
-          clearTimeout(yelpRetryTimer);
-
-          if (retryResp.ok) {
-            const retryData = await retryResp.json();
-            const retryMarkdown = extractFirecrawlMarkdown(retryData);
-            const retryHtml = extractFirecrawlHtml(retryData);
-            const retryExtract = retryData?.data?.extract || retryData?.extract;
-            const retryTimes: string[] = Array.isArray(retryExtract?.available_times)
-              ? retryExtract.available_times
-              : Array.isArray(retryExtract?.available_reservation_times)
-                ? retryExtract.available_reservation_times
-                : extractStructuredTimeLabels(retryExtract);
-            if (retryMarkdown) bookingMarkdown = retryMarkdown;
-
-            // Apply same widget-render guard on retry
-            const retryMd = retryMarkdown || "";
-            const retryLines = retryMd.split("\n");
-            let retryTimeLineCount = 0;
-            for (const line of retryLines) {
-              if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(line.trim())) retryTimeLineCount++;
-            }
-            const retryReservationSectionPattern = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
-            const retryReservationSectionPresent = retryReservationSectionPattern.test(retryMd) || retryReservationSectionPattern.test(retryHtml || "");
-            const retryHasConcreteSlotEvidence = retryTimeLineCount >= 2 || (retryReservationSectionPresent && retryTimeLineCount >= 1);
-            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryTimeLineCount} time-button lines, reservationSection=${retryReservationSectionPresent}`);
-            if (!retryHasConcreteSlotEvidence) {
-              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still lacks concrete slot evidence after browser actions`);
-            } else {
-              for (const retryTime of retryTimes) {
-                const parsed = parseTimeStr(retryTime);
-                if (parsed && !seenTimes.has(parsed.time)) {
-                  seenTimes.add(parsed.time);
-                  foundTimes.push(parsed);
-                }
-              }
-              if (retryTimes.length > 0) {
-                console.log(`  ${r.name} [yelp] RETRY SUCCESS (browser actions): ${retryTimes.join(", ")}`);
-              } else {
-                console.log(`  ${r.name} [yelp] RETRY: still no structured slots found`);
-              }
-            }
-          } else {
-            const errBody = await retryResp.text().catch(() => "");
-            console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status}): ${errBody.slice(0, 200)}`);
-          }
-        } catch (retryErr: any) {
-          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout" : retryErr}`);
-        }
-      }
+       // Yelp retry not needed — Browserbase already does full stealth rendering with scroll+click+wait
 
       if (isYelp && foundTimes.length === 0) {
         console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after direct extract + retry`);
