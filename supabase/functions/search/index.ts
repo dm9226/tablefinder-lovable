@@ -184,25 +184,6 @@ serve(async (req) => {
 
   try {
     const body = await req.json();
-
-    // ── TEST ROUTE: Yelp Openings API ──
-    if (body.action === "test_yelp_openings") {
-      const yelpKey = Deno.env.get("YELP_API_KEY") || "";
-      const alias = body.alias || "south-city-kitchen-midtown-atlanta-2";
-      const testUrl = `https://api.yelp.com/v3/bookings/${alias}/openings?date=2026-04-14&time=19:00&covers=2`;
-      const testUrl2 = `https://api.yelp.com/v3/businesses/search?term=restaurants&location=Atlanta,GA&limit=3`;
-      console.log(`Testing Yelp APIs, key len=${yelpKey.length}`);
-      const [resp1, resp2] = await Promise.all([
-        fetch(testUrl, { headers: { Authorization: `Bearer ${yelpKey}` } }),
-        fetch(testUrl2, { headers: { Authorization: `Bearer ${yelpKey}` } }),
-      ]);
-      const [body1, body2] = await Promise.all([resp1.text(), resp2.text()]);
-      return new Response(JSON.stringify({
-        openings: { status: resp1.status, body: body1.slice(0, 500) },
-        search: { status: resp2.status, body: body2.slice(0, 500) },
-      }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-
     const { query, lat, lng, location, extended, remainingCandidates: incomingCandidates, extendedParams } = body;
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
