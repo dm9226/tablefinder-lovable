@@ -2112,7 +2112,7 @@ async function verifyAvailability(
       // Yelp candidates must always pass a full reservation-page scrape.
       // Discovery/search-page slots are hints only and are never trusted directly.
 
-      const yelpExtractPrompt = "Extract only genuinely bookable clickable reservation time slots from this Yelp reservation page. Do NOT infer times from operating hours, opening hours, service windows, review text, or any repeated 30-minute pattern. If the page only shows loading placeholders or hours, return an empty array.";
+       const yelpExtractPrompt = "Extract only genuinely bookable clickable reservation time slots from this Yelp reservation page. Do NOT infer times from operating hours, opening hours, service windows, review text, or any repeated 30-minute pattern. If the page only shows loading placeholders or hours, return an empty array.";
       const yelpExtractSchema = {
         type: "object",
         properties: {
@@ -2126,19 +2126,35 @@ async function verifyAvailability(
 
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-      // Resy + OT: onlyMainContent=false to capture address/location sections for geocoding
-      // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
-        const scrapePayload: Record<string, unknown> = {
+
+      // ── YELP: browser-actions-driven scrape ──
+      // Instead of passively waiting, use Firecrawl actions to scroll to the
+      // reservation widget, click it to trigger rendering, then wait for slots.
+      const yelpActions = [
+        { type: "wait", milliseconds: 3000 },                         // initial page load
+        { type: "scroll", direction: "down", amount: 3 },             // scroll to reservation section
+        { type: "wait", milliseconds: 2000 },
+        { type: "click", selector: "[class*='reservation'], [data-testid*='reservation'], [aria-label*='reservation'], button:has-text('Find a Table'), a:has-text('Make a Reservation')" },
+        { type: "wait", milliseconds: 5000 },                         // wait for widget to render slots
+        { type: "scroll", direction: "down", amount: 1 },             // reveal any below-fold slots
+        { type: "wait", milliseconds: 3000 },
+      ];
+
+      const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
-          formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "html", "links", "extract"] : ["markdown"],  // Yelp also needs HTML/links so we can reject embedded OpenTable/Resy pages
-          onlyMainContent: isYelp ? false : false,  // Yelp needs full-page context for reservation widget extraction; Resy/OT need full page for addresses
-          ...(isYelp && { waitFor: 15000, timeout: 35000, extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema } }),  // Yelp reservation widgets need longer wait + schema-constrained extraction
-          ...(isOT && { waitFor: 3500 }),    // OT booking widget — HTML parser compensates if markdown misses slots
+          formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "html", "links", "extract"] : ["markdown"],
+          onlyMainContent: false,
+          ...(isYelp && {
+            actions: yelpActions,
+            timeout: 45000,
+            extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema },
+          }),
+          ...(isOT && { waitFor: 3500 }),
         };
 
-      // Per-scrape timeout: 25s for Resy/OT, 35s for Yelp (needs longer waitFor + LLM extraction)
+      // Per-scrape timeout: 25s for Resy/OT, 55s for Yelp (actions take longer)
       const scrapeAbort = new AbortController();
-      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 45_000 : 25_000);
+      const scrapeTimer = setTimeout(() => scrapeAbort.abort(), isYelp ? 55_000 : 25_000);
       let resp: Response;
       try {
         resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -2883,11 +2899,23 @@ async function verifyAvailability(
         }
       }
 
-      if (isYelp && foundTimes.length === 0) {
-        console.log(`  ${r.name} [yelp]: no structured slots on first pass — retrying with longer wait`);
+       if (isYelp && foundTimes.length === 0) {
+        console.log(`  ${r.name} [yelp]: no slots on first pass — retrying with aggressive browser actions`);
         try {
           const yelpRetryAbort = new AbortController();
-          const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 25_000);
+          const yelpRetryTimer = setTimeout(() => yelpRetryAbort.abort(), 55_000);
+
+          // More aggressive action sequence for retry: multiple clicks + longer waits
+          const retryActions = [
+            { type: "wait", milliseconds: 5000 },
+            { type: "scroll", direction: "down", amount: 5 },
+            { type: "wait", milliseconds: 3000 },
+            { type: "click", selector: "[class*='reservation'], [data-testid*='reservation'], [aria-label*='reservation'], button:has-text('Find a Table'), a:has-text('Make a Reservation'), [class*='time-picker'], [class*='timepicker']" },
+            { type: "wait", milliseconds: 8000 },
+            { type: "scroll", direction: "up", amount: 2 },
+            { type: "wait", milliseconds: 3000 },
+          ];
+
           const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
             method: "POST",
             headers: {
@@ -2898,8 +2926,8 @@ async function verifyAvailability(
               url: r.platformUrl,
               formats: ["markdown", "html", "links", "extract"],
               onlyMainContent: false,
-              waitFor: 18000,
-              timeout: 35000,
+              actions: retryActions,
+              timeout: 45000,
               extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema },
             }),
             signal: yelpRetryAbort.signal,
@@ -2910,7 +2938,6 @@ async function verifyAvailability(
             const retryData = await retryResp.json();
             const retryMarkdown = extractFirecrawlMarkdown(retryData);
             const retryHtml = extractFirecrawlHtml(retryData);
-            const retryLinks = extractFirecrawlLinks(retryData);
             const retryExtract = retryData?.data?.extract || retryData?.extract;
             const retryTimes: string[] = Array.isArray(retryExtract?.available_times)
               ? retryExtract.available_times
@@ -2919,7 +2946,7 @@ async function verifyAvailability(
                 : extractStructuredTimeLabels(retryExtract);
             if (retryMarkdown) bookingMarkdown = retryMarkdown;
 
-            // Apply same widget-render guard on retry: count dedicated time-button lines
+            // Apply same widget-render guard on retry
             const retryMd = retryMarkdown || "";
             const retryLines = retryMd.split("\n");
             let retryTimeLineCount = 0;
@@ -2929,10 +2956,9 @@ async function verifyAvailability(
             const retryReservationSectionPattern = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
             const retryReservationSectionPresent = retryReservationSectionPattern.test(retryMd) || retryReservationSectionPattern.test(retryHtml || "");
             const retryHasConcreteSlotEvidence = retryTimeLineCount >= 2 || (retryReservationSectionPresent && retryTimeLineCount >= 1);
-            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryTimeLineCount} dedicated time-button lines, reservationSection=${retryReservationSectionPresent}`);
+            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryTimeLineCount} time-button lines, reservationSection=${retryReservationSectionPresent}`);
             if (!retryHasConcreteSlotEvidence) {
-              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still lacks concrete reservation slot evidence`);
-              // Don't use these hallucinated times
+              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still lacks concrete slot evidence after browser actions`);
             } else {
               for (const retryTime of retryTimes) {
                 const parsed = parseTimeStr(retryTime);
@@ -2941,18 +2967,18 @@ async function verifyAvailability(
                   foundTimes.push(parsed);
                 }
               }
-
               if (retryTimes.length > 0) {
-                console.log(`  ${r.name} [yelp] RETRY SUCCESS: ${retryTimes.join(", ")}`);
+                console.log(`  ${r.name} [yelp] RETRY SUCCESS (browser actions): ${retryTimes.join(", ")}`);
               } else {
                 console.log(`  ${r.name} [yelp] RETRY: still no structured slots found`);
               }
             }
           } else {
-            console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
+            const errBody = await retryResp.text().catch(() => "");
+            console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status}): ${errBody.slice(0, 200)}`);
           }
         } catch (retryErr: any) {
-          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
+          console.log(`  ${r.name} [yelp] RETRY error: ${retryErr.name === "AbortError" ? "timeout" : retryErr}`);
         }
       }
 
