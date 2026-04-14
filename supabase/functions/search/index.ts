@@ -1025,12 +1025,13 @@ async function searchFirecrawl(
         ];
       })()
     : [
-        `site:yelp.com/reservations ${cityState} best${cuisine}`,
-        `site:yelp.com/biz ${cityState} top rated${cuisine} reservation`,
+        `site:yelp.com/reservations ${cityState}${cuisine} restaurant`,
+        `site:yelp.com/reservations ${cityState} best rated${cuisine} restaurant`,
+        `site:yelp.com/reservations ${cityState} find open tables${cuisine}`,
         ...(needsCuisineTypeQuery ? [
-          `site:yelp.com/biz ${cityState}${cuisineTypeSuffix} restaurant reservation`,
+          `site:yelp.com/reservations ${cityState}${cuisineTypeSuffix} restaurant`,
         ] : []),
-        ...(amenitySuffix ? [`site:yelp.com/biz ${cityState}${amenitySuffix} restaurant reservation`] : []),
+        ...(amenitySuffix ? [`site:yelp.com/reservations ${cityState}${amenitySuffix} restaurant`] : []),
       ];
 
   if (hasDishKeyword) {
@@ -1301,7 +1302,7 @@ function normalizeCandidates(
         ? addResyParams(canonUrl, params)
         : platform === "opentable"
         ? addOTParams(canonUrl, params)
-        : canonUrl;
+        : buildYelpAvailabilityUrl(canonUrl, params);
 
       return {
         id: `${platform}-${hashKey(canonUrl)}`,
@@ -3531,7 +3532,8 @@ const opentableAdapter: ProviderAdapter = {
 const yelpAdapter: ProviderAdapter = {
   platform: "yelp",
   async discover(params, keys, amenityTerms) {
-    return fetchYelpCandidates(params, keys.firecrawlKey, keys.aiKey, amenityTerms);
+    const raw = await searchFirecrawl(params, keys.firecrawlKey, "yelp", amenityTerms);
+    return normalizeCandidates("yelp", raw, params);
   },
   async verify(candidates, params, keys, amenityTerms) {
     console.log(`Yelp verify: checking ${candidates.length} candidates on reservation pages for real time slots`);
