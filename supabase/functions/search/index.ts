@@ -2209,6 +2209,34 @@ async function verifyAvailability(
           console.log(`✗ ${r.name} [yelp] — redirected away from /reservations/ to: ${scrapedSourceUrl}, skipping`);
           return null;
         }
+        // Guard: if the reservation widget never rendered (all "Loading..." placeholders),
+        // reject — the LLM will hallucinate times from operating hours.
+        // We check the markdown for actual reservation-widget time buttons.
+        // Real Yelp reservation widgets render times like "5:00 PM" "5:15 PM" as clickable buttons
+        // in a specific reservation section. Operating hours appear as "Open5:00 PM - 9:00 PM" or
+        // "Closed11:00 AM - 2:30 PM, 5:00 PM - 9:00 PM" on a single line with Open/Closed prefix.
+        // Review text can also mention times. We need to find a CLUSTER of times (3+) appearing
+        // close together that are NOT part of operating hours.
+        const mdText = markdown || "";
+        const loadingCount = (mdText.match(/Loading\.\.\./g) || []).length;
+        
+        // Split into lines, find lines that are JUST a time (reservation button) vs embedded in text
+        const mdLines = mdText.split("\n");
+        let reservationTimeLines = 0;
+        for (const line of mdLines) {
+          const trimmed = line.trim();
+          // A reservation time button line is very short and contains a time pattern
+          // e.g. "5:00 PM" or "7:30 PM" — not embedded in a sentence
+          if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
+            reservationTimeLines++;
+          }
+        }
+        
+        console.log(`  ${r.name} [yelp] widget render check: ${loadingCount} "Loading...", ${reservationTimeLines} dedicated time-button lines`);
+        if (reservationTimeLines < 3) {
+          console.log(`✗ ${r.name} [yelp] — rejected: reservation widget did not render (only ${reservationTimeLines} time-button lines found, need ≥3). LLM extraction would hallucinate from operating hours.`);
+          return null;
+        }
       }
 
       // Extract structured data from Firecrawl JSON extraction (if present)
@@ -2882,18 +2910,31 @@ async function verifyAvailability(
                 : extractStructuredTimeLabels(retryExtract);
             if (retryMarkdown) bookingMarkdown = retryMarkdown;
 
-            for (const retryTime of retryTimes) {
-              const parsed = parseTimeStr(retryTime);
-              if (parsed && !seenTimes.has(parsed.time)) {
-                seenTimes.add(parsed.time);
-                foundTimes.push(parsed);
-              }
+            // Apply same widget-render guard on retry: count dedicated time-button lines
+            const retryMd = retryMarkdown || "";
+            const retryLines = retryMd.split("\n");
+            let retryTimeLineCount = 0;
+            for (const line of retryLines) {
+              if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(line.trim())) retryTimeLineCount++;
             }
-
-            if (retryTimes.length > 0) {
-              console.log(`  ${r.name} [yelp] RETRY SUCCESS: ${retryTimes.join(", ")}`);
+            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryTimeLineCount} dedicated time-button lines`);
+            if (retryTimeLineCount < 3) {
+              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still not rendered (${retryTimeLineCount} time lines)`);
+              // Don't use these hallucinated times
             } else {
-              console.log(`  ${r.name} [yelp] RETRY: still no structured slots found`);
+              for (const retryTime of retryTimes) {
+                const parsed = parseTimeStr(retryTime);
+                if (parsed && !seenTimes.has(parsed.time)) {
+                  seenTimes.add(parsed.time);
+                  foundTimes.push(parsed);
+                }
+              }
+
+              if (retryTimes.length > 0) {
+                console.log(`  ${r.name} [yelp] RETRY SUCCESS: ${retryTimes.join(", ")}`);
+              } else {
+                console.log(`  ${r.name} [yelp] RETRY: still no structured slots found`);
+              }
             }
           } else {
             console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
