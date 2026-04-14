@@ -2925,9 +2925,9 @@ async function verifyAvailability(
               url: r.platformUrl,
               formats: ["markdown", "extract"],
               onlyMainContent: false,
-              waitFor: 12000,
-              timeout: 28000,
-              extract: { prompt: yelpExtractPrompt },
+              waitFor: 18000,
+              timeout: 35000,
+              extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema },
             }),
             signal: yelpRetryAbort.signal,
           });
