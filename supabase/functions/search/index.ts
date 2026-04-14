@@ -2896,18 +2896,32 @@ async function verifyAvailability(
                 : extractStructuredTimeLabels(retryExtract);
             if (retryMarkdown) bookingMarkdown = retryMarkdown;
 
-            for (const retryTime of retryTimes) {
-              const parsed = parseTimeStr(retryTime);
-              if (parsed && !seenTimes.has(parsed.time)) {
-                seenTimes.add(parsed.time);
-                foundTimes.push(parsed);
-              }
-            }
-
-            if (retryTimes.length > 0) {
-              console.log(`  ${r.name} [yelp] RETRY SUCCESS: ${retryTimes.join(", ")}`);
+            // Apply same widget-render guard on retry
+            const retryMd = retryMarkdown || "";
+            const retryLoadingCount = (retryMd.match(/Loading\.\.\./g) || []).length;
+            const retryStripped = retryMd
+              .replace(/^.*?(Open|Closed)\s*\d{1,2}:\d{2}\s*(AM|PM).*$/gim, "")
+              .replace(/Loading\.\.\./g, "")
+              .replace(/\[.*?\]\(.*?\)/g, "");
+            const retryStandaloneTimes = retryStripped.match(/\b\d{1,2}:\d{2}\s*(AM|PM)\b/gi) || [];
+            console.log(`  ${r.name} [yelp] RETRY widget check: ${retryLoadingCount} "Loading...", ${retryStandaloneTimes.length} time buttons`);
+            if (retryLoadingCount >= 5 && retryStandaloneTimes.length === 0) {
+              console.log(`✗ ${r.name} [yelp] — RETRY rejected: widget still not rendered`);
+              // Don't use these hallucinated times
             } else {
-              console.log(`  ${r.name} [yelp] RETRY: still no structured slots found`);
+              for (const retryTime of retryTimes) {
+                const parsed = parseTimeStr(retryTime);
+                if (parsed && !seenTimes.has(parsed.time)) {
+                  seenTimes.add(parsed.time);
+                  foundTimes.push(parsed);
+                }
+              }
+
+              if (retryTimes.length > 0) {
+                console.log(`  ${r.name} [yelp] RETRY SUCCESS: ${retryTimes.join(", ")}`);
+              } else {
+                console.log(`  ${r.name} [yelp] RETRY: still no structured slots found`);
+              }
             }
           } else {
             console.log(`  ${r.name} [yelp] RETRY: scrape failed (${retryResp.status})`);
