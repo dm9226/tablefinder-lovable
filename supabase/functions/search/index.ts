@@ -2124,7 +2124,7 @@ async function verifyAvailability(
       // Yelp candidates must always pass a full reservation-page scrape.
       // Discovery/search-page slots are hints only and are never trusted directly.
 
-      const yelpExtractPrompt = "Extract the clickable reservation time slots from this Yelp reservation page. These are the specific bookable times shown as buttons near the date/party size picker (e.g. 5:30 PM, 6:00 PM, 6:30 PM). Do NOT include business/operating hours. Return JSON with available_times array.";
+      const yelpExtractPrompt = "Extract TWO things from this Yelp reservation page:\n1. The clickable reservation time slots (bookable times shown as buttons, e.g. 5:30 PM, 6:00 PM). Do NOT include business/operating hours.\n2. The booking provider: look for any text like 'Powered by OpenTable', 'Reserve with OpenTable', 'Powered by Resy', 'Book on OpenTable', 'OpenTable', 'Resy', or any iframe/widget from opentable.com or resy.com. If found, set booking_provider to 'opentable' or 'resy'. If the reservation appears to be Yelp-native (no external provider mentioned), set booking_provider to 'yelp' or leave it empty.";
       const yelpExtractSchema = {
         type: "object",
         properties: {
@@ -2132,6 +2132,10 @@ async function verifyAvailability(
             type: "array",
             items: { type: "string" },
             description: "Clickable reservation time slot buttons, NOT business hours"
+          },
+          booking_provider: {
+            type: "string",
+            description: "The underlying booking provider: 'opentable', 'resy', or 'yelp' (native). Check for 'Powered by OpenTable', iframe sources, or any OpenTable/Resy branding on the page."
           }
         }
       };
