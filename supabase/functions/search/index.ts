@@ -1820,18 +1820,6 @@ function extractFirecrawlLinks(data: any): string[] {
     : [];
 }
 
-function hasExternalBookingProviderOnYelpPage(input: {
-  markdown?: string;
-  html?: string;
-  links?: string[];
-  sourceUrl?: string;
-}): boolean {
-  const combined = [input.markdown || "", input.html || "", input.sourceUrl || "", ...(input.links || [])]
-    .join("\n")
-    .toLowerCase();
-
-  return /opentable\.com|opentable\.co\.uk|opentable\.ca|resy\.com|widget\.resy\.com|powered\s+by\s+opentable|book\s+on\s+opentable|reserve\s+with\s+opentable|powered\s+by\s+resy|book\s+on\s+resy|reserve\s+with\s+resy/.test(combined);
-}
 
 function toTwelveHourLabel(time24: string): string {
   const m = time24.match(/^(\d{1,2}):(\d{2})$/);
@@ -2124,7 +2112,7 @@ async function verifyAvailability(
       // Yelp candidates must always pass a full reservation-page scrape.
       // Discovery/search-page slots are hints only and are never trusted directly.
 
-      const yelpExtractPrompt = "Extract TWO things from this Yelp reservation page:\n1. The clickable reservation time slots (bookable times shown as buttons, e.g. 5:30 PM, 6:00 PM). Do NOT include business/operating hours.\n2. The booking provider: look for any text like 'Powered by OpenTable', 'Reserve with OpenTable', 'Powered by Resy', 'Book on OpenTable', 'OpenTable', 'Resy', or any iframe/widget from opentable.com or resy.com. If found, set booking_provider to 'opentable' or 'resy'. If the reservation appears to be Yelp-native (no external provider mentioned), set booking_provider to 'yelp' or leave it empty.";
+      const yelpExtractPrompt = "Extract the clickable reservation time slots from this Yelp reservation page (bookable times shown as buttons, e.g. 5:30 PM, 6:00 PM). Do NOT include business/operating hours.";
       const yelpExtractSchema = {
         type: "object",
         properties: {
@@ -2132,10 +2120,6 @@ async function verifyAvailability(
             type: "array",
             items: { type: "string" },
             description: "Clickable reservation time slot buttons, NOT business hours"
-          },
-          booking_provider: {
-            type: "string",
-            description: "The underlying booking provider: 'opentable', 'resy', or 'yelp' (native). Check for 'Powered by OpenTable', iframe sources, or any OpenTable/Resy branding on the page."
           }
         }
       };
@@ -2221,15 +2205,6 @@ async function verifyAvailability(
         const scrapedSourceUrl = data?.data?.metadata?.sourceURL || data?.metadata?.sourceURL || "";
         if (scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/")) {
           console.log(`✗ ${r.name} [yelp] — redirected away from /reservations/ to: ${scrapedSourceUrl}, skipping`);
-          return null;
-        }
-        if (hasExternalBookingProviderOnYelpPage({
-          markdown,
-          html,
-          links,
-          sourceUrl: scrapedSourceUrl || r.platformUrl,
-        })) {
-          console.log(`✗ ${r.name} [yelp] — rejected: Yelp reservation page is powered by an external booking provider`);
           return null;
         }
       }
@@ -2551,19 +2526,6 @@ async function verifyAvailability(
       };
 
       if (isYelp) {
-        // Check if the LLM detected an external booking provider
-        const bookingProvider = (jsonData?.booking_provider || "").toLowerCase().trim();
-        console.log(`  ${r.name} [yelp]: LLM booking_provider="${bookingProvider}"`);
-        if (bookingProvider === "opentable" || bookingProvider === "resy") {
-          console.log(`✗ ${r.name} [yelp] — rejected: LLM detected external booking provider: ${bookingProvider}`);
-          return null;
-        }
-        // If LLM couldn't determine provider (empty/unknown), reject — we only trust
-        // Yelp results where the LLM positively confirms native Yelp reservations
-        if (!bookingProvider || (bookingProvider !== "yelp" && bookingProvider !== "yelp guest manager" && bookingProvider !== "seatme" && bookingProvider !== "yelp reservations" && bookingProvider !== "native")) {
-          console.log(`✗ ${r.name} [yelp] — rejected: LLM could not confirm native Yelp booking (provider="${bookingProvider}")`);
-          return null;
-        }
 
         const extractTimes: string[] = Array.isArray(jsonData?.available_times) ? jsonData.available_times
           : Array.isArray(jsonData?.available_reservation_times) ? jsonData.available_reservation_times
@@ -2917,21 +2879,6 @@ async function verifyAvailability(
                 ? retryExtract.available_reservation_times
                 : extractStructuredTimeLabels(retryExtract);
             if (retryMarkdown) bookingMarkdown = retryMarkdown;
-            if (hasExternalBookingProviderOnYelpPage({
-              markdown: retryMarkdown,
-              html: retryHtml,
-              links: retryLinks,
-              sourceUrl: retryData?.data?.metadata?.sourceURL || retryData?.metadata?.sourceURL || r.platformUrl,
-            })) {
-              console.log(`✗ ${r.name} [yelp] — retry rejected: Yelp reservation page is powered by an external booking provider`);
-              return null;
-            }
-            // Also check LLM-detected booking provider on retry
-            const retryProvider = (retryExtract?.booking_provider || "").toLowerCase().trim();
-            if (retryProvider === "opentable" || retryProvider === "resy") {
-              console.log(`✗ ${r.name} [yelp] — retry rejected: LLM detected external booking provider: ${retryProvider}`);
-              return null;
-            }
 
             for (const retryTime of retryTimes) {
               const parsed = parseTimeStr(retryTime);
