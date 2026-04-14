@@ -2578,7 +2578,9 @@ async function verifyAvailability(
           }
         }
 
+        console.log(`  ${r.name} [yelp]: extract jsonData keys: ${jsonData ? Object.keys(jsonData).join(", ") : "null"}`);
         const extractedTimes = extractStructuredTimeLabels(jsonData);
+        console.log(`  ${r.name} [yelp]: extractStructuredTimeLabels returned ${extractedTimes.length} times: ${extractedTimes.join(", ")}`);
         for (const extractedTime of extractedTimes) {
           const parsed = parseTimeStr(extractedTime);
           if (parsed && !seenTimes.has(parsed.time)) {
