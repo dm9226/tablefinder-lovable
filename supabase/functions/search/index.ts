@@ -1809,6 +1809,31 @@ function extractFirecrawlMarkdown(data: any): string {
   return data?.data?.markdown || data?.markdown || "";
 }
 
+function extractFirecrawlHtml(data: any): string {
+  return data?.data?.html || data?.html || "";
+}
+
+function extractFirecrawlLinks(data: any): string[] {
+  const rawLinks = data?.data?.links || data?.links || [];
+  return Array.isArray(rawLinks)
+    ? rawLinks.filter((value): value is string => typeof value === "string")
+    : [];
+}
+
+function hasExternalBookingProviderOnYelpPage(input: {
+  markdown?: string;
+  html?: string;
+  links?: string[];
+  sourceUrl?: string;
+}): boolean {
+  const combined = [input.markdown || "", input.html || "", input.sourceUrl || "", ...(input.links || [])]
+    .join("
+")
+    .toLowerCase();
+
+  return /opentable\.com|opentable\.co\.uk|opentable\.ca|resy\.com|widget\.resy\.com|powered\s+by\s+opentable|book\s+on\s+opentable|reserve\s+with\s+opentable|powered\s+by\s+resy|book\s+on\s+resy|reserve\s+with\s+resy/.test(combined);
+}
+
 function toTwelveHourLabel(time24: string): string {
   const m = time24.match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return "";
@@ -2097,56 +2122,8 @@ async function verifyAvailability(
 
       // ── YELP FAST PATH: trust search-page time slots ──
       // Yelp search results (with reservation_date/time/covers params) already show
-      // verified availability. If discovery extracted slots, apply the ±2h window
-      // and return immediately — no individual page scrape needed.
-      if (isYelp && r.timeSlots && r.timeSlots.length > 0) {
-        const [reqH, reqM] = params.time.split(":").map(Number);
-        const requestedMin = reqH * 60 + (reqM || 0);
-        const winStart = Math.max(0, requestedMin - 120);
-        const winEnd = Math.min(1439, requestedMin + 120);
-
-        const parseSlotTime = (raw: string): { time: string; minutes: number } | null => {
-          const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
-          if (!m12) return null;
-          const rawH = parseInt(m12[1]);
-          const mins = parseInt(m12[2]);
-          const ampm = m12[3].toLowerCase();
-          let h24 = rawH;
-          if (ampm === "pm" && rawH !== 12) h24 += 12;
-          if (ampm === "am" && rawH === 12) h24 = 0;
-          const totalMin = h24 * 60 + mins;
-          const displayH = h24 % 12 || 12;
-          const displayAmpm = h24 >= 12 ? "PM" : "AM";
-          return { time: `${displayH}:${mins.toString().padStart(2, "0")} ${displayAmpm}`, minutes: totalMin };
-        };
-
-        const parsed = r.timeSlots.map(s => parseSlotTime(s.time)).filter(Boolean) as { time: string; minutes: number }[];
-        let inWindow = parsed.filter(t => t.minutes >= winStart && t.minutes <= winEnd);
-
-        // Apply operating-hours rejection (same logic as main path)
-        if (inWindow.length <= 2) {
-          if (inWindow.length === 2) {
-            const gap = Math.abs(inWindow[1].minutes - inWindow[0].minutes);
-            if (gap >= 180) {
-              console.log(`✗ ${r.name} [yelp/fast] — rejected: 2 slots ${gap}min apart (likely operating hours)`);
-              return null;
-            }
-          } else if (inWindow.length === 1) {
-            console.log(`✗ ${r.name} [yelp/fast] — rejected: only 1 slot (likely operating hours): ${inWindow[0].time}`);
-            return null;
-          }
-        }
-
-        if (inWindow.length > 0) {
-          inWindow.sort((a, b) => Math.abs(a.minutes - requestedMin) - Math.abs(b.minutes - requestedMin));
-          const top5 = inWindow.slice(0, 5).sort((a, b) => a.minutes - b.minutes);
-          r.timeSlots = top5.map(t => ({ time: t.time }));
-          console.log(`✓ Verified ${r.name} [yelp/fast] — ${top5.length} slots from search page: ${top5.map(t => t.time).join(", ")}`);
-          return r;
-        }
-        // If search-page slots are outside window, fall through to individual scrape
-        console.log(`  ${r.name} [yelp]: search-page slots outside ±2h window, falling through to individual scrape`);
-      }
+      // Yelp candidates must always pass a full reservation-page scrape.
+      // Discovery/search-page slots are hints only and are never trusted directly.
 
       const yelpExtractPrompt = "Extract the clickable reservation time slots from this Yelp reservation page. These are the specific bookable times shown as buttons near the date/party size picker (e.g. 5:30 PM, 6:00 PM, 6:30 PM). Do NOT include business/operating hours. Return JSON with available_times array.";
       const yelpExtractSchema = {
@@ -2166,7 +2143,7 @@ async function verifyAvailability(
       // Time parsing already targets specific section headers ("dinner", "Select a time") so extra content won't cause false matches
         const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
-          formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "extract"] : ["markdown"],  // OT: also get HTML for more reliable slot extraction
+          formats: isOT ? ["markdown", "html"] : isYelp ? ["markdown", "html", "links", "extract"] : ["markdown"],  // Yelp also needs HTML/links so we can reject embedded OpenTable/Resy pages
           onlyMainContent: isYelp ? false : false,  // Yelp needs full-page context for reservation widget extraction; Resy/OT need full page for addresses
           ...(isYelp && { waitFor: 15000, timeout: 35000, extract: { prompt: yelpExtractPrompt, schema: yelpExtractSchema } }),  // Yelp reservation widgets need longer wait + schema-constrained extraction
           ...(isOT && { waitFor: 3500 }),    // OT booking widget — HTML parser compensates if markdown misses slots
@@ -2229,31 +2206,32 @@ async function verifyAvailability(
 
       const data = await resp.json();
       const markdown = extractFirecrawlMarkdown(data);
-      if (!markdown) {
+      const html = extractFirecrawlHtml(data);
+      const links = extractFirecrawlLinks(data);
+      const jsonData = data?.data?.extract || data?.extract;
+      if (!markdown && !html && !jsonData) {
         console.log(`No content for ${r.name} [${r.platform}]`);
         return null;
       }
 
-      // ── YELP: Validate reservation page ──
-      // Since discovery uses Yelp's reservation search (attrs=reservation + date/time/covers),
-      // these restaurants are pre-filtered by Yelp to support reservations.
-      // Only reject if the page clearly redirected away from /reservations/ to a non-booking page.
       if (isYelp) {
         const scrapedSourceUrl = data?.data?.metadata?.sourceURL || data?.metadata?.sourceURL || "";
-        // If the /reservations/ URL redirected to /biz/ or any non-reservation page,
-        // this restaurant does NOT support Yelp native reservations — reject it.
         if (scrapedSourceUrl && !scrapedSourceUrl.includes("/reservations/")) {
           console.log(`✗ ${r.name} [yelp] — redirected away from /reservations/ to: ${scrapedSourceUrl}, skipping`);
           return null;
         }
-        
-        // Widget detection skipped — Yelp's reservation widgets are JS-rendered and invisible
-        // in scraped markdown. Instead, we rely on the LLM extract to find actual slots downstream.
-        // If the extract returns no slots, the restaurant is rejected at the time-slot check below.
+        if (hasExternalBookingProviderOnYelpPage({
+          markdown,
+          html,
+          links,
+          sourceUrl: scrapedSourceUrl || r.platformUrl,
+        })) {
+          console.log(`✗ ${r.name} [yelp] — rejected: Yelp reservation page is powered by an external booking provider`);
+          return null;
+        }
       }
 
       // Extract structured data from Firecrawl JSON extraction (if present)
-      const jsonData = data?.data?.extract || data?.extract;
       
       // Extract address from markdown/metadata (all platforms)
       if (r.platform !== "yelp" && !r._address) {
@@ -2570,15 +2548,6 @@ async function verifyAvailability(
       };
 
       if (isYelp) {
-        for (const existingSlot of r.timeSlots || []) {
-          const parsed = parseTimeStr(existingSlot.time);
-          if (parsed && !seenTimes.has(parsed.time)) {
-            seenTimes.add(parsed.time);
-            foundTimes.push(parsed);
-          }
-        }
-
-        // Parse extract times directly — bypass extractStructuredTimeLabels which has issues
         const extractTimes: string[] = Array.isArray(jsonData?.available_times) ? jsonData.available_times
           : Array.isArray(jsonData?.available_reservation_times) ? jsonData.available_reservation_times
           : [];
@@ -2593,7 +2562,7 @@ async function verifyAvailability(
         }
 
         if (foundTimes.length > 0) {
-          console.log(`  ${r.name} [yelp]: seeded ${foundTimes.length} structured times: ${foundTimes.map(t => t.time).join(", ")}`);
+          console.log(`  ${r.name} [yelp]: verified structured times: ${foundTimes.map(t => t.time).join(", ")}`);
         }
       }
 
@@ -2909,7 +2878,7 @@ async function verifyAvailability(
             },
             body: JSON.stringify({
               url: r.platformUrl,
-              formats: ["markdown", "extract"],
+              formats: ["markdown", "html", "links", "extract"],
               onlyMainContent: false,
               waitFor: 18000,
               timeout: 35000,
@@ -2922,9 +2891,24 @@ async function verifyAvailability(
           if (retryResp.ok) {
             const retryData = await retryResp.json();
             const retryMarkdown = extractFirecrawlMarkdown(retryData);
+            const retryHtml = extractFirecrawlHtml(retryData);
+            const retryLinks = extractFirecrawlLinks(retryData);
             const retryExtract = retryData?.data?.extract || retryData?.extract;
-            const retryTimes = extractStructuredTimeLabels(retryExtract);
+            const retryTimes: string[] = Array.isArray(retryExtract?.available_times)
+              ? retryExtract.available_times
+              : Array.isArray(retryExtract?.available_reservation_times)
+                ? retryExtract.available_reservation_times
+                : extractStructuredTimeLabels(retryExtract);
             if (retryMarkdown) bookingMarkdown = retryMarkdown;
+            if (hasExternalBookingProviderOnYelpPage({
+              markdown: retryMarkdown,
+              html: retryHtml,
+              links: retryLinks,
+              sourceUrl: retryData?.data?.metadata?.sourceURL || retryData?.metadata?.sourceURL || r.platformUrl,
+            })) {
+              console.log(`✗ ${r.name} [yelp] — retry rejected: Yelp reservation page is powered by an external booking provider`);
+              return null;
+            }
 
             for (const retryTime of retryTimes) {
               const parsed = parseTimeStr(retryTime);
@@ -2979,12 +2963,7 @@ async function verifyAvailability(
           }
         }
         
-        // Also check for external platform mentions on Yelp pages (OpenTable/Resy embeds)
-        if (isYelp && /opentable\.com|resy\.com|powered\s+by\s+opentable|book\s+on\s+opentable|book\s+on\s+resy/i.test(markdown)) {
-          console.log(`✗ ${r.name} [yelp] — rejected: page mentions external booking platform (OpenTable/Resy)`);
-          return null;
-        }
-        
+
         r.timeSlots = matchingTimes.map((t) => ({ time: t.time }));
         console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} ${mealLabel} slots (${windowStart/60|0}:${(windowStart%60).toString().padStart(2,"0")}–${windowEnd/60|0}:${(windowEnd%60).toString().padStart(2,"0")}): ${matchingTimes.map(t => t.time).join(", ")}`);
         return r;
