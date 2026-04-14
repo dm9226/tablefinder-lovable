@@ -329,7 +329,7 @@ serve(async (req) => {
     // Step 3: Select candidates with round-robin balance, then verify per-adapter
     // Use fewer candidates for vague queries to avoid timeouts
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 18 : 24;
+    const maxCandidates = isVagueQuery ? 24 : 30;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -2326,8 +2326,8 @@ function selectCandidatesForVerification(
   let assigned = 0;
   for (const platform of platformOrder) {
     const raw = Math.round((buckets[platform].length / total) * maxCandidates);
-    // Cap quota to actual bucket size; Yelp capped at 6 due to waitFor latency cost
-    const platformCap = platform === "yelp" ? Math.min(raw, 6) : raw;
+    // Cap quota to actual bucket size; Yelp capped at 10 due to waitFor latency cost
+    const platformCap = platform === "yelp" ? Math.min(raw, 10) : raw;
     quotas[platform] = Math.min(platformCap, buckets[platform].length);
     assigned += quotas[platform];
   }
