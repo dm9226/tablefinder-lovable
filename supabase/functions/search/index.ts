@@ -2262,7 +2262,8 @@ async function verifyAvailability(
             returnByValue: true,
           });
           yelpBrowserbaseHtml = docResult?.result?.value || "";
-          console.log(`  ${r.name} [yelp] Browserbase extracted ${yelpBrowserbaseHtml.length} chars of HTML`);
+           console.log(`  ${r.name} [yelp] Browserbase extracted ${yelpBrowserbaseHtml.length} chars of HTML`);
+          console.log(`  [DEBUG] ${r.name} [yelp] Browserbase HTML (first 2000 chars):\n${yelpBrowserbaseHtml.slice(0, 2000)}`);
 
           // Check final URL (redirect detection)
           const locationResult = await cdpSend("Runtime.evaluate", {
