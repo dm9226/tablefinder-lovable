@@ -2121,8 +2121,7 @@ async function verifyAvailability(
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency, Browserbase is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
-    try {
-    try {
+     try {
        const isYelp = r.platform === "yelp";
 
       const isResy = r.platform === "resy";
