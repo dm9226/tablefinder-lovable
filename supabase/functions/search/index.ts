@@ -190,13 +190,16 @@ serve(async (req) => {
       const yelpKey = Deno.env.get("YELP_API_KEY") || "";
       const alias = body.alias || "south-city-kitchen-midtown-atlanta-2";
       const testUrl = `https://api.yelp.com/v3/bookings/${alias}/openings?date=2026-04-14&time=19:00&covers=2`;
-      console.log(`Testing Yelp Openings API: ${testUrl}, key len=${yelpKey.length}`);
-      const resp = await fetch(testUrl, { headers: { Authorization: `Bearer ${yelpKey}` } });
-      const respBody = await resp.text();
+      const testUrl2 = `https://api.yelp.com/v3/businesses/search?term=restaurants&location=Atlanta,GA&limit=3`;
+      console.log(`Testing Yelp APIs, key len=${yelpKey.length}`);
+      const [resp1, resp2] = await Promise.all([
+        fetch(testUrl, { headers: { Authorization: `Bearer ${yelpKey}` } }),
+        fetch(testUrl2, { headers: { Authorization: `Bearer ${yelpKey}` } }),
+      ]);
+      const [body1, body2] = await Promise.all([resp1.text(), resp2.text()]);
       return new Response(JSON.stringify({
-        status: resp.status,
-        body: respBody.slice(0, 2000),
-        keyLen: yelpKey.length,
+        openings: { status: resp1.status, body: body1.slice(0, 500) },
+        search: { status: resp2.status, body: body2.slice(0, 500) },
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
