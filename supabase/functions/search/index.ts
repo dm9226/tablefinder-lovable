@@ -2149,7 +2149,11 @@ async function verifyAvailability(
               "x-bb-api-key": bbApiKey,
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ projectId: bbProjectId }),
+             body: JSON.stringify({
+              projectId: bbProjectId,
+              proxies: true,
+              browserSettings: { solveCaptchas: true },
+            }),
           });
            if (!sessionResp.ok) {
             const errText = await sessionResp.text().catch(() => "");
