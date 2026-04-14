@@ -2152,9 +2152,10 @@ async function verifyAvailability(
             },
             body: JSON.stringify({ projectId: bbProjectId }),
           });
-          if (!sessionResp.ok) {
+           if (!sessionResp.ok) {
             const errText = await sessionResp.text().catch(() => "");
             console.log(`✗ ${r.name} [yelp] — Browserbase session create failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
+            releaseBBSlot();
             return null;
           }
           const sessionData = await sessionResp.json();
@@ -2162,6 +2163,7 @@ async function verifyAvailability(
           const sessionId = sessionData.id;
           if (!connectUrl) {
             console.log(`✗ ${r.name} [yelp] — Browserbase session missing connectUrl`);
+            releaseBBSlot();
             return null;
           }
 
