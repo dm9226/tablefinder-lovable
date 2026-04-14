@@ -2684,14 +2684,29 @@ async function verifyAvailability(
         return { time: formatted, minutes: totalMin };
       };
 
-      if (isYelp) {
+       if (isYelp) {
+        // Extract times from Browserbase HTML — look for time patterns in button/link elements
+        // and standalone time lines from the rendered page
+        const timeRegex = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
+        const allTimesInHtml = (yelpBrowserbaseHtml || "").match(timeRegex) || [];
+        
+        // Deduplicate and filter out operating hours patterns
+        // Operating hours typically appear as ranges "5:00 PM - 9:00 PM"
+        // Reservation buttons appear as standalone times
+        const hoursRangeRegex = /\d{1,2}:\d{2}\s*(?:AM|PM)\s*[-–—]\s*\d{1,2}:\d{2}\s*(?:AM|PM)/gi;
+        const hoursRanges = (yelpBrowserbaseHtml || "").match(hoursRangeRegex) || [];
+        const hoursTimesSet = new Set<string>();
+        for (const range of hoursRanges) {
+          const rangeMatches = range.match(timeRegex) || [];
+          for (const t of rangeMatches) hoursTimesSet.add(t.trim().toUpperCase());
+        }
 
-        const extractTimes: string[] = Array.isArray(jsonData?.available_times) ? jsonData.available_times
-          : Array.isArray(jsonData?.available_reservation_times) ? jsonData.available_reservation_times
-          : [];
-        console.log(`  ${r.name} [yelp]: direct extract times: ${extractTimes.length} — ${extractTimes.slice(0, 8).join(", ")}`);
-        for (const rawTime of extractTimes) {
-          if (typeof rawTime !== "string") continue;
+        // Use button-context times (from the Browserbase evidence check above)
+        const buttonTimeRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
+        let btMatch;
+        while ((btMatch = buttonTimeRegex.exec(yelpBrowserbaseHtml || "")) !== null) {
+          const rawTime = btMatch[1].trim();
+          if (hoursTimesSet.has(rawTime.toUpperCase())) continue; // skip operating hours times
           const parsed = parseTimeStr(rawTime);
           if (parsed && !seenTimes.has(parsed.time)) {
             seenTimes.add(parsed.time);
@@ -2699,9 +2714,21 @@ async function verifyAvailability(
           }
         }
 
-        if (foundTimes.length > 0) {
-          console.log(`  ${r.name} [yelp]: verified structured times: ${foundTimes.map(t => t.time).join(", ")}`);
+        // Also check standalone time text lines
+        const textLines = (yelpBrowserbaseHtml || "").replace(/<[^>]+>/g, "\n").split("\n");
+        for (const line of textLines) {
+          const trimmed = line.trim();
+          if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
+            if (hoursTimesSet.has(trimmed.toUpperCase())) continue;
+            const parsed = parseTimeStr(trimmed);
+            if (parsed && !seenTimes.has(parsed.time)) {
+              seenTimes.add(parsed.time);
+              foundTimes.push(parsed);
+            }
+          }
         }
+
+        console.log(`  ${r.name} [yelp]: Browserbase extracted times: ${foundTimes.length} — ${foundTimes.map(t => t.time).slice(0, 8).join(", ")}`);
 
         if (!yelpHasConcreteSlotEvidence) {
           foundTimes = [];
