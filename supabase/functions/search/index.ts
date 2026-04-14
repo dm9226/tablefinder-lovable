@@ -2342,9 +2342,9 @@ async function verifyAvailability(
 
       if (isYelp) {
         // For Yelp, convert Browserbase HTML to pseudo-markdown for downstream parsing
-        const textContent = yelpBrowserbaseHtml.replace(/<[^>]+>/g, "\n").replace(/\n{3,}/g, "\n\n");
+        const textContent = yelpSteelHtml.replace(/<[^>]+>/g, "\n").replace(/\n{3,}/g, "\n\n");
         markdown = textContent;
-        html = yelpBrowserbaseHtml;
+        html = yelpSteelHtml;
       } else {
         // Firecrawl for Resy/OT
         const scrapeAbort = new AbortController();
@@ -2733,13 +2733,13 @@ async function verifyAvailability(
         // Extract times from Browserbase HTML — look for time patterns in button/link elements
         // and standalone time lines from the rendered page
         const timeRegex = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
-        const allTimesInHtml = (yelpBrowserbaseHtml || "").match(timeRegex) || [];
+        const allTimesInHtml = (yelpSteelHtml || "").match(timeRegex) || [];
         
         // Deduplicate and filter out operating hours patterns
         // Operating hours typically appear as ranges "5:00 PM - 9:00 PM"
         // Reservation buttons appear as standalone times
         const hoursRangeRegex = /\d{1,2}:\d{2}\s*(?:AM|PM)\s*[-–—]\s*\d{1,2}:\d{2}\s*(?:AM|PM)/gi;
-        const hoursRanges = (yelpBrowserbaseHtml || "").match(hoursRangeRegex) || [];
+        const hoursRanges = (yelpSteelHtml || "").match(hoursRangeRegex) || [];
         const hoursTimesSet = new Set<string>();
         for (const range of hoursRanges) {
           const rangeMatches = range.match(timeRegex) || [];
@@ -2749,7 +2749,7 @@ async function verifyAvailability(
         // Use button-context times (from the Browserbase evidence check above)
         const buttonTimeRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
         let btMatch;
-        while ((btMatch = buttonTimeRegex.exec(yelpBrowserbaseHtml || "")) !== null) {
+        while ((btMatch = buttonTimeRegex.exec(yelpSteelHtml || "")) !== null) {
           const rawTime = btMatch[1].trim();
           if (hoursTimesSet.has(rawTime.toUpperCase())) continue; // skip operating hours times
           const parsed = parseTimeStr(rawTime);
@@ -2760,7 +2760,7 @@ async function verifyAvailability(
         }
 
         // Also check standalone time text lines
-        const textLines = (yelpBrowserbaseHtml || "").replace(/<[^>]+>/g, "\n").split("\n");
+        const textLines = (yelpSteelHtml || "").replace(/<[^>]+>/g, "\n").split("\n");
         for (const line of textLines) {
           const trimmed = line.trim();
           if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
