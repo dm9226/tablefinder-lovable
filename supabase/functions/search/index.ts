@@ -3165,8 +3165,6 @@ async function verifyAvailability(
         console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after Firecrawl extraction`);
         return null;
       }
-        return null;
-      }
 
       // C. Filter times to those within the meal window
       let matchingTimes = foundTimes.filter((t) =>
