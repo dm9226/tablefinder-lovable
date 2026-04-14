@@ -2102,41 +2102,26 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
-  // Split Yelp from non-Yelp: Yelp uses Browserbase with concurrency limits (max 2 at a time)
-  const yelpCandidates = candidates.filter(c => c.platform === "yelp");
-  const nonYelpCandidates = candidates.filter(c => c.platform !== "yelp");
+  // Browserbase concurrency limiter (free plan: 3 concurrent sessions, use 2 to be safe)
+  let bbActiveCount = 0;
+  const bbQueue: (() => void)[] = [];
+  const BB_MAX_CONCURRENT = 2;
+  const acquireBBSlot = (): Promise<void> => {
+    if (bbActiveCount < BB_MAX_CONCURRENT) {
+      bbActiveCount++;
+      return Promise.resolve();
+    }
+    return new Promise<void>(resolve => bbQueue.push(resolve));
+  };
+  const releaseBBSlot = () => {
+    bbActiveCount--;
+    const next = bbQueue.shift();
+    if (next) { bbActiveCount++; next(); }
+  };
 
-  // Process non-Yelp in parallel, Yelp in batches of 2
-  const verifySingle = async (r: Restaurant): Promise<Restaurant | null> => {
+  // Run ALL scrapes in parallel (Firecrawl handles concurrency, Browserbase is rate-limited)
+  const checked = await Promise.all(candidates.map(async (r) => {
     try {
-
-  // Shared verification logic (extracted into verifySingle)
-  const checked = await Promise.all(nonYelpCandidates.map(verifySingle));
-
-  // Process Yelp in serial batches of 2 to respect Browserbase concurrency
-  const yelpResults: (Restaurant | null)[] = [];
-  for (let i = 0; i < yelpCandidates.length; i += 2) {
-    const batch = yelpCandidates.slice(i, i + 2);
-    const batchResults = await Promise.all(batch.map(verifySingle));
-    yelpResults.push(...batchResults);
-  }
-
-  const allChecked = [...checked, ...yelpResults];
-  return allChecked.filter((r): r is Restaurant => r !== null);
-}
-
-// ── Shared single-restaurant verification logic ──
-async function verifySingleRestaurant(
-  r: Restaurant,
-  params: SearchParams,
-  firecrawlKey: string,
-  amenityTerms: string[],
-  globalStartTime?: number
-): Promise<Restaurant | null> {
-  try {
-  const checked_placeholder = [r]; // never used — just to keep TS happy with the old closing structure
-  // The actual verification starts here:
-  {
     try {
        const isYelp = r.platform === "yelp";
 
