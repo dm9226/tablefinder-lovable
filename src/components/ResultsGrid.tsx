@@ -86,24 +86,11 @@ export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearch
         ))}
       </div>
 
-      {/* Extended search button */}
-      {hasMore && !isExtending && (
-        <div className="flex justify-center mt-4">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onExtendSearch}
-            className="gap-2 font-body text-xs"
-          >
-            <Search className="h-3.5 w-3.5" />
-            Find more results
-          </Button>
-        </div>
-      )}
+      {/* Auto-extending indicator */}
       {isExtending && (
         <div className="flex items-center justify-center gap-2 mt-4 py-3">
           <RefreshCw className="h-3.5 w-3.5 animate-spin text-primary" />
-          <span className="text-xs text-muted-foreground font-body">Searching for more…</span>
+          <span className="text-xs text-muted-foreground font-body">Finding more results…</span>
         </div>
       )}
     </div>
