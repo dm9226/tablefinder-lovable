@@ -1,8 +1,7 @@
 import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { RestaurantCard } from "./RestaurantCard";
-import { SearchX, RefreshCw, Search } from "lucide-react";
+import { SearchX, RefreshCw } from "lucide-react";
 import { SearchProgress } from "./SearchProgress";
-import { Button } from "./ui/button";
 
 interface ResultsGridProps {
   results: Restaurant[];
