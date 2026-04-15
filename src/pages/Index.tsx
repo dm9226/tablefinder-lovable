@@ -126,6 +126,8 @@ const Index = () => {
     [coords, location]
   );
 
+  const MAX_RESULTS = 40;
+
   const handleExtendedSearch = useCallback(async () => {
     if (remainingCandidates.length === 0 || !lastParams) return;
 
@@ -146,19 +148,32 @@ const Index = () => {
       const newResults = data?.results || [];
       if (newResults.length > 0) {
         setResults(prev => [...prev, ...newResults]);
-        toast.success(`Found ${newResults.length} more result${newResults.length !== 1 ? "s" : ""}`);
-      } else {
-        toast.info("No additional results found");
       }
       setHasMore(!!data?.hasMore);
       setRemainingCandidates(data?.remainingCandidates || []);
     } catch (err: any) {
       console.error("Extended search error:", err);
-      toast.error(err.message || "Extended search failed");
+      // Stop auto-extending on error
+      setHasMore(false);
+      setRemainingCandidates([]);
     } finally {
       setIsExtending(false);
     }
   }, [remainingCandidates, lastParams, lastQuery]);
+
+  // Auto-continue searching in background until MAX_RESULTS
+  useEffect(() => {
+    if (
+      !isLoading &&
+      !isExtending &&
+      hasMore &&
+      remainingCandidates.length > 0 &&
+      results.length < MAX_RESULTS &&
+      hasSearched
+    ) {
+      handleExtendedSearch();
+    }
+  }, [isLoading, isExtending, hasMore, remainingCandidates, results.length, hasSearched, handleExtendedSearch]);
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
