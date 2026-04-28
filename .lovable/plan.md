@@ -1,50 +1,68 @@
+## Problem
 
+Searching "dinner for 6 people" with browser location "Atlanta, GA" detected fails with: *"Multiple locations found for 'Atlanta'..."*
 
-## Diagnose Yelp API: Add Error Logging
+Root cause is in `supabase/functions/search/index.ts` (location resolution block, ~lines 700–877):
 
-### Problem
-The Yelp API is returning 0 candidates, but the code silently swallows non-200 responses at line 1480:
-```typescript
-let businesses = resp.ok ? (await resp.json())?.businesses || [] : [];
-```
-If the API returns 401 (bad key), 403 (revoked), or 429 (rate limited), this line just produces an empty array with no logging.
+1. The frontend correctly sends `location: "Atlanta, GA"` plus precise coordinates.
+2. The server parses this into `browserCity = "Atlanta"`, `browserState = "GA"`.
+3. The AI parser, however, returns `parsed.city = "Atlanta"` (since the user wrote "Atlanta" implicitly via context) with no state.
+4. The "use browser location" block (line 772) only runs `if (!parsed.city)`. Since `parsed.city` is already "Atlanta", that block is skipped — and crucially `cityFromBrowser` stays `false`.
+5. Disambiguation at line 866 then runs, finds 5+ Atlantas across states, and throws the error — even though the browser already told us the user is in Atlanta, GA.
 
-### Root Cause (Most Likely)
-Based on the "stack overflow" hint and historical pattern of Yelp revoking keys, the `YELP_API_KEY` secret is likely expired or invalid. But we can't confirm without seeing the actual HTTP status.
+## Fix
 
-### Plan
+In `supabase/functions/search/index.ts`, when `parsed.city` matches `browserCity` (case-insensitive) and `parsed.state` is empty, trust the browser-provided state and coordinates instead of throwing a disambiguation error.
 
-**1. Add Yelp API response status logging** (`supabase/functions/search/index.ts`)
+### Change 1: Adopt browser state when AI city matches browser city
 
-After the initial Yelp fetch (line 1476-1480), log the response status when it's not ok:
+After the existing browser-location parse (around line 722), add:
 
-```typescript
-let resp = await fetch(`${YELP_API}/businesses/search?${sp}`, {
-  headers: { Authorization: `Bearer ${yelpKey}` },
-});
-
-if (!resp.ok) {
-  const errBody = await resp.text().catch(() => "");
-  console.log(`Yelp API error: status=${resp.status}, body=${errBody.slice(0, 300)}`);
+```ts
+// If AI returned the same city the browser detected but no state, trust the browser state/coords.
+if (
+  browserCity &&
+  browserState &&
+  parsed.city &&
+  !parsed.state &&
+  normalizePlaceToken(parsed.city) === normalizePlaceToken(browserCity)
+) {
+  parsed.state = browserState;
+  if (lat && lng) {
+    parsed.lat = lat;
+    parsed.lng = lng;
+  }
+  cityFromBrowser = true; // hoist declaration above this block
 }
-let businesses = resp.ok ? (await resp.json())?.businesses || [] : [];
 ```
 
-Also add the same for the broadened search (line 1486-1489).
+This requires hoisting `let cityFromBrowser = false;` from line 771 up to before this new block.
 
-**2. Add Yelp API key metadata logging**
+### Change 2: Defensive fallback in disambiguation
 
-At the start of the Yelp adapter's discover function, log the key length and prefix/suffix (not the full key):
+Update the disambiguation guard at line 866 so that even if the above didn't fire, a browser-provided state matching one of the candidate states auto-resolves instead of throwing:
 
-```typescript
-console.log(`Yelp API key metadata: len=${yelpKey.length}, prefix=${yelpKey.slice(0,4)}, suffix=${yelpKey.slice(-4)}`);
+```ts
+} else if (!hasExplicitState && !cityFromBrowser) {
+  if (distinctStates.length > 1) {
+    // If browser told us the state and it's among the candidates, use it.
+    if (browserState && distinctStates.includes(browserState.toUpperCase())) {
+      parsed.state = browserState.toUpperCase();
+    } else {
+      const options = [...new Set(usableCandidates.map(...))].slice(0, 4);
+      throw new Error(`Multiple locations found ...`);
+    }
+  } else if (distinctStates.length === 1) {
+    parsed.state = distinctStates[0];
+  }
+}
 ```
 
-### Expected Outcome
-After deploying, the next search will reveal exactly why Yelp returns 0 — whether it's a 401 (bad key), 403 (revoked), 429 (rate limited), or something else. Once we see the actual error, we can take the right corrective action (e.g., updating the API key).
+## Files Changed
 
-### Files Modified
-| File | Change |
-|------|--------|
-| `supabase/functions/search/index.ts` | Add error status + body logging for Yelp API calls, add key metadata logging |
+- `supabase/functions/search/index.ts` — two small edits in the location resolution block (~lines 707–877).
 
+## Out of Scope
+
+- Frontend changes — `src/pages/Index.tsx` already sends location and coords correctly.
+- AI parser prompt changes — fix handles ambiguous AI output without retraining the prompt.

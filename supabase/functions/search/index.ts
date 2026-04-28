@@ -707,6 +707,7 @@ User query: "${query}"`;
   // Parse browser location string for reliable city/state
   let browserCity = "";
   let browserState = "";
+  let cityFromBrowser = false;
   if (location) {
     // US format: "City, ST"  UK format: "City, England" or "London, UK"
     const locMatch = location.match(/^(.+),\s*([A-Z]{2})$/);
@@ -719,6 +720,23 @@ User query: "${query}"`;
       browserState = locMatchUK[2].trim();
       if (parsed.country === "us") parsed.country = "gb"; // auto-detect UK from browser
     }
+  }
+
+  // If AI returned the same city the browser detected but no state, trust the browser state/coords.
+  if (
+    browserCity &&
+    browserState &&
+    parsed.city &&
+    !parsed.state &&
+    normalizePlaceToken(parsed.city) === normalizePlaceToken(browserCity)
+  ) {
+    parsed.state = browserState;
+    if (lat && lng) {
+      parsed.lat = lat;
+      parsed.lng = lng;
+    }
+    cityFromBrowser = true;
+    console.log(`Adopted browser state for ambiguous city: ${parsed.city}, ${parsed.state}`);
   }
 
   // Handle zip code: geocode to city/state/coords
@@ -768,7 +786,6 @@ User query: "${query}"`;
   }
 
   // If city is still empty, use browser-provided location directly (no redundant Nominatim call)
-  let cityFromBrowser = false;
   if (!parsed.city) {
     if (browserCity && browserState) {
       parsed.city = browserCity;
@@ -865,11 +882,14 @@ User query: "${query}"`;
     }
   } else if (!hasExplicitState && !cityFromBrowser) {
     if (distinctStates.length > 1) {
+      // If browser told us the state and it's among the candidate states, trust it.
+      if (browserState && distinctStates.includes(browserState.toUpperCase())) {
+        parsed.state = browserState.toUpperCase();
+      } else {
       const options = [...new Set(usableCandidates.map((c: any) => `${parsed.city}, ${c.stateCode}`))].slice(0, 4);
       throw new Error(`Multiple locations found for "${parsed.city}". Please include the state or zip code — e.g. ${options.join(" or ")}.`);
-    }
-
-    if (distinctStates.length === 1) {
+      }
+    } else if (distinctStates.length === 1) {
       parsed.state = distinctStates[0];
     }
   } else if (!parsed.state && distinctStates.length === 1) {
