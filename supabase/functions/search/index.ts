@@ -22,6 +22,7 @@ interface SearchParams {
   country: string;       // "us" or "gb" — defaults to "us"
   lat?: number;
   lng?: number;
+  userZip?: string;      // ZIP / postcode at the user's actual coords (for hyperlocal discovery)
 }
 
 // ─── Dish-to-cuisine synonym map ───
@@ -283,6 +284,18 @@ serve(async (req) => {
 
     // Step 1: Parse user query (always fresh)
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+    // Resolve user's ZIP from precise browser coords for hyperlocal discovery (Yelp find_loc, OT supplemental query).
+    if (lat && lng && !params.userZip) {
+      try {
+        const zip = await reverseGeocodeToZip(lat, lng);
+        if (zip) {
+          params.userZip = zip;
+          console.log(`User ZIP from coords: ${zip}`);
+        }
+      } catch (e) {
+        console.log(`Reverse-geocode to ZIP failed: ${(e as Error).message}`);
+      }
+    }
     console.log("Parsed params:", JSON.stringify(params));
 
     // Step 2: Discover candidates from all platforms via adapters
@@ -957,6 +970,27 @@ function normalizePlaceToken(value: string): string {
   return (value || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
 }
 
+async function reverseGeocodeToZip(lat: number, lng: number): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    const resp = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=18&addressdetails=1`,
+      { headers: { "User-Agent": "TableFinder/1.0" }, signal: ctrl.signal }
+    );
+    const data = await resp.json();
+    const postcode: string = data?.address?.postcode || "";
+    // For US, return only the 5-digit base ZIP (Yelp/OT prefer this).
+    const usZip = postcode.match(/^(\d{5})/);
+    if (usZip) return usZip[1];
+    // For UK, return the full postcode.
+    if (/^[A-Z]{1,2}\d/i.test(postcode)) return postcode.toUpperCase();
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function extractStateCode(address: any): string {
   const fromStateCode = address?.state_code;
   if (fromStateCode && typeof fromStateCode === "string") return fromStateCode.toUpperCase();
@@ -1052,6 +1086,10 @@ async function searchFirecrawl(
         return [
           `${otSite} ${cityState} best rated${cuisine} restaurant`,
           `${otSite} ${cityState} top${cuisine} restaurant reservation`,
+          // Hyperlocal supplemental query using user's ZIP — surfaces ZIP-local OT venues that metro queries miss.
+          ...(params.userZip && !isUK ? [
+            `${otSite} ${params.userZip}${cuisine} restaurant reservation`,
+          ] : []),
           ...(needsCuisineTypeQuery ? [
             `${otSite} ${cityState}${cuisineTypeSuffix} restaurant reservation`,
           ] : []),
@@ -1457,9 +1495,12 @@ async function fetchYelpCandidates(
     }).replace(/\s+/g, " ").trim();
 
     const yelpCity = getMetroCityName(params.city, params.state);
-    const yelpLocation = params.country === "gb"
-      ? `${yelpCity}, UK`
-      : `${yelpCity}, ${params.state}`;
+    // Prefer the user's actual ZIP for hyperlocal Yelp results (ranked outward from ZIP centroid).
+    const yelpLocation = params.userZip
+      ? params.userZip
+      : params.country === "gb"
+        ? `${yelpCity}, UK`
+        : `${yelpCity}, ${params.state}`;
 
     // Build Yelp search URL with reservation filter AND reservation params
     const searchTerm = `${yelpCuisine}${amenitySuffix} restaurants`.trim();
