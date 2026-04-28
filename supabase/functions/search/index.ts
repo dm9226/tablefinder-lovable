@@ -2481,6 +2481,25 @@ async function verifyAvailability(
     if (next) { steelActiveCount++; next(); }
   };
 
+  // Firecrawl concurrency limiter for non-Yelp (Resy/OpenTable) scrapes.
+  // Firing 18 simultaneous scrapes during extended search caused a cluster of
+  // 25s timeouts (Firecrawl contention). Cap to 4 concurrent + 35s ceiling +
+  // one-time retry on timeout = no more lost nearby venues.
+  let fcActiveCount = 0;
+  const fcQueue: (() => void)[] = [];
+  const FC_MAX_CONCURRENT = 4;
+  const acquireFcSlot = (): Promise<void> => {
+    if (fcActiveCount < FC_MAX_CONCURRENT) { fcActiveCount++; return Promise.resolve(); }
+    return new Promise<void>(resolve => fcQueue.push(resolve));
+  };
+  const releaseFcSlot = () => {
+    fcActiveCount--;
+    const next = fcQueue.shift();
+    if (next) { fcActiveCount++; next(); }
+  };
+  // Per-provider timeout counters for diagnostics
+  const timeoutCounts: Record<string, number> = { resy: 0, opentable: 0, yelp: 0 };
+
   // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
      try {
