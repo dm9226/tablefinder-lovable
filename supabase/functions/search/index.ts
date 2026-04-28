@@ -916,9 +916,24 @@ User query: "${query}"`;
   const candidatePool = stateFiltered.length > 0 ? stateFiltered : usableCandidates;
   let selectedCandidate = (candidatePool.sort((a: any, b: any) => cityTypeRank(a.type) - cityTypeRank(b.type))[0]) || null;
 
-  if (selectedCandidate && !cityFromBrowser) {
+  // Distance origin selection:
+  //   1. If user has precise browser coords AND parsed city matches detected city → use the user's actual coords.
+  //      (Handles unincorporated areas / suburbs where city centroid is far from the user.)
+  //   2. Else if a candidate centroid is available → use it (user typed a different city than detected).
+  //   3. Else fall back to whatever browser coords we have.
+  const parsedMatchesBrowser =
+    !!browserCity &&
+    !!parsed.city &&
+    normalizePlaceToken(parsed.city) === normalizePlaceToken(browserCity);
+
+  if (lat && lng && (cityFromBrowser || parsedMatchesBrowser)) {
+    parsed.lat = lat;
+    parsed.lng = lng;
+    console.log(`Distance origin: user coords (${lat.toFixed(4)}, ${lng.toFixed(4)}) for ${parsed.city}, ${parsed.state}`);
+  } else if (selectedCandidate) {
     parsed.lat = selectedCandidate.lat;
     parsed.lng = selectedCandidate.lng;
+    console.log(`Distance origin: city centroid (${selectedCandidate.lat.toFixed(4)}, ${selectedCandidate.lng.toFixed(4)}) for ${parsed.city}, ${parsed.state}`);
   }
 
   // Last fallback to browser coordinates.
