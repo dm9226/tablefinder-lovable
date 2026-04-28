@@ -3367,6 +3367,19 @@ async function verifyAvailability(
     }
   }));
 
+  // Diagnostic: per-provider timeout summary (helps spot Firecrawl contention)
+  const totalCands = candidates.length;
+  const platformCands = candidates.reduce<Record<string, number>>((acc, c) => {
+    acc[c.platform] = (acc[c.platform] || 0) + 1; return acc;
+  }, {});
+  const timeoutSummary = Object.entries(timeoutCounts)
+    .filter(([, n]) => n > 0)
+    .map(([p, n]) => `${p}: ${n}/${platformCands[p] || 0}`)
+    .join(", ");
+  if (timeoutSummary) {
+    console.log(`[VERIFY] Scrape timeouts — ${timeoutSummary} (of ${totalCands} total candidates)`);
+  }
+
   return checked.filter(Boolean) as Restaurant[];
 }
 
