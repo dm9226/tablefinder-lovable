@@ -410,8 +410,14 @@ serve(async (req) => {
     ]);
 
     // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
-    const cityLat = params.lat ?? 0;
-    const cityLng = params.lng ?? 0;
+    // Distance is measured from the USER's coords when available, falling back to city centroid.
+    const refLat = params.userLat ?? params.lat ?? 0;
+    const refLng = params.userLng ?? params.lng ?? 0;
+    console.log(
+      params.userLat != null
+        ? `Distance ref: user coords (${refLat}, ${refLng})`
+        : `Distance ref: city centroid (${refLat}, ${refLng})`
+    );
     for (let i = 0; i < verified.length; i++) {
       const e = enrichmentMap.get(i);
       if (!e) continue;
@@ -427,8 +433,8 @@ serve(async (req) => {
       }
 
       // AI coordinate fallback: fill distance for restaurants Nominatim missed
-      if (r.distanceMiles == null && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
-        const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
+      if (r.distanceMiles == null && typeof e.lat === "number" && typeof e.lng === "number" && refLat !== 0 && refLng !== 0) {
+        const aiDist = +haversine(refLat, refLng, e.lat, e.lng).toFixed(1);
         if (aiDist <= 200) {
           r.distanceMiles = aiDist;
           if (e.neighborhood) r.neighborhood = e.neighborhood;
@@ -444,7 +450,8 @@ serve(async (req) => {
     // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
     const wasMetroNormalized = metroCity !== (params.city || "");
-    const MAX_DISTANCE_MILES = wasMetroNormalized ? 30 : 15;
+    const hasUserCoords = params.userLat != null && params.userLng != null;
+    const MAX_DISTANCE_MILES = hasUserCoords ? 25 : (wasMetroNormalized ? 30 : 15);
     const nearby = verified.filter((r) => {
       const d = r.distanceMiles;
       if (d === null || d === undefined) return true;
