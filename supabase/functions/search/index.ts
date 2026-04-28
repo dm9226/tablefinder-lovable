@@ -2579,7 +2579,7 @@ async function verifyAvailability(
           const scrapeAbort = new AbortController();
           const scrapeTimer = setTimeout(() => scrapeAbort.abort(), timeoutMs);
           try {
-            const r = await fetch(`${FIRECRAWL_API}/scrape`, {
+            const fcResp = await fetch(`${FIRECRAWL_API}/scrape`, {
               method: "POST",
               headers: {
                 Authorization: `Bearer ${firecrawlKey}`,
@@ -2589,7 +2589,7 @@ async function verifyAvailability(
               signal: scrapeAbort.signal,
             });
             clearTimeout(scrapeTimer);
-            return r;
+            return fcResp;
           } catch (err: any) {
             clearTimeout(scrapeTimer);
             if (err.name === "AbortError") return { aborted: true };
