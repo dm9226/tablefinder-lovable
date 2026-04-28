@@ -786,7 +786,6 @@ User query: "${query}"`;
   }
 
   // If city is still empty, use browser-provided location directly (no redundant Nominatim call)
-  let cityFromBrowser = false;
   if (!parsed.city) {
     if (browserCity && browserState) {
       parsed.city = browserCity;
