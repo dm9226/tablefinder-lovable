@@ -23,6 +23,8 @@ interface SearchParams {
   lat?: number;
   lng?: number;
   userZip?: string;      // ZIP / postcode at the user's actual coords (for hyperlocal discovery)
+  userLat?: number;      // The user's actual browser coords — used for distance ranking.
+  userLng?: number;      // (params.lat/lng get overwritten to the city centroid by parseQuery.)
 }
 
 // ─── Dish-to-cuisine synonym map ───
