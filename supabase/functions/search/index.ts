@@ -23,6 +23,8 @@ interface SearchParams {
   lat?: number;
   lng?: number;
   userZip?: string;      // ZIP / postcode at the user's actual coords (for hyperlocal discovery)
+  userLat?: number;      // The user's actual browser coords — used for distance ranking.
+  userLng?: number;      // (params.lat/lng get overwritten to the city centroid by parseQuery.)
 }
 
 // ─── Dish-to-cuisine synonym map ───
@@ -227,8 +229,9 @@ serve(async (req) => {
         enrichmentPromise,
       ]);
 
-      const cityLat = params.lat ?? 0;
-      const cityLng = params.lng ?? 0;
+      // Distance is measured from the USER's coords when available, falling back to city centroid.
+      const refLat = params.userLat ?? params.lat ?? 0;
+      const refLng = params.userLng ?? params.lng ?? 0;
       for (let i = 0; i < verified.length; i++) {
         const e = enrichmentMap.get(i);
         if (!e) continue;
@@ -242,8 +245,8 @@ serve(async (req) => {
         if (e.neighborhood && r.neighborhood === params.city) {
           r.neighborhood = e.neighborhood;
         }
-        if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
-          const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
+        if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && refLat !== 0 && refLng !== 0) {
+          const aiDist = +haversine(refLat, refLng, e.lat, e.lng).toFixed(1);
           if (aiDist <= 200) {
             r.distanceMiles = aiDist;
             if (e.neighborhood) r.neighborhood = e.neighborhood;
@@ -254,7 +257,10 @@ serve(async (req) => {
       // Distance filter + sort
       const metroCity = getMetroCityName(params.city || "", params.state || "");
       const wasMetroNormalized = metroCity !== (params.city || "");
-      const MAX_DISTANCE_MILES = wasMetroNormalized ? 30 : 15;
+      // When we have the user's true coords, expand the cap — candidates were discovered from
+      // the metro center, so a "close to me in suburbs" venue can read 20+ mi from city center.
+      const hasUserCoords = params.userLat != null && params.userLng != null;
+      const MAX_DISTANCE_MILES = hasUserCoords ? 25 : (wasMetroNormalized ? 30 : 15);
       const nearby = verified.filter((r) => {
         const d = r.distanceMiles;
         if (d === null || d === undefined) return true;
@@ -284,17 +290,29 @@ serve(async (req) => {
 
     // Step 1: Parse user query (always fresh)
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+    // Preserve the user's actual browser coords separately — parseQuery overwrites
+    // params.lat/lng with the geocoded *city centroid*, which is wrong for distance ranking.
+    if (typeof lat === "number" && typeof lng === "number") {
+      params.userLat = lat;
+      params.userLng = lng;
+    }
+    console.log(`Coords received: lat=${lat}, lng=${lng} | city centroid: ${params.lat},${params.lng}`);
     // Resolve user's ZIP from precise browser coords for hyperlocal discovery (Yelp find_loc, OT supplemental query).
     if (lat && lng && !params.userZip) {
+      console.log(`Attempting reverse-geocode to ZIP for ${lat},${lng}...`);
       try {
         const zip = await reverseGeocodeToZip(lat, lng);
         if (zip) {
           params.userZip = zip;
           console.log(`User ZIP from coords: ${zip}`);
+        } else {
+          console.log(`Reverse-geocode returned empty ZIP for ${lat},${lng}`);
         }
       } catch (e) {
         console.log(`Reverse-geocode to ZIP failed: ${(e as Error).message}`);
       }
+    } else if (!lat || !lng) {
+      console.log(`Skipping ZIP resolution: no browser coords (lat=${lat}, lng=${lng})`);
     }
     console.log("Parsed params:", JSON.stringify(params));
 
@@ -392,8 +410,14 @@ serve(async (req) => {
     ]);
 
     // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
-    const cityLat = params.lat ?? 0;
-    const cityLng = params.lng ?? 0;
+    // Distance is measured from the USER's coords when available, falling back to city centroid.
+    const refLat = params.userLat ?? params.lat ?? 0;
+    const refLng = params.userLng ?? params.lng ?? 0;
+    console.log(
+      params.userLat != null
+        ? `Distance ref: user coords (${refLat}, ${refLng})`
+        : `Distance ref: city centroid (${refLat}, ${refLng})`
+    );
     for (let i = 0; i < verified.length; i++) {
       const e = enrichmentMap.get(i);
       if (!e) continue;
@@ -409,8 +433,8 @@ serve(async (req) => {
       }
 
       // AI coordinate fallback: fill distance for restaurants Nominatim missed
-      if (r.distanceMiles == null && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
-        const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
+      if (r.distanceMiles == null && typeof e.lat === "number" && typeof e.lng === "number" && refLat !== 0 && refLng !== 0) {
+        const aiDist = +haversine(refLat, refLng, e.lat, e.lng).toFixed(1);
         if (aiDist <= 200) {
           r.distanceMiles = aiDist;
           if (e.neighborhood) r.neighborhood = e.neighborhood;
@@ -426,7 +450,8 @@ serve(async (req) => {
     // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
     const wasMetroNormalized = metroCity !== (params.city || "");
-    const MAX_DISTANCE_MILES = wasMetroNormalized ? 30 : 15;
+    const hasUserCoords = params.userLat != null && params.userLng != null;
+    const MAX_DISTANCE_MILES = hasUserCoords ? 25 : (wasMetroNormalized ? 30 : 15);
     const nearby = verified.filter((r) => {
       const d = r.distanceMiles;
       if (d === null || d === undefined) return true;
@@ -2172,9 +2197,10 @@ function toTwelveHourLabel(time24: string): string {
 // ─── Batch geocode verified results ───
 
 async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams): Promise<void> {
-  const cityLat = params.lat || 0;
-  const cityLng = params.lng || 0;
-  if (!cityLat || !cityLng) {
+  // Prefer the user's true browser coords; fall back to city centroid.
+  const refLat = params.userLat || params.lat || 0;
+  const refLng = params.userLng || params.lng || 0;
+  if (!refLat || !refLng) {
     console.log("No search coordinates for distance calculation, skipping geocode");
     return;
   }
@@ -2207,7 +2233,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
         const lat = parseFloat(data[0].lat);
         const lng = parseFloat(data[0].lon);
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
-        const dist = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
+        const dist = +haversine(refLat, refLng, lat, lng).toFixed(1);
         if (dist > 200) {
           console.log(`  Geocode sanity fail (${label}) ${r.name}: ${dist} mi — discarding`);
           return false;
