@@ -707,6 +707,7 @@ User query: "${query}"`;
   // Parse browser location string for reliable city/state
   let browserCity = "";
   let browserState = "";
+  let cityFromBrowser = false;
   if (location) {
     // US format: "City, ST"  UK format: "City, England" or "London, UK"
     const locMatch = location.match(/^(.+),\s*([A-Z]{2})$/);
@@ -719,6 +720,23 @@ User query: "${query}"`;
       browserState = locMatchUK[2].trim();
       if (parsed.country === "us") parsed.country = "gb"; // auto-detect UK from browser
     }
+  }
+
+  // If AI returned the same city the browser detected but no state, trust the browser state/coords.
+  if (
+    browserCity &&
+    browserState &&
+    parsed.city &&
+    !parsed.state &&
+    normalizePlaceToken(parsed.city) === normalizePlaceToken(browserCity)
+  ) {
+    parsed.state = browserState;
+    if (lat && lng) {
+      parsed.lat = lat;
+      parsed.lng = lng;
+    }
+    cityFromBrowser = true;
+    console.log(`Adopted browser state for ambiguous city: ${parsed.city}, ${parsed.state}`);
   }
 
   // Handle zip code: geocode to city/state/coords
