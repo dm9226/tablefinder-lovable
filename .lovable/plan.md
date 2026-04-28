@@ -1,68 +1,52 @@
 ## Problem
 
-Searching "dinner for 6 people" with browser location "Atlanta, GA" detected fails with: *"Multiple locations found for 'Atlanta'..."*
+The user lives in an unincorporated area outside Atlanta proper. The browser correctly detects coords + reverse-geocodes them to "Atlanta, GA", but distance ranking then uses **downtown Atlanta's geocoded centroid** as the origin instead of the user's actual coordinates. Result: restaurants near the user appear "far," and downtown picks dominate.
 
-Root cause is in `supabase/functions/search/index.ts` (location resolution block, ~lines 700–877):
-
-1. The frontend correctly sends `location: "Atlanta, GA"` plus precise coordinates.
-2. The server parses this into `browserCity = "Atlanta"`, `browserState = "GA"`.
-3. The AI parser, however, returns `parsed.city = "Atlanta"` (since the user wrote "Atlanta" implicitly via context) with no state.
-4. The "use browser location" block (line 772) only runs `if (!parsed.city)`. Since `parsed.city` is already "Atlanta", that block is skipped — and crucially `cityFromBrowser` stays `false`.
-5. Disambiguation at line 866 then runs, finds 5+ Atlantas across states, and throws the error — even though the browser already told us the user is in Atlanta, GA.
+Looking at `supabase/functions/search/index.ts` (lines 903–926), after disambiguation the code sets `parsed.lat/lng` to the *city centroid* from Nominatim, overwriting the user's precise browser coords. The platform discovery layer needs the city name (Resy/OpenTable/Yelp need slugs like `atlanta`), but distance math should use the user's actual location whenever available.
 
 ## Fix
 
-In `supabase/functions/search/index.ts`, when `parsed.city` matches `browserCity` (case-insensitive) and `parsed.state` is empty, trust the browser-provided state and coordinates instead of throwing a disambiguation error.
+Decouple the **discovery city** (used for platform slugs) from the **distance origin** (used for ranking).
 
-### Change 1: Adopt browser state when AI city matches browser city
+### Change 1: Preserve user coords as the distance origin
 
-After the existing browser-location parse (around line 722), add:
+In `parseQueryWithGemini` (around lines 903–926):
+
+- Keep selecting the city centroid for things that need a "city center" (e.g., AI fallback geocoding sanity).
+- BUT when `lat`/`lng` (browser coords) are present AND the user did not type a different city explicitly in the query (i.e., `cityFromBrowser === true` OR the parsed city matches `browserCity`), set `parsed.lat = lat; parsed.lng = lng;` so distance is measured from the user's actual position.
+
+Concretely, replace the block:
 
 ```ts
-// If AI returned the same city the browser detected but no state, trust the browser state/coords.
-if (
-  browserCity &&
-  browserState &&
-  parsed.city &&
-  !parsed.state &&
-  normalizePlaceToken(parsed.city) === normalizePlaceToken(browserCity)
-) {
-  parsed.state = browserState;
-  if (lat && lng) {
-    parsed.lat = lat;
-    parsed.lng = lng;
-  }
-  cityFromBrowser = true; // hoist declaration above this block
+if (selectedCandidate && !cityFromBrowser) {
+  parsed.lat = selectedCandidate.lat;
+  parsed.lng = selectedCandidate.lng;
 }
 ```
 
-This requires hoisting `let cityFromBrowser = false;` from line 771 up to before this new block.
+with logic that:
+1. If user has precise browser coords AND parsed city matches browser city → use browser coords (origin = the user).
+2. Else if a candidate centroid was found → use it (origin = city center, e.g., user typed a different city than detected).
+3. Else fall back to browser coords.
 
-### Change 2: Defensive fallback in disambiguation
+### Change 2: Bump distance caps slightly for "near me" searches
 
-Update the disambiguation guard at line 866 so that even if the above didn't fire, a browser-provided state matching one of the candidate states auto-resolves instead of throwing:
+In the distance-filtering block (around lines 413–425 and `RANK CAPS` in memory), when the origin is the user's precise location (not a city centroid), keep the existing 15/30 mile caps but ensure suburban results aren't filtered out. No code change is strictly needed since the caps already accommodate suburbs — the real fix is using the right origin.
 
-```ts
-} else if (!hasExplicitState && !cityFromBrowser) {
-  if (distinctStates.length > 1) {
-    // If browser told us the state and it's among the candidates, use it.
-    if (browserState && distinctStates.includes(browserState.toUpperCase())) {
-      parsed.state = browserState.toUpperCase();
-    } else {
-      const options = [...new Set(usableCandidates.map(...))].slice(0, 4);
-      throw new Error(`Multiple locations found ...`);
-    }
-  } else if (distinctStates.length === 1) {
-    parsed.state = distinctStates[0];
-  }
-}
-```
+### Change 3: Log which origin is in use
 
-## Files Changed
-
-- `supabase/functions/search/index.ts` — two small edits in the location resolution block (~lines 707–877).
+Add a one-line `console.log` when distance origin is set, indicating "user coords" vs "city centroid: <city>". Helps debug future location complaints.
 
 ## Out of Scope
 
-- Frontend changes — `src/pages/Index.tsx` already sends location and coords correctly.
-- AI parser prompt changes — fix handles ambiguous AI output without retraining the prompt.
+- Frontend changes — `src/pages/Index.tsx` already sends precise `coords` and reverse-geocoded `location`.
+- Platform discovery (Resy/OpenTable/Yelp city slugs) — still uses `parsed.city`, unchanged.
+- AI geocoding fallback — still uses city centroid for sanity checks (the 200-mile guard).
+
+## Files Changed
+
+- `supabase/functions/search/index.ts` — ~10-line edit to the coordinate-selection block (lines 903–926) + one log line.
+
+## Memory Update
+
+Update `mem://features/location-resolution`: distance origin is the user's precise browser coordinates whenever available and the searched city matches detected city; centroid is only used when the user types a different city.
