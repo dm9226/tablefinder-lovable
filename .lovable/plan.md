@@ -1,52 +1,33 @@
-## Problem
+# Run a test search from your current location
 
-The user lives in an unincorporated area outside Atlanta proper. The browser correctly detects coords + reverse-geocodes them to "Atlanta, GA", but distance ranking then uses **downtown Atlanta's geocoded centroid** as the origin instead of the user's actual coordinates. Result: restaurants near the user appear "far," and downtown picks dominate.
+## Goal
+Trigger a real search using your browser's geolocation (so the new ZIP-based hyperlocal discovery kicks in for Yelp + OpenTable), then inspect the edge function logs to confirm:
+1. Your ZIP was successfully reverse-geocoded from your coords
+2. Yelp's `find_loc` used the ZIP
+3. OpenTable's supplemental ZIP query ran
+4. The closest result distances improved vs. the previous ~4.2 mi floor
 
-Looking at `supabase/functions/search/index.ts` (lines 903–926), after disambiguation the code sets `parsed.lat/lng` to the *city centroid* from Nominatim, overwriting the user's precise browser coords. The platform discovery layer needs the city name (Resy/OpenTable/Yelp need slugs like `atlanta`), but distance math should use the user's actual location whenever available.
+## Steps
 
-## Fix
+1. **Open the preview in the automated browser** at `/` and wait for geolocation to resolve (location chip in the search bar should show your detected city).
 
-Decouple the **discovery city** (used for platform slugs) from the **distance origin** (used for ranking).
+2. **Run a representative search** — something broad enough to surface many candidates so we can judge proximity. Suggested query: `dinner tonight for 2`. (Open to your preference — Italian, sushi, steakhouse, etc.)
 
-### Change 1: Preserve user coords as the distance origin
+3. **Wait for results to render**, then screenshot the results grid showing the distance badges on the top cards.
 
-In `parseQueryWithGemini` (around lines 903–926):
+4. **Pull the edge function logs** for that run and extract:
+   - The `[ZIP]` resolution log line (confirms reverse-geocode succeeded)
+   - The Yelp discovery URL (confirms `find_loc=<zip>`)
+   - The OpenTable supplemental query line (confirms `site:opentable.com/r <zip> ...`)
+   - The final distance distribution of returned results
 
-- Keep selecting the city centroid for things that need a "city center" (e.g., AI fallback geocoding sanity).
-- BUT when `lat`/`lng` (browser coords) are present AND the user did not type a different city explicitly in the query (i.e., `cityFromBrowser === true` OR the parsed city matches `browserCity`), set `parsed.lat = lat; parsed.lng = lng;` so distance is measured from the user's actual position.
+5. **Report back** with:
+   - Screenshot of top results + distances
+   - Resolved ZIP
+   - Closest result distance (and whether it improved vs. the prior ~4.2 mi)
+   - Any anomalies (ZIP not resolved, Yelp falling back to city, etc.)
 
-Concretely, replace the block:
-
-```ts
-if (selectedCandidate && !cityFromBrowser) {
-  parsed.lat = selectedCandidate.lat;
-  parsed.lng = selectedCandidate.lng;
-}
-```
-
-with logic that:
-1. If user has precise browser coords AND parsed city matches browser city → use browser coords (origin = the user).
-2. Else if a candidate centroid was found → use it (origin = city center, e.g., user typed a different city than detected).
-3. Else fall back to browser coords.
-
-### Change 2: Bump distance caps slightly for "near me" searches
-
-In the distance-filtering block (around lines 413–425 and `RANK CAPS` in memory), when the origin is the user's precise location (not a city centroid), keep the existing 15/30 mile caps but ensure suburban results aren't filtered out. No code change is strictly needed since the caps already accommodate suburbs — the real fix is using the right origin.
-
-### Change 3: Log which origin is in use
-
-Add a one-line `console.log` when distance origin is set, indicating "user coords" vs "city centroid: <city>". Helps debug future location complaints.
-
-## Out of Scope
-
-- Frontend changes — `src/pages/Index.tsx` already sends precise `coords` and reverse-geocoded `location`.
-- Platform discovery (Resy/OpenTable/Yelp city slugs) — still uses `parsed.city`, unchanged.
-- AI geocoding fallback — still uses city centroid for sanity checks (the 200-mile guard).
-
-## Files Changed
-
-- `supabase/functions/search/index.ts` — ~10-line edit to the coordinate-selection block (lines 903–926) + one log line.
-
-## Memory Update
-
-Update `mem://features/location-resolution`: distance origin is the user's precise browser coordinates whenever available and the searched city matches detected city; centroid is only used when the user types a different city.
+## Notes
+- Browser shares the preview's session, so geolocation prompt should already be granted from your earlier searches.
+- If geolocation is somehow not granted in the automated browser, I'll fall back to asking you to run the search manually and I'll just inspect the logs.
+- No code changes planned — this is purely a verification run. If the logs reveal a bug (e.g. ZIP not propagating), I'll flag it and propose a fix in a follow-up.
