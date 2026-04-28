@@ -2197,9 +2197,10 @@ function toTwelveHourLabel(time24: string): string {
 // ─── Batch geocode verified results ───
 
 async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams): Promise<void> {
-  const cityLat = params.lat || 0;
-  const cityLng = params.lng || 0;
-  if (!cityLat || !cityLng) {
+  // Prefer the user's true browser coords; fall back to city centroid.
+  const refLat = params.userLat || params.lat || 0;
+  const refLng = params.userLng || params.lng || 0;
+  if (!refLat || !refLng) {
     console.log("No search coordinates for distance calculation, skipping geocode");
     return;
   }
@@ -2232,7 +2233,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
         const lat = parseFloat(data[0].lat);
         const lng = parseFloat(data[0].lon);
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
-        const dist = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
+        const dist = +haversine(refLat, refLng, lat, lng).toFixed(1);
         if (dist > 200) {
           console.log(`  Geocode sanity fail (${label}) ${r.name}: ${dist} mi — discarding`);
           return false;
