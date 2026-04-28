@@ -882,11 +882,14 @@ User query: "${query}"`;
     }
   } else if (!hasExplicitState && !cityFromBrowser) {
     if (distinctStates.length > 1) {
+      // If browser told us the state and it's among the candidate states, trust it.
+      if (browserState && distinctStates.includes(browserState.toUpperCase())) {
+        parsed.state = browserState.toUpperCase();
+      } else {
       const options = [...new Set(usableCandidates.map((c: any) => `${parsed.city}, ${c.stateCode}`))].slice(0, 4);
       throw new Error(`Multiple locations found for "${parsed.city}". Please include the state or zip code — e.g. ${options.join(" or ")}.`);
-    }
-
-    if (distinctStates.length === 1) {
+      }
+    } else if (distinctStates.length === 1) {
       parsed.state = distinctStates[0];
     }
   } else if (!parsed.state && distinctStates.length === 1) {
