@@ -2481,6 +2481,25 @@ async function verifyAvailability(
     if (next) { steelActiveCount++; next(); }
   };
 
+  // Firecrawl concurrency limiter for non-Yelp (Resy/OpenTable) scrapes.
+  // Firing 18 simultaneous scrapes during extended search caused a cluster of
+  // 25s timeouts (Firecrawl contention). Cap to 4 concurrent + 35s ceiling +
+  // one-time retry on timeout = no more lost nearby venues.
+  let fcActiveCount = 0;
+  const fcQueue: (() => void)[] = [];
+  const FC_MAX_CONCURRENT = 4;
+  const acquireFcSlot = (): Promise<void> => {
+    if (fcActiveCount < FC_MAX_CONCURRENT) { fcActiveCount++; return Promise.resolve(); }
+    return new Promise<void>(resolve => fcQueue.push(resolve));
+  };
+  const releaseFcSlot = () => {
+    fcActiveCount--;
+    const next = fcQueue.shift();
+    if (next) { fcActiveCount++; next(); }
+  };
+  // Per-provider timeout counters for diagnostics
+  const timeoutCounts: Record<string, number> = { resy: 0, opentable: 0, yelp: 0 };
+
   // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
      try {
@@ -2553,29 +2572,51 @@ async function verifyAvailability(
         };
 
       if (!isYelp) {
-        const scrapeAbort = new AbortController();
-        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
+        // Acquire Firecrawl slot (cap concurrency to avoid contention timeouts).
+        await acquireFcSlot();
         let resp: Response;
-        try {
-          resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${firecrawlKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify(scrapePayload),
-            signal: scrapeAbort.signal,
-          });
-        } catch (fetchErr: any) {
-          clearTimeout(scrapeTimer);
-          if (fetchErr.name === "AbortError") {
-            console.log(`Scrape timeout (25s abort) for ${r.name} [${r.platform}]`);
-          } else {
-            console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+        const doScrape = async (timeoutMs: number): Promise<Response | { aborted: true }> => {
+          const scrapeAbort = new AbortController();
+          const scrapeTimer = setTimeout(() => scrapeAbort.abort(), timeoutMs);
+          try {
+            const fcResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${firecrawlKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(scrapePayload),
+              signal: scrapeAbort.signal,
+            });
+            clearTimeout(scrapeTimer);
+            return fcResp;
+          } catch (err: any) {
+            clearTimeout(scrapeTimer);
+            if (err.name === "AbortError") return { aborted: true };
+            throw err;
           }
+        };
+        try {
+          let attempt = await doScrape(35_000);
+          if ("aborted" in attempt) {
+            timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
+            console.log(`Scrape timeout (35s) for ${r.name} [${r.platform}] — retrying once`);
+            // Brief stagger so Firecrawl recovers, then retry
+            await new Promise(res => setTimeout(res, 500));
+            attempt = await doScrape(30_000);
+            if ("aborted" in attempt) {
+              console.log(`Scrape timeout (30s retry) for ${r.name} [${r.platform}] — giving up`);
+              releaseFcSlot();
+              return null;
+            }
+          }
+          resp = attempt;
+        } catch (fetchErr: any) {
+          releaseFcSlot();
+          console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
           return null;
         }
-        clearTimeout(scrapeTimer);
+        releaseFcSlot();
 
         if (resp.status === 408) {
           console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
@@ -3076,7 +3117,7 @@ async function verifyAvailability(
           console.log(`  ${r.name} [opentable]: no "Select a time" section on first pass — retrying with waitFor: 8000ms`);
           try {
             const otRetryAbort = new AbortController();
-            const otRetryTimer = setTimeout(() => otRetryAbort.abort(), 25_000);
+            const otRetryTimer = setTimeout(() => otRetryAbort.abort(), 30_000);
             const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
               method: "POST",
               headers: {
@@ -3125,7 +3166,7 @@ async function verifyAvailability(
               console.log(`  ${r.name} [opentable] RETRY: scrape failed (${retryResp.status})`);
             }
           } catch (retryErr: any) {
-            console.log(`  ${r.name} [opentable] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
+            console.log(`  ${r.name} [opentable] RETRY error: ${retryErr.name === "AbortError" ? "timeout (30s)" : retryErr}`);
           }
         }
         
@@ -3325,6 +3366,19 @@ async function verifyAvailability(
       return null;
     }
   }));
+
+  // Diagnostic: per-provider timeout summary (helps spot Firecrawl contention)
+  const totalCands = candidates.length;
+  const platformCands = candidates.reduce<Record<string, number>>((acc, c) => {
+    acc[c.platform] = (acc[c.platform] || 0) + 1; return acc;
+  }, {});
+  const timeoutSummary = Object.entries(timeoutCounts)
+    .filter(([, n]) => n > 0)
+    .map(([p, n]) => `${p}: ${n}/${platformCands[p] || 0}`)
+    .join(", ");
+  if (timeoutSummary) {
+    console.log(`[VERIFY] Scrape timeouts — ${timeoutSummary} (of ${totalCands} total candidates)`);
+  }
 
   return checked.filter(Boolean) as Restaurant[];
 }
