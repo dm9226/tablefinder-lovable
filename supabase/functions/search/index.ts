@@ -286,17 +286,29 @@ serve(async (req) => {
 
     // Step 1: Parse user query (always fresh)
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+    // Preserve the user's actual browser coords separately — parseQuery overwrites
+    // params.lat/lng with the geocoded *city centroid*, which is wrong for distance ranking.
+    if (typeof lat === "number" && typeof lng === "number") {
+      params.userLat = lat;
+      params.userLng = lng;
+    }
+    console.log(`Coords received: lat=${lat}, lng=${lng} | city centroid: ${params.lat},${params.lng}`);
     // Resolve user's ZIP from precise browser coords for hyperlocal discovery (Yelp find_loc, OT supplemental query).
     if (lat && lng && !params.userZip) {
+      console.log(`Attempting reverse-geocode to ZIP for ${lat},${lng}...`);
       try {
         const zip = await reverseGeocodeToZip(lat, lng);
         if (zip) {
           params.userZip = zip;
           console.log(`User ZIP from coords: ${zip}`);
+        } else {
+          console.log(`Reverse-geocode returned empty ZIP for ${lat},${lng}`);
         }
       } catch (e) {
         console.log(`Reverse-geocode to ZIP failed: ${(e as Error).message}`);
       }
+    } else if (!lat || !lng) {
+      console.log(`Skipping ZIP resolution: no browser coords (lat=${lat}, lng=${lng})`);
     }
     console.log("Parsed params:", JSON.stringify(params));
 
