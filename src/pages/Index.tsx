@@ -136,6 +136,8 @@ const Index = () => {
       const { data, error: fnError } = await supabase.functions.invoke("search", {
         body: {
           query: lastQuery,
+          lat: coords?.lat,
+          lng: coords?.lng,
           extended: true,
           remainingCandidates,
           extendedParams: lastParams,
@@ -147,7 +149,16 @@ const Index = () => {
 
       const newResults = data?.results || [];
       if (newResults.length > 0) {
-        setResults(prev => [...prev, ...newResults]);
+        setResults(prev => {
+          const merged = [...prev, ...newResults];
+          merged.sort((a, b) => {
+            const dA = a.distanceMiles ?? 9999;
+            const dB = b.distanceMiles ?? 9999;
+            if (Math.abs(dA - dB) > 0.5) return dA - dB;
+            return (b.rating ?? 0) - (a.rating ?? 0);
+          });
+          return merged.slice(0, MAX_RESULTS);
+        });
       }
       setHasMore(!!data?.hasMore);
       setRemainingCandidates(data?.remainingCandidates || []);
@@ -159,7 +170,7 @@ const Index = () => {
     } finally {
       setIsExtending(false);
     }
-  }, [remainingCandidates, lastParams, lastQuery]);
+  }, [remainingCandidates, lastParams, lastQuery, coords]);
 
   // Auto-continue searching in background until MAX_RESULTS
   useEffect(() => {

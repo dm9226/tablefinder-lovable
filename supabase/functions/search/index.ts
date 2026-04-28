@@ -203,6 +203,13 @@ serve(async (req) => {
     if (extended && incomingCandidates && extendedParams) {
       console.log(`[EXTENDED] Starting extended search with ${incomingCandidates.length} remaining candidates`);
       const params = extendedParams as SearchParams;
+      // Re-stamp the user's true browser coords for distance ranking. Prefer fresh body coords;
+      // fall back to whatever extendedParams already carries from the initial search.
+      if (typeof lat === "number" && typeof lng === "number") {
+        params.userLat = lat;
+        params.userLng = lng;
+      }
+      console.log(`[EXTENDED] Coords received: lat=${lat}, lng=${lng} | userLat=${params.userLat}, userLng=${params.userLng}`);
       const amenityTerms = extractAmenityTerms(params.cuisine || "", query || "");
 
       // Verify up to 18 remaining candidates
@@ -232,6 +239,11 @@ serve(async (req) => {
       // Distance is measured from the USER's coords when available, falling back to city centroid.
       const refLat = params.userLat ?? params.lat ?? 0;
       const refLng = params.userLng ?? params.lng ?? 0;
+      console.log(
+        params.userLat != null
+          ? `[EXTENDED] Distance ref: user coords (${refLat}, ${refLng})`
+          : `[EXTENDED] Distance ref: city centroid (${refLat}, ${refLng})`
+      );
       for (let i = 0; i < verified.length; i++) {
         const e = enrichmentMap.get(i);
         if (!e) continue;

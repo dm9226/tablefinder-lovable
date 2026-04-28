@@ -1,55 +1,72 @@
-# Why nearby venues are still missing
+# Plan: Make Extended-Search Results Actually Reach the UI
 
-The distance-from-centroid fix (already deployed) addresses one bug, but the logs from your last search reveal a second, more impactful bug: **the extended-search verification batch is timing out on a cluster of 5–6 nearby OpenTable venues at once**.
+## Root cause
 
-From your last search, every one of these timed out at exactly the 25-second abort:
-- Rose & Crown (Vinings)
-- HOBNOB Neighborhood Tavern - Vinings
-- Maggiano's - Cumberland
-- Canoe
-- Crispina Ristorante & Pizzeria
-- National Anthem Atlanta
+Logs from the latest search confirm everything works on the backend:
 
-Six simultaneous timeouts is not a coincidence — it strongly suggests the extended batch is firing too many Firecrawl scrapes in parallel and they're starving each other (or hitting a Firecrawl concurrency limit). These venues all *would have* verified successfully with more time / less contention, since they're real OT-listed restaurants with current availability.
+- `Rose & Crown Restaurant`: ✓ verified, geocoded **0.1 mi (Marietta)**
+- `HOBNOB Vinings`, `Canoe`, `Maggiano's - Cumberland`, `Bonefish Grill`: all ✓ verified in extended pass (`[EXTENDED] Verified: 15/18`)
 
-## Fix plan
+But the user doesn't see them. Two bugs cause this:
 
-### 1. Reduce extended-search parallelism for OpenTable verification
+### Bug 1 — Extended search loses the user's true coords
 
-In `supabase/functions/search/index.ts`, find the extended-search verification path (where the 18 remaining candidates get verified) and:
-- Process OpenTable candidates in **batches of 3** instead of all-at-once.
-- Keep Resy/Yelp at higher parallelism (they don't show this problem).
-- Add a small (250ms) stagger between batches to avoid Firecrawl rate-limiting.
-
-### 2. Increase the OpenTable scrape timeout from 25s → 35s
-
-The 25s abort is too tight for OpenTable's reservation widget, which routinely needs `waitFor: 8000ms` on retry. A 35s ceiling still keeps us under the 120s global budget but gives slow widget loads room to complete.
-
-### 3. Add a one-time retry for timeout failures
-
-When a scrape aborts at the timeout, retry it ONCE at the end of the verification batch (after all primary work completes). If Firecrawl was just overloaded the first time, the retry usually succeeds. Cap retries at 3 per search to bound the cost.
-
-### 4. Log timeout cluster diagnostics
-
-Log the count of timeouts per provider per search so we can spot this pattern in the future:
+In the **initial** search (`supabase/functions/search/index.ts` ~line 295) we stash the browser's coords:
+```ts
+params.userLat = lat;
+params.userLng = lng;
 ```
-[EXTENDED] OpenTable timeouts: 6/8 candidates — possible Firecrawl contention
+These get sent back to the client inside `params`, then the client echoes `params` back as `extendedParams` on the follow-up call.
+
+**But:** in the extended branch the request body is `{ query, extended, remainingCandidates, extendedParams }` — the top-level `lat`/`lng` are **never sent**, and the extended branch never re-stamps `params.userLat/userLng` from the body. If `extendedParams` arrives without `userLat`/`userLng` (older cached `params`, or any client that strips it), the extended pass falls back to **city-centroid distance** (`hasUserCoords = false` → `MAX_DISTANCE_MILES = 30`), and Marietta/Vinings venues read 15-25+ mi from the Atlanta centroid — they survive the filter but get sorted to the bottom, behind 18+ Buckhead/Midtown venues from the first batch.
+
+### Bug 2 — Client appends extended results without re-sorting by distance
+
+In `src/pages/Index.tsx` `handleExtendedSearch`:
+```ts
+setResults(prev => [...prev, ...newResults]);
+```
+Even when the extended batch contains a 0.1 mi venue, it gets concatenated to the **end** of the list. Combined with `MAX_RESULTS = 40` and the auto-extend loop stopping when results.length ≥ 40, the nearby venues are buried and the user has to scroll past 30+ farther restaurants to find them.
+
+## Changes
+
+### 1. `supabase/functions/search/index.ts` — extended branch (~line 203)
+
+- Accept top-level `lat`/`lng` in the extended request and re-stamp `params.userLat`/`params.userLng` (preferring fresh body coords, falling back to whatever `extendedParams` carries).
+- Add a diagnostic log mirroring the initial path: `[EXTENDED] Coords received` and `[EXTENDED] Distance ref`.
+
+### 2. `src/pages/Index.tsx` — `handleSearch` and `handleExtendedSearch`
+
+- Send `lat: coords?.lat, lng: coords?.lng` in the extended invoke body too (not just on the initial search).
+- After appending extended results, **re-sort the merged list by `distanceMiles` ascending** (with rating tiebreaker matching the backend), then slice to `MAX_RESULTS`. This guarantees a 0.1 mi venue surfaces to the top regardless of which wave it arrived in.
+
+```ts
+setResults(prev => {
+  const merged = [...prev, ...newResults];
+  merged.sort((a, b) => {
+    const dA = a.distanceMiles ?? 9999;
+    const dB = b.distanceMiles ?? 9999;
+    if (Math.abs(dA - dB) > 0.5) return dA - dB;
+    return (b.rating ?? 0) - (a.rating ?? 0);
+  });
+  return merged.slice(0, MAX_RESULTS);
+});
 ```
 
-### 5. Confirm the distance-fix deployment with a fresh search
+### 3. Deploy `search` and verify
 
-The previous deployment (preserving `userLat/userLng` and using them for ranking) is live but hasn't been exercised yet. After the timeout fix above ships, the next search should show the new diagnostic logs (`Coords received`, `Distance ref: user coords`, `User ZIP from coords:`). I'll verify those land correctly.
+After deploy, ask the user to run one more search. Confirm via logs:
+- `Coords received: lat=…` on initial pass
+- `[EXTENDED] Coords received` + `[EXTENDED] Distance ref: user coords` on the follow-up
+- Rose & Crown at the top of the rendered list
 
 ## Files touched
 
-- `supabase/functions/search/index.ts` — extended-verification batch logic, OpenTable scrape timeout constant, retry-on-timeout helper, diagnostic log.
+- `supabase/functions/search/index.ts` (extended branch only)
+- `src/pages/Index.tsx` (handleSearch + handleExtendedSearch + merge logic)
 
 ## Out of scope
 
-- No frontend changes.
-- No DB / RLS / auth changes.
-- Suburb-aware Firecrawl discovery queries (still deferred to v2).
-
-## Expected outcome
-
-After this ships, Rose & Crown, HOBNOB Vinings, Maggiano's Cumberland, and the other Cumberland/Vinings OpenTable venues should survive verification and appear in your results — provided they have actual availability for your requested time. Combined with the already-deployed distance fix, "near you" should finally mean "near you" instead of "near downtown."
+- Distance filter caps (already correct: 25 mi with user coords)
+- Backend verification / timeout logic (already healthy: 15-17/18 verified)
+- Geocoding (Rose & Crown already geocodes correctly to 0.1 mi)
