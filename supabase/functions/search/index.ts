@@ -257,7 +257,7 @@ serve(async (req) => {
         if (e.neighborhood && r.neighborhood === params.city) {
           r.neighborhood = e.neighborhood;
         }
-        if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && refLat !== 0 && refLng !== 0) {
+        if (r.distanceMiles == null && typeof e.lat === "number" && typeof e.lng === "number" && refLat !== 0 && refLng !== 0) {
           const aiDist = +haversine(refLat, refLng, e.lat, e.lng).toFixed(1);
           if (aiDist <= 200) {
             r.distanceMiles = aiDist;
@@ -2222,7 +2222,6 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 
   // Single geocoding helper: tries up to 4 strategies, returns on first success
   async function geocodeOne(r: Restaurant): Promise<void> {
-    if (r.platform === "yelp") return; // Yelp has API-provided distance
     if (r.distanceMiles != null) return; // Already geocoded
 
     const cleanedName = r.name
@@ -2295,7 +2294,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
     console.log(`  Nominatim miss for ${r.name} — will use AI coordinates`);
   }
 
-  const toGeocode = results.filter(r => r.platform !== "yelp");
+  const toGeocode = results.filter(r => r.distanceMiles == null);
   if (toGeocode.length === 0) return;
 
   console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim...`);
@@ -2673,7 +2672,7 @@ async function verifyAvailability(
       // Extract structured data from Firecrawl JSON extraction (if present)
       
       // Extract address from markdown/metadata (all platforms)
-      if (r.platform !== "yelp" && !r._address) {
+      if (!r._address) {
         // Try OG metadata first (OpenTable populates these)
         const meta2 = data?.data?.metadata || data?.metadata;
         const ogStreet = meta2?.["og:street-address"] || meta2?.["street-address"];
