@@ -3673,8 +3673,8 @@ const resyAdapter: ProviderAdapter = {
     const raw = await searchFirecrawl(params, keys.firecrawlKey, "resy", amenityTerms);
     return normalizeCandidates("resy", raw, params);
   },
-  async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
+  async verify(candidates, params, keys, amenityTerms, pools) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime, pools);
   },
 };
 
@@ -3684,8 +3684,8 @@ const opentableAdapter: ProviderAdapter = {
     const raw = await searchFirecrawl(params, keys.firecrawlKey, "opentable", amenityTerms);
     return normalizeCandidates("opentable", raw, params);
   },
-  async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
+  async verify(candidates, params, keys, amenityTerms, pools) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime, pools);
   },
 };
 
@@ -3695,8 +3695,8 @@ const yelpAdapter: ProviderAdapter = {
     const raw = await searchFirecrawl(params, keys.firecrawlKey, "yelp", amenityTerms);
     return normalizeCandidates("yelp", raw, params);
   },
-  async verify(candidates, params, keys, amenityTerms) {
+  async verify(candidates, params, keys, amenityTerms, pools) {
     console.log(`Yelp verify: checking ${candidates.length} candidates on reservation pages for real time slots`);
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime, pools);
   },
 };
