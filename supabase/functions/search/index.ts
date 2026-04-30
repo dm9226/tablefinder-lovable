@@ -2230,8 +2230,24 @@ async function verifyAvailability(
     if (next) { steelActiveCount++; next(); }
   };
 
-  // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
-  const checked = await Promise.all(candidates.map(async (r) => {
+  // Run scrapes in batches of 6 to avoid overwhelming Firecrawl (prevents mass timeouts)
+  const BATCH_SIZE = 6;
+  const allChecked: (Restaurant | null)[] = [];
+  for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
+    // Early exit: if we already have enough verified results, stop scraping
+    const verifiedSoFar = allChecked.filter(Boolean).length;
+    if (verifiedSoFar >= 10) {
+      console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
+      break;
+    }
+    // Time guard: stop if we've used more than 85s of the global budget
+    if (globalStartTime && (Date.now() - globalStartTime) > 85_000) {
+      console.log(`Time guard: ${Math.round((Date.now() - globalStartTime) / 1000)}s elapsed, stopping verification with ${verifiedSoFar} results`);
+      break;
+    }
+    const batch = candidates.slice(batchStart, batchStart + BATCH_SIZE);
+    console.log(`Verification batch ${Math.floor(batchStart / BATCH_SIZE) + 1}: scraping ${batch.length} candidates (${batchStart}..${batchStart + batch.length - 1})`);
+    const batchResults = await Promise.all(batch.map(async (r) => {
      try {
        const isYelp = r.platform === "yelp";
 
@@ -3254,9 +3270,11 @@ async function verifyAvailability(
       console.log(`Verify error for ${r.name} [${r.platform}]:`, err);
       return null;
     }
-  }));
+    }));
+    allChecked.push(...batchResults);
+  }
 
-  return checked.filter(Boolean) as Restaurant[];
+  return allChecked.filter(Boolean) as Restaurant[];
 }
 
 // ─── Amenity / experience keywords ───
