@@ -1540,6 +1540,8 @@ function cleanName(title: string | undefined, url: string, platform: string): st
       .replace(/\s+reservation(s)?.*$/i, "")
       .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "") // trailing "- Atlanta, GA" or "- Buckhead"
       .replace(/\s*-\s*(Updated|Restaurant)\s.*$/i, "") // "- Updated 2026" or "- Restaurant Name"
+      .replace(/\s*[-–—]+\s*$/i, "")  // trailing dashes/hyphens
+      .replace(/\s*[,;:]+\s*$/i, "")   // trailing punctuation
       .trim();
     if (cleaned.length > 1) return cleaned;
   }
