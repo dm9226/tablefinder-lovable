@@ -2535,7 +2535,7 @@ function selectCandidatesForVerification(
   // Proportional allocation: distribute slots based on candidate volume per platform.
   // OpenTable uses stealth proxy — allow more candidates since some will still fail.
   const total = candidates.length || 1;
-  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 10, yelp: 10 };
+  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 8, yelp: 10 };
   // Pre-verification relevance sorting: rank candidates by name/URL relevance so
   // obvious matches get verified first and mismatches only get checked if budget remains
   if (params) {
