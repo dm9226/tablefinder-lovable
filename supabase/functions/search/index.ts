@@ -2518,7 +2518,7 @@ async function verifyAvailability(
   // one-time retry on timeout = no more lost nearby venues.
   let fcActiveCount = 0;
   const fcQueue: (() => void)[] = [];
-  const FC_MAX_CONCURRENT = 4;
+  const FC_MAX_CONCURRENT = 6;
   const acquireFcSlot = (): Promise<void> => {
     if (fcActiveCount < FC_MAX_CONCURRENT) { fcActiveCount++; return Promise.resolve(); }
     return new Promise<void>(resolve => fcQueue.push(resolve));
