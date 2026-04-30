@@ -2606,20 +2606,36 @@ async function verifyAvailability(
   };
 
   // Firecrawl concurrency limiter for non-Yelp (Resy/OpenTable) scrapes.
-  // Firing 18 simultaneous scrapes during extended search caused a cluster of
-  // 25s timeouts (Firecrawl contention). Cap to 4 concurrent + 35s ceiling +
-  // one-time retry on timeout = no more lost nearby venues.
-  let fcActiveCount = 0;
-  const fcQueue: (() => void)[] = [];
+  // Keep total concurrency at 6, but isolate slow OT stealth scrapes so they
+  // cannot starve faster Resy verification requests.
   const FC_MAX_CONCURRENT = 6;
-  const acquireFcSlot = (): Promise<void> => {
-    if (fcActiveCount < FC_MAX_CONCURRENT) { fcActiveCount++; return Promise.resolve(); }
-    return new Promise<void>(resolve => fcQueue.push(resolve));
+  const FC_OT_MAX_CONCURRENT = 2;
+  const FC_FAST_MAX_CONCURRENT = FC_MAX_CONCURRENT - FC_OT_MAX_CONCURRENT;
+  let fcFastActiveCount = 0;
+  let fcOtActiveCount = 0;
+  const fcFastQueue: (() => void)[] = [];
+  const fcOtQueue: (() => void)[] = [];
+  const acquireFcSlot = (platform: Restaurant["platform"]): Promise<void> => {
+    const isOtSlot = platform === "opentable";
+    const activeCount = isOtSlot ? fcOtActiveCount : fcFastActiveCount;
+    const maxConcurrent = isOtSlot ? FC_OT_MAX_CONCURRENT : FC_FAST_MAX_CONCURRENT;
+    if (activeCount < maxConcurrent) {
+      if (isOtSlot) fcOtActiveCount++; else fcFastActiveCount++;
+      return Promise.resolve();
+    }
+    return new Promise<void>(resolve => (isOtSlot ? fcOtQueue : fcFastQueue).push(resolve));
   };
-  const releaseFcSlot = () => {
-    fcActiveCount--;
-    const next = fcQueue.shift();
-    if (next) { fcActiveCount++; next(); }
+  const releaseFcSlot = (platform: Restaurant["platform"]) => {
+    const isOtSlot = platform === "opentable";
+    if (isOtSlot) {
+      fcOtActiveCount--;
+      const next = fcOtQueue.shift();
+      if (next) { fcOtActiveCount++; next(); }
+    } else {
+      fcFastActiveCount--;
+      const next = fcFastQueue.shift();
+      if (next) { fcFastActiveCount++; next(); }
+    }
   };
   // Per-provider timeout counters for diagnostics
   const timeoutCounts: Record<string, number> = { resy: 0, opentable: 0, yelp: 0 };
@@ -2743,7 +2759,7 @@ async function verifyAvailability(
           onlyMainContent: false,
         };
 
-        await acquireFcSlot();
+        await acquireFcSlot(r.platform);
         let resp: Response | null = null;
 
         try {
@@ -2756,7 +2772,7 @@ async function verifyAvailability(
             diagCounts[r.platform].timeout++;
             if (isOT) otConsecutiveFailures++;
             console.log(`Scrape timeout for ${r.name} [${r.platform}]`);
-            releaseFcSlot();
+            releaseFcSlot(r.platform);
             return null;
           }
 
@@ -2767,17 +2783,17 @@ async function verifyAvailability(
             console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
             diagCounts[r.platform].failed++;
             if (isOT) otConsecutiveFailures++;
-            releaseFcSlot();
+            releaseFcSlot(r.platform);
             return null;
           }
         } catch (fetchErr: any) {
           console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
           diagCounts[r.platform].failed++;
           if (isOT) otConsecutiveFailures++;
-          releaseFcSlot();
+          releaseFcSlot(r.platform);
           return null;
         }
-        releaseFcSlot();
+        releaseFcSlot(r.platform);
 
         // Diagnostic only — reset on success
         if (isOT) otConsecutiveFailures = 0;
