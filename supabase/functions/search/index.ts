@@ -2460,7 +2460,7 @@ function selectCandidatesForVerification(
   for (const platform of platformOrder) {
     const raw = Math.round((buckets[platform].length / total) * maxCandidates);
     // Cap quota to actual bucket size; Yelp capped at 10 due to waitFor latency cost
-    const platformCap = platform === "yelp" ? Math.min(raw, 10) : raw;
+    const platformCap = platform === "yelp" ? Math.min(raw, 10) : platform === "opentable" ? Math.min(raw, 5) : raw;
     quotas[platform] = Math.min(platformCap, buckets[platform].length);
     assigned += quotas[platform];
   }
