@@ -2630,10 +2630,16 @@ async function verifyAvailability(
       if (!isYelp) {
         {
           // ── Resy & OT: Use Firecrawl ──
-          // OT needs waitFor for JS booking widget to render
-          const otPayload = isOT ? { ...scrapePayload, waitFor: 5000 } : scrapePayload;
-          const primaryTimeout = isOT ? 25_000 : 15_000;
-          const retryTimeout = isOT ? 20_000 : 12_000;
+          // OT: use actions-based scraping with enhanced proxy for anti-bot bypass
+          const otPayload = isOT ? {
+            url: r.platformUrl,
+            formats: ["markdown", "html"],
+            onlyMainContent: false,
+            actions: [{ type: "wait", milliseconds: 5000 }],
+            proxy: "auto",
+          } : scrapePayload;
+          const primaryTimeout = isOT ? 20_000 : 15_000;
+          const retryTimeout = isOT ? 15_000 : 12_000;
           await acquireFcSlot();
           let resp: Response;
           const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
@@ -2679,8 +2685,32 @@ async function verifyAvailability(
           releaseFcSlot();
 
           if (resp.status === 408) {
-            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
-            return null;
+            if (isOT) {
+              console.log(`Scrape 408 for ${r.name} [opentable] — retrying once with actions`);
+              await acquireFcSlot();
+              try {
+                const retryAttempt = await doScrape(retryTimeout, otPayload);
+                if ("aborted" in retryAttempt) {
+                  console.log(`Scrape 408 retry timeout for ${r.name} [opentable] — giving up`);
+                  releaseFcSlot();
+                  return null;
+                }
+                releaseFcSlot();
+                if (!retryAttempt.ok) {
+                  console.log(`Scrape 408 retry failed (${retryAttempt.status}) for ${r.name} [opentable]`);
+                  await retryAttempt.text().catch(() => {});
+                  return null;
+                }
+                resp = retryAttempt;
+              } catch (retryErr) {
+                releaseFcSlot();
+                console.log(`Scrape 408 retry error for ${r.name} [opentable]: ${retryErr}`);
+                return null;
+              }
+            } else {
+              console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
+              return null;
+            }
           }
 
           if (!resp.ok) {
