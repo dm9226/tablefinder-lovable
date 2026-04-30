@@ -166,10 +166,51 @@ interface ApiKeys {
   _startTime?: number;
 }
 
+// Shared concurrency pools — created once in the main handler and passed to all
+// verifyAvailability calls so that Resy, OT, and Yelp share a single global cap.
+interface ConcurrencyPools {
+  acquireFast: () => Promise<void>;
+  releaseFast: () => void;
+  acquireOt: () => Promise<void>;
+  releaseOt: () => void;
+}
+
+function createConcurrencyPools(): ConcurrencyPools {
+  // Fast pool (Resy + Yelp): lightweight scrapes, higher concurrency
+  let fastActive = 0;
+  const fastQueue: (() => void)[] = [];
+  const FAST_MAX = 5;
+  // OT pool: stealth proxy scrapes are slow (20s+), cap low
+  let otActive = 0;
+  const otQueue: (() => void)[] = [];
+  const OT_MAX = 2;
+
+  return {
+    acquireFast: () => {
+      if (fastActive < FAST_MAX) { fastActive++; return Promise.resolve(); }
+      return new Promise<void>(resolve => fastQueue.push(resolve));
+    },
+    releaseFast: () => {
+      fastActive--;
+      const next = fastQueue.shift();
+      if (next) { fastActive++; next(); }
+    },
+    acquireOt: () => {
+      if (otActive < OT_MAX) { otActive++; return Promise.resolve(); }
+      return new Promise<void>(resolve => otQueue.push(resolve));
+    },
+    releaseOt: () => {
+      otActive--;
+      const next = otQueue.shift();
+      if (next) { otActive++; next(); }
+    },
+  };
+}
+
 interface ProviderAdapter {
   platform: "resy" | "opentable" | "yelp";
   discover(params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
-  verify(candidates: Restaurant[], params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
+  verify(candidates: Restaurant[], params: SearchParams, keys: ApiKeys, amenityTerms: string[], pools: ConcurrencyPools): Promise<Restaurant[]>;
 }
 
 // Caching removed — all searches are fresh
@@ -197,6 +238,7 @@ serve(async (req) => {
 
     const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, aiKey: LOVABLE_API_KEY, _startTime: startTime };
     const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter, yelpAdapter];
+    const pools = createConcurrencyPools();
 
     // ─── Extended Search Mode ───
     // Skips discovery and parsing; verifies remaining candidates from a previous search
@@ -221,7 +263,7 @@ serve(async (req) => {
       let verified = (await Promise.all(
         adapters.map(a => a.verify(
           toVerify.filter((c: Restaurant) => c.platform === a.platform),
-          params, keys, amenityTerms
+          params, keys, amenityTerms, pools
         ))
       )).flat();
       console.log(`[EXTENDED] Verified: ${verified.length}/${toVerify.length}`);
@@ -389,12 +431,22 @@ serve(async (req) => {
     const remainingAfterSelection = allCandidates.filter(c => !selectedIds.has(c.name + c.platform));
 
     const t2 = Date.now();
-    let verified = (await Promise.all(
-      adapters.map(a => a.verify(
-        selected.filter(c => c.platform === a.platform),
-        params, keys, amenityTerms
-      ))
-    )).flat();
+    // Phase 1: Verify Resy first (fast, high success rate, clean Firecrawl bandwidth)
+    const resyCandidates = selected.filter(c => c.platform === "resy");
+    const otCandidates = selected.filter(c => c.platform === "opentable");
+    const yelpCandidates = selected.filter(c => c.platform === "yelp");
+
+    const resyResults = await resyAdapter.verify(resyCandidates, params, keys, amenityTerms, pools);
+    console.log(`[PHASE1] Resy verified: ${resyResults.length}/${resyCandidates.length} (${Date.now() - t2}ms)`);
+
+    // Phase 2: OT + Yelp in parallel (heavier scrapes, share remaining bandwidth)
+    const [otResults, yelpResults] = await Promise.all([
+      opentableAdapter.verify(otCandidates, params, keys, amenityTerms, pools),
+      yelpAdapter.verify(yelpCandidates, params, keys, amenityTerms, pools),
+    ]);
+    console.log(`[PHASE2] OT: ${otResults.length}/${otCandidates.length}, Yelp: ${yelpResults.length}/${yelpCandidates.length} (${Date.now() - t2}ms)`);
+
+    let verified = [...resyResults, ...otResults, ...yelpResults];
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
@@ -2535,7 +2587,7 @@ function selectCandidatesForVerification(
   // Proportional allocation: distribute slots based on candidate volume per platform.
   // OpenTable uses stealth proxy — allow more candidates since some will still fail.
   const total = candidates.length || 1;
-  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 8, yelp: 10 };
+  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 5, yelp: 10 };
   // Pre-verification relevance sorting: rank candidates by name/URL relevance so
   // obvious matches get verified first and mismatches only get checked if budget remains
   if (params) {
@@ -2581,12 +2633,13 @@ async function verifyAvailability(
   params: SearchParams,
   firecrawlKey: string,
   amenityTerms: string[] = [],
-  globalStartTime?: number
+  globalStartTime?: number,
+  pools?: ConcurrencyPools
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
   // Global elapsed-time guard: skip candidates if we're nearing the 150s edge function limit
-  const VERIFY_DEADLINE_MS = 105_000; // stop starting new scrapes after 105s elapsed
+  const VERIFY_DEADLINE_MS = 70_000; // stop starting new scrapes after 70s elapsed
 
   // Steel.dev concurrency limiter (hobby tier: be conservative)
   let steelActiveCount = 0;
@@ -2605,38 +2658,11 @@ async function verifyAvailability(
     if (next) { steelActiveCount++; next(); }
   };
 
-  // OT pool: stealth scrapes are slow (25-30s each), cap low so they don't
-  // starve Resy/Yelp. Resy+Yelp pool: fast scrapes, higher concurrency.
-  let otFcActiveCount = 0;
-  const otFcQueue: (() => void)[] = [];
-  const OT_FC_MAX_CONCURRENT = 3;
-  const acquireOtFcSlot = (): Promise<void> => {
-    if (otFcActiveCount < OT_FC_MAX_CONCURRENT) { otFcActiveCount++; return Promise.resolve(); }
-    return new Promise<void>(resolve => otFcQueue.push(resolve));
-  };
-  const releaseOtFcSlot = () => {
-    otFcActiveCount--;
-    const next = otFcQueue.shift();
-    if (next) { otFcActiveCount++; next(); }
-  };
-
-  let fastFcActiveCount = 0;
-  const fastFcQueue: (() => void)[] = [];
-  const FAST_FC_MAX_CONCURRENT = 6;
-  const acquireFastFcSlot = (): Promise<void> => {
-    if (fastFcActiveCount < FAST_FC_MAX_CONCURRENT) { fastFcActiveCount++; return Promise.resolve(); }
-    return new Promise<void>(resolve => fastFcQueue.push(resolve));
-  };
-  const releaseFastFcSlot = () => {
-    fastFcActiveCount--;
-    const next = fastFcQueue.shift();
-    if (next) { fastFcActiveCount++; next(); }
-  };
-
-  // Compatibility shims so Yelp path (which calls acquireFcSlot/releaseFcSlot)
-  // routes to the fast pool without needing changes below.
-  const acquireFcSlot = acquireFastFcSlot;
-  const releaseFcSlot = releaseFastFcSlot;
+  // Use global shared pools (passed from handler) or create local fallback
+  const acquireFastSlot = pools?.acquireFast ?? (() => Promise.resolve());
+  const releaseFastSlot = pools?.releaseFast ?? (() => {});
+  const acquireOtSlot = pools?.acquireOt ?? (() => Promise.resolve());
+  const releaseOtSlot = pools?.releaseOt ?? (() => {});
   // Per-provider timeout counters for diagnostics
   const timeoutCounts: Record<string, number> = { resy: 0, opentable: 0, yelp: 0 };
   // Per-provider success/fail/skip counters for comprehensive diagnostics
@@ -2672,6 +2698,7 @@ async function verifyAvailability(
       let data: any = null;
 
       if (isYelp) {
+        await acquireFastSlot();
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 15_000);
         let yelpResp: Response;
@@ -2693,6 +2720,7 @@ async function verifyAvailability(
         } catch (fetchErr: any) {
           clearTimeout(scrapeTimer);
           console.log(`✗ ${r.name} [yelp] — Firecrawl fetch error: ${fetchErr.name === "AbortError" ? "timeout" : fetchErr}`);
+          releaseFastSlot();
           return null;
         }
         clearTimeout(scrapeTimer);
@@ -2700,8 +2728,10 @@ async function verifyAvailability(
         if (!yelpResp.ok) {
           const errBody = await yelpResp.text().catch(() => "");
           console.log(`✗ ${r.name} [yelp] — Firecrawl scrape failed (${yelpResp.status}): ${errBody.slice(0, 300)}`);
+          releaseFastSlot();
           return null;
         }
+        releaseFastSlot();
 
         const yelpData = await yelpResp.json();
         const yelpMarkdown = extractFirecrawlMarkdown(yelpData);
@@ -2760,15 +2790,15 @@ async function verifyAvailability(
         };
 
         if (isOT) {
-          await acquireOtFcSlot();
+          await acquireOtSlot();
         } else {
-          await acquireFastFcSlot();
+          await acquireFastSlot();
         }
         let resp: Response | null = null;
 
         try {
           const scrapePayloadFinal = isOT ? otPayload : resyPayload;
-          const clientTimeout = isOT ? 30_000 : 15_000;
+          const clientTimeout = isOT ? 20_000 : 15_000;
           const attempt = await doScrape(clientTimeout, scrapePayloadFinal);
 
           if ("aborted" in attempt) {
@@ -2776,60 +2806,28 @@ async function verifyAvailability(
             diagCounts[r.platform].timeout++;
             if (isOT) otConsecutiveFailures++;
             console.log(`Scrape timeout for ${r.name} [${r.platform}]`);
-            if (isOT) { releaseOtFcSlot(); } else { releaseFastFcSlot(); }
+            if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
             return null;
           }
 
           resp = attempt as Response;
 
           if (resp.status === 408 || !resp.ok) {
-            if (isOT) {
-              // Single retry with "enhanced" proxy on stealth proxy failure
-              const errStatus = resp.status;
-              await resp.text().catch(() => {});
-              console.log(`  ${r.name} [opentable] stealth failed (${errStatus}) — retrying with enhanced proxy`);
-              const enhancedPayload: Record<string, unknown> = {
-                url: r.platformUrl,
-                formats: ["markdown", "html"],
-                onlyMainContent: false,
-                actions: [{ type: "wait", milliseconds: 5000 }],
-                timeout: 25000,
-                proxy: "enhanced",
-              };
-              const retryAttempt = await doScrape(30_000, enhancedPayload);
-              if ("aborted" in retryAttempt) {
-                console.log(`  ${r.name} [opentable] enhanced retry timed out — skipping`);
-                diagCounts.opentable.timeout++;
-                otConsecutiveFailures++;
-                releaseOtFcSlot();
-                return null;
-              }
-              const retryResp = retryAttempt as Response;
-              if (!retryResp.ok) {
-                const retryErr = await retryResp.text().catch(() => "(no body)");
-                console.log(`  ${r.name} [opentable] enhanced retry also failed (${retryResp.status}): ${retryErr.slice(0, 200)}`);
-                diagCounts.opentable.failed++;
-                otConsecutiveFailures++;
-                releaseOtFcSlot();
-                return null;
-              }
-              resp = retryResp;
-            } else {
-              const errBody = await resp.text().catch(() => "(no body)");
-              console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
-              diagCounts[r.platform].failed++;
-              releaseFastFcSlot();
-              return null;
-            }
+            const errBody = await resp.text().catch(() => "(no body)");
+            console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
+            diagCounts[r.platform].failed++;
+            if (isOT) otConsecutiveFailures++;
+            if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
+            return null;
           }
         } catch (fetchErr: any) {
           console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
           diagCounts[r.platform].failed++;
           if (isOT) otConsecutiveFailures++;
-          if (isOT) { releaseOtFcSlot(); } else { releaseFastFcSlot(); }
+          if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
           return null;
         }
-        if (isOT) { releaseOtFcSlot(); } else { releaseFastFcSlot(); }
+        if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
 
         // Diagnostic only — reset on success
         if (isOT) otConsecutiveFailures = 0;
@@ -3675,8 +3673,8 @@ const resyAdapter: ProviderAdapter = {
     const raw = await searchFirecrawl(params, keys.firecrawlKey, "resy", amenityTerms);
     return normalizeCandidates("resy", raw, params);
   },
-  async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
+  async verify(candidates, params, keys, amenityTerms, pools) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime, pools);
   },
 };
 
@@ -3686,8 +3684,8 @@ const opentableAdapter: ProviderAdapter = {
     const raw = await searchFirecrawl(params, keys.firecrawlKey, "opentable", amenityTerms);
     return normalizeCandidates("opentable", raw, params);
   },
-  async verify(candidates, params, keys, amenityTerms) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
+  async verify(candidates, params, keys, amenityTerms, pools) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime, pools);
   },
 };
 
@@ -3697,8 +3695,8 @@ const yelpAdapter: ProviderAdapter = {
     const raw = await searchFirecrawl(params, keys.firecrawlKey, "yelp", amenityTerms);
     return normalizeCandidates("yelp", raw, params);
   },
-  async verify(candidates, params, keys, amenityTerms) {
+  async verify(candidates, params, keys, amenityTerms, pools) {
     console.log(`Yelp verify: checking ${candidates.length} candidates on reservation pages for real time slots`);
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime, pools);
   },
 };
