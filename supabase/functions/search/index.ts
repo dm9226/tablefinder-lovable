@@ -2319,14 +2319,14 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 
   console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim...`);
 
-  // Fire in batches of 4 with 40ms stagger between batches
-  const BATCH_SIZE = 4;
+  // Fire in batches of 8 with 25ms stagger between batches
+  const BATCH_SIZE = 8;
   const geocodePromises: Promise<void>[] = [];
   for (let i = 0; i < toGeocode.length; i++) {
     const batchIndex = Math.floor(i / BATCH_SIZE);
     geocodePromises.push(
       new Promise<void>(async (resolve) => {
-        await new Promise(w => setTimeout(w, batchIndex * 40));
+        await new Promise(w => setTimeout(w, batchIndex * 25));
         await geocodeOne(toGeocode[i]);
         resolve();
       })
@@ -2460,7 +2460,7 @@ function selectCandidatesForVerification(
   for (const platform of platformOrder) {
     const raw = Math.round((buckets[platform].length / total) * maxCandidates);
     // Cap quota to actual bucket size; Yelp capped at 10 due to waitFor latency cost
-    const platformCap = platform === "yelp" ? Math.min(raw, 10) : raw;
+    const platformCap = platform === "yelp" ? Math.min(raw, 10) : platform === "opentable" ? Math.min(raw, 5) : raw;
     quotas[platform] = Math.min(platformCap, buckets[platform].length);
     assigned += quotas[platform];
   }
@@ -2518,7 +2518,7 @@ async function verifyAvailability(
   // one-time retry on timeout = no more lost nearby venues.
   let fcActiveCount = 0;
   const fcQueue: (() => void)[] = [];
-  const FC_MAX_CONCURRENT = 4;
+  const FC_MAX_CONCURRENT = 6;
   const acquireFcSlot = (): Promise<void> => {
     if (fcActiveCount < FC_MAX_CONCURRENT) { fcActiveCount++; return Promise.resolve(); }
     return new Promise<void>(resolve => fcQueue.push(resolve));
@@ -2605,7 +2605,7 @@ async function verifyAvailability(
         // Acquire Firecrawl slot (cap concurrency to avoid contention timeouts).
         await acquireFcSlot();
         let resp: Response;
-        const doScrape = async (timeoutMs: number): Promise<Response | { aborted: true }> => {
+        const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
           const scrapeAbort = new AbortController();
           const scrapeTimer = setTimeout(() => scrapeAbort.abort(), timeoutMs);
           try {
@@ -2615,7 +2615,7 @@ async function verifyAvailability(
                 Authorization: `Bearer ${firecrawlKey}`,
                 "Content-Type": "application/json",
               },
-              body: JSON.stringify(scrapePayload),
+              body: JSON.stringify(payload),
               signal: scrapeAbort.signal,
             });
             clearTimeout(scrapeTimer);
@@ -2627,15 +2627,14 @@ async function verifyAvailability(
           }
         };
         try {
-          let attempt = await doScrape(35_000);
+          let attempt = await doScrape(15_000, scrapePayload);
           if ("aborted" in attempt) {
             timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
-            console.log(`Scrape timeout (35s) for ${r.name} [${r.platform}] — retrying once`);
-            // Brief stagger so Firecrawl recovers, then retry
-            await new Promise(res => setTimeout(res, 500));
-            attempt = await doScrape(30_000);
+            console.log(`Scrape timeout (15s) for ${r.name} [${r.platform}] — retrying once`);
+            await new Promise(res => setTimeout(res, 300));
+            attempt = await doScrape(12_000, { ...scrapePayload, timeout: 10000 });
             if ("aborted" in attempt) {
-              console.log(`Scrape timeout (30s retry) for ${r.name} [${r.platform}] — giving up`);
+              console.log(`Scrape timeout (12s retry) for ${r.name} [${r.platform}] — giving up`);
               releaseFcSlot();
               return null;
             }
@@ -2649,25 +2648,8 @@ async function verifyAvailability(
         releaseFcSlot();
 
         if (resp.status === 408) {
-          console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
-          const retryAbort = new AbortController();
-          const retryTimer = setTimeout(() => retryAbort.abort(), 20_000);
-          try {
-            resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${firecrawlKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
-              signal: retryAbort.signal,
-            });
-          } catch (retryFetchErr: any) {
-            clearTimeout(retryTimer);
-            console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}]: ${retryFetchErr.name === "AbortError" ? "timeout" : retryFetchErr}`);
-            return null;
-          }
-          clearTimeout(retryTimer);
+          console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
+          return null;
         }
 
         if (!resp.ok) {
@@ -3119,14 +3101,20 @@ async function verifyAvailability(
       
       if (isOT) {
         const otVerifyStart = Date.now();
+        // Early exit: if page looks blocked (tiny markdown = anti-bot), skip immediately
+        const mdLen = markdown.length;
+        const looksBlocked = mdLen < 300 || /access denied|permission|reference #/i.test(markdown);
+        if (looksBlocked && !markdown.toLowerCase().includes("select a time")) {
+          console.log(`✗ ${r.name} [opentable] — blocked (mdLen=${mdLen}), skipping`);
+          return null;
+        }
+        
         // First pass: parse OT slots from markdown
         foundTimes = parseOTSlots(markdown);
         // Populate seenTimes from markdown slots BEFORE HTML merge to avoid dupes
         foundTimes.forEach(t => seenTimes.add(t.time));
         
         const hadSelectSection = markdown.toLowerCase().includes("select a time");
-        const mdLen = markdown.length;
-        const looksBlocked = mdLen < 200 || /access denied|permission|reference #/i.test(markdown);
         
         if (foundTimes.length > 0) {
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from md: ${foundTimes.map(t=>t.time).join(", ")}`);
