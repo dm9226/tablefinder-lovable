@@ -3101,14 +3101,20 @@ async function verifyAvailability(
       
       if (isOT) {
         const otVerifyStart = Date.now();
+        // Early exit: if page looks blocked (tiny markdown = anti-bot), skip immediately
+        const mdLen = markdown.length;
+        const looksBlocked = mdLen < 300 || /access denied|permission|reference #/i.test(markdown);
+        if (looksBlocked && !markdown.toLowerCase().includes("select a time")) {
+          console.log(`✗ ${r.name} [opentable] — blocked (mdLen=${mdLen}), skipping`);
+          return null;
+        }
+        
         // First pass: parse OT slots from markdown
         foundTimes = parseOTSlots(markdown);
         // Populate seenTimes from markdown slots BEFORE HTML merge to avoid dupes
         foundTimes.forEach(t => seenTimes.add(t.time));
         
         const hadSelectSection = markdown.toLowerCase().includes("select a time");
-        const mdLen = markdown.length;
-        const looksBlocked = mdLen < 200 || /access denied|permission|reference #/i.test(markdown);
         
         if (foundTimes.length > 0) {
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from md: ${foundTimes.map(t=>t.time).join(", ")}`);
