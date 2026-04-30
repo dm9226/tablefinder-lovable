@@ -2309,7 +2309,8 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          ...(isOT && { waitFor: 3500 }),
+          timeout: 15000,
+          ...(isOT && { waitFor: 3000 }),
         };
 
       let markdown = "";
