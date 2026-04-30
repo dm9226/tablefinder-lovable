@@ -3566,6 +3566,14 @@ async function verifyAvailability(
   if (timeoutSummary) {
     console.log(`[VERIFY] Scrape timeouts — ${timeoutSummary} (of ${totalCands} total candidates)`);
   }
+  // Comprehensive per-provider diagnostics
+  for (const p of ["resy", "opentable", "yelp"] as const) {
+    const d = diagCounts[p];
+    const total = platformCands[p] || 0;
+    if (total > 0) {
+      console.log(`[DIAG] ${p}: ${total} candidates → ${d.success} verified, ${d.failed} failed, ${d.blocked} blocked, ${d.timeout} timeout, ${d.noSlots} noSlots, ${d.irrelevant} irrelevant, ${d.skipped} skipped`);
+    }
+  }
 
   return checked.filter(Boolean) as Restaurant[];
 }
