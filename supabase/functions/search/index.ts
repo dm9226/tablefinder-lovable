@@ -212,9 +212,11 @@ serve(async (req) => {
       console.log(`[EXTENDED] Coords received: lat=${lat}, lng=${lng} | userLat=${params.userLat}, userLng=${params.userLng}`);
       const amenityTerms = extractAmenityTerms(params.cuisine || "", query || "");
 
-      // Verify up to 18 remaining candidates
-      const toVerify = (incomingCandidates as Restaurant[]).slice(0, 18);
-      const leftover = (incomingCandidates as Restaurant[]).slice(18);
+      // Verify a smaller balanced slice for extended searches so blocked OT candidates
+      // cannot dominate the follow-up request budget.
+      const toVerify = selectCandidatesForVerification((incomingCandidates as Restaurant[]), 12);
+      const selectedIds = new Set(toVerify.map(r => r.name + r.platform));
+      const leftover = (incomingCandidates as Restaurant[]).filter(c => !selectedIds.has(c.name + c.platform));
 
       let verified = (await Promise.all(
         adapters.map(a => a.verify(
