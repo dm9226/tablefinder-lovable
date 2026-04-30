@@ -2678,6 +2678,12 @@ async function verifyAvailability(
             if ("aborted" in attempt) {
               timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
               console.log(`Scrape timeout (${primaryTimeout/1000}s) for ${r.name} [${r.platform}] — retrying once`);
+              // Skip retry if we're near the global deadline
+              if (globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS) {
+                console.log(`⏱ Skipping retry for ${r.name} — global deadline exceeded`);
+                releaseFcSlot();
+                return null;
+              }
               await new Promise(res => setTimeout(res, 300));
               attempt = await doScrape(retryTimeout, { ...otPayload, timeout: retryTimeout - 2000 });
               if ("aborted" in attempt) {
