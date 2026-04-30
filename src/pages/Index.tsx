@@ -23,8 +23,6 @@ const Index = () => {
   const [lastQuery, setLastQuery] = useState<string>("");
   const [lastParams, setLastParams] = useState<any>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const extendAttempts = useRef(0);
-  const MAX_EXTEND_ATTEMPTS = 3;
 
   const requestLocation = useCallback(() => {
     if (!navigator.geolocation) {
@@ -86,7 +84,6 @@ const Index = () => {
       setRemainingCandidates([]);
       setLastQuery(query);
       setLastParams(null);
-      extendAttempts.current = 0;
 
       try {
         const { data, error: fnError } = await supabase.functions.invoke("search", {
@@ -129,24 +126,14 @@ const Index = () => {
     [coords, location]
   );
 
-  const MAX_RESULTS = 40;
-
   const handleExtendedSearch = useCallback(async () => {
     if (remainingCandidates.length === 0 || !lastParams) return;
-    if (extendAttempts.current >= MAX_EXTEND_ATTEMPTS) {
-      setHasMore(false);
-      setRemainingCandidates([]);
-      return;
-    }
 
     setIsExtending(true);
-    extendAttempts.current++;
     try {
       const { data, error: fnError } = await supabase.functions.invoke("search", {
         body: {
           query: lastQuery,
-          lat: coords?.lat,
-          lng: coords?.lng,
           extended: true,
           remainingCandidates,
           extendedParams: lastParams,
@@ -158,39 +145,20 @@ const Index = () => {
 
       const newResults = data?.results || [];
       if (newResults.length > 0) {
-        setResults(prev => {
-          const existingIds = new Set(prev.map(r => r.id));
-          const unique = newResults.filter((r: Restaurant) => !existingIds.has(r.id));
-          if (unique.length === 0) return prev;
-          const merged = [...prev, ...unique];
-          merged.sort((a, b) => {
-            const dA = a.distanceMiles ?? 9999;
-            const dB = b.distanceMiles ?? 9999;
-            if (Math.abs(dA - dB) > 0.5) return dA - dB;
-            return (b.rating ?? 0) - (a.rating ?? 0);
-          });
-          return merged.slice(0, MAX_RESULTS);
-        });
+        setResults(prev => [...prev, ...newResults]);
+        toast.success(`Found ${newResults.length} more result${newResults.length !== 1 ? "s" : ""}`);
+      } else {
+        toast.info("No additional results found");
       }
       setHasMore(!!data?.hasMore);
       setRemainingCandidates(data?.remainingCandidates || []);
     } catch (err: any) {
       console.error("Extended search error:", err);
-      // Stop auto-extending on error
-      setHasMore(false);
-      setRemainingCandidates([]);
-      extendAttempts.current = MAX_EXTEND_ATTEMPTS;
+      toast.error(err.message || "Extended search failed");
     } finally {
       setIsExtending(false);
     }
-  }, [remainingCandidates, lastParams, lastQuery, coords]);
-
-  // Auto-trigger extended search when hasMore is true
-  useEffect(() => {
-    if (hasMore && !isExtending && !isLoading && remainingCandidates.length > 0 && extendAttempts.current < MAX_EXTEND_ATTEMPTS) {
-      handleExtendedSearch();
-    }
-  }, [hasMore, isExtending, isLoading, remainingCandidates.length, handleExtendedSearch]);
+  }, [remainingCandidates, lastParams, lastQuery]);
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">

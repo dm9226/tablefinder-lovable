@@ -22,9 +22,6 @@ interface SearchParams {
   country: string;       // "us" or "gb" — defaults to "us"
   lat?: number;
   lng?: number;
-  userZip?: string;      // ZIP / postcode at the user's actual coords (for hyperlocal discovery)
-  userLat?: number;      // The user's actual browser coords — used for distance ranking.
-  userLng?: number;      // (params.lat/lng get overwritten to the city centroid by parseQuery.)
 }
 
 // ─── Dish-to-cuisine synonym map ───
@@ -166,51 +163,10 @@ interface ApiKeys {
   _startTime?: number;
 }
 
-// Shared concurrency pools — created once in the main handler and passed to all
-// verifyAvailability calls so that Resy, OT, and Yelp share a single global cap.
-interface ConcurrencyPools {
-  acquireFast: () => Promise<void>;
-  releaseFast: () => void;
-  acquireOt: () => Promise<void>;
-  releaseOt: () => void;
-}
-
-function createConcurrencyPools(): ConcurrencyPools {
-  // Fast pool (Resy + Yelp): lightweight scrapes, higher concurrency
-  let fastActive = 0;
-  const fastQueue: (() => void)[] = [];
-  const FAST_MAX = 5;
-  // OT pool: stealth proxy scrapes are slow (20s+), cap low
-  let otActive = 0;
-  const otQueue: (() => void)[] = [];
-  const OT_MAX = 2;
-
-  return {
-    acquireFast: () => {
-      if (fastActive < FAST_MAX) { fastActive++; return Promise.resolve(); }
-      return new Promise<void>(resolve => fastQueue.push(resolve));
-    },
-    releaseFast: () => {
-      fastActive--;
-      const next = fastQueue.shift();
-      if (next) { fastActive++; next(); }
-    },
-    acquireOt: () => {
-      if (otActive < OT_MAX) { otActive++; return Promise.resolve(); }
-      return new Promise<void>(resolve => otQueue.push(resolve));
-    },
-    releaseOt: () => {
-      otActive--;
-      const next = otQueue.shift();
-      if (next) { otActive++; next(); }
-    },
-  };
-}
-
 interface ProviderAdapter {
   platform: "resy" | "opentable" | "yelp";
   discover(params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
-  verify(candidates: Restaurant[], params: SearchParams, keys: ApiKeys, amenityTerms: string[], pools: ConcurrencyPools): Promise<Restaurant[]>;
+  verify(candidates: Restaurant[], params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
 }
 
 // Caching removed — all searches are fresh
@@ -238,32 +194,22 @@ serve(async (req) => {
 
     const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, aiKey: LOVABLE_API_KEY, _startTime: startTime };
     const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter, yelpAdapter];
-    const pools = createConcurrencyPools();
 
     // ─── Extended Search Mode ───
     // Skips discovery and parsing; verifies remaining candidates from a previous search
     if (extended && incomingCandidates && extendedParams) {
       console.log(`[EXTENDED] Starting extended search with ${incomingCandidates.length} remaining candidates`);
       const params = extendedParams as SearchParams;
-      // Re-stamp the user's true browser coords for distance ranking. Prefer fresh body coords;
-      // fall back to whatever extendedParams already carries from the initial search.
-      if (typeof lat === "number" && typeof lng === "number") {
-        params.userLat = lat;
-        params.userLng = lng;
-      }
-      console.log(`[EXTENDED] Coords received: lat=${lat}, lng=${lng} | userLat=${params.userLat}, userLng=${params.userLng}`);
       const amenityTerms = extractAmenityTerms(params.cuisine || "", query || "");
 
-      // Verify a smaller balanced slice for extended searches so blocked OT candidates
-      // cannot dominate the follow-up request budget.
-     const toVerify = selectCandidatesForVerification((incomingCandidates as Restaurant[]), 12, params);
-      const selectedIds = new Set(toVerify.map(r => r.name + r.platform));
-      const leftover = (incomingCandidates as Restaurant[]).filter(c => !selectedIds.has(c.name + c.platform));
+      // Verify up to 18 remaining candidates
+      const toVerify = (incomingCandidates as Restaurant[]).slice(0, 18);
+      const leftover = (incomingCandidates as Restaurant[]).slice(18);
 
       let verified = (await Promise.all(
         adapters.map(a => a.verify(
           toVerify.filter((c: Restaurant) => c.platform === a.platform),
-          params, keys, amenityTerms, pools
+          params, keys, amenityTerms
         ))
       )).flat();
       console.log(`[EXTENDED] Verified: ${verified.length}/${toVerify.length}`);
@@ -280,14 +226,8 @@ serve(async (req) => {
         enrichmentPromise,
       ]);
 
-      // Distance is measured from the USER's coords when available, falling back to city centroid.
-      const refLat = params.userLat ?? params.lat ?? 0;
-      const refLng = params.userLng ?? params.lng ?? 0;
-      console.log(
-        params.userLat != null
-          ? `[EXTENDED] Distance ref: user coords (${refLat}, ${refLng})`
-          : `[EXTENDED] Distance ref: city centroid (${refLat}, ${refLng})`
-      );
+      const cityLat = params.lat ?? 0;
+      const cityLng = params.lng ?? 0;
       for (let i = 0; i < verified.length; i++) {
         const e = enrichmentMap.get(i);
         if (!e) continue;
@@ -301,8 +241,8 @@ serve(async (req) => {
         if (e.neighborhood && r.neighborhood === params.city) {
           r.neighborhood = e.neighborhood;
         }
-        if (r.distanceMiles == null && typeof e.lat === "number" && typeof e.lng === "number" && refLat !== 0 && refLng !== 0) {
-          const aiDist = +haversine(refLat, refLng, e.lat, e.lng).toFixed(1);
+        if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
+          const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
           if (aiDist <= 200) {
             r.distanceMiles = aiDist;
             if (e.neighborhood) r.neighborhood = e.neighborhood;
@@ -313,10 +253,7 @@ serve(async (req) => {
       // Distance filter + sort
       const metroCity = getMetroCityName(params.city || "", params.state || "");
       const wasMetroNormalized = metroCity !== (params.city || "");
-      // When we have the user's true coords, expand the cap — candidates were discovered from
-      // the metro center, so a "close to me in suburbs" venue can read 20+ mi from city center.
-      const hasUserCoords = params.userLat != null && params.userLng != null;
-      const MAX_DISTANCE_MILES = hasUserCoords ? 25 : (wasMetroNormalized ? 30 : 15);
+      const MAX_DISTANCE_MILES = wasMetroNormalized ? 30 : 15;
       const nearby = verified.filter((r) => {
         const d = r.distanceMiles;
         if (d === null || d === undefined) return true;
@@ -345,37 +282,10 @@ serve(async (req) => {
     // ─── Normal Search Flow ───
 
     // Step 1: Parse user query (always fresh)
-    const t0 = Date.now();
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
-    console.log(`[TIMING] parseQuery: ${Date.now() - t0}ms`);
-    // Preserve the user's actual browser coords separately — parseQuery overwrites
-    // params.lat/lng with the geocoded *city centroid*, which is wrong for distance ranking.
-    if (typeof lat === "number" && typeof lng === "number") {
-      params.userLat = lat;
-      params.userLng = lng;
-    }
-    console.log(`Coords received: lat=${lat}, lng=${lng} | city centroid: ${params.lat},${params.lng}`);
-    // Resolve user's ZIP from precise browser coords for hyperlocal discovery (Yelp find_loc, OT supplemental query).
-    if (lat && lng && !params.userZip) {
-      console.log(`Attempting reverse-geocode to ZIP for ${lat},${lng}...`);
-      try {
-        const zip = await reverseGeocodeToZip(lat, lng);
-        if (zip) {
-          params.userZip = zip;
-          console.log(`User ZIP from coords: ${zip}`);
-        } else {
-          console.log(`Reverse-geocode returned empty ZIP for ${lat},${lng}`);
-        }
-      } catch (e) {
-        console.log(`Reverse-geocode to ZIP failed: ${(e as Error).message}`);
-      }
-    } else if (!lat || !lng) {
-      console.log(`Skipping ZIP resolution: no browser coords (lat=${lat}, lng=${lng})`);
-    }
     console.log("Parsed params:", JSON.stringify(params));
 
     // Step 2: Discover candidates from all platforms via adapters
-    const t1 = Date.now();
 
     // Detect amenity/experience keywords BEFORE discovery so we can add them to search queries
     const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
@@ -405,7 +315,6 @@ serve(async (req) => {
     }
 
     const allCandidates = dedupeByName(discovered.flat());
-    console.log(`[TIMING] discovery: ${Date.now() - t1}ms`);
 
     // Log counts per platform
     const platformCounts = adapters.map((a, i) => `${a.platform}: ${discovered[i].length}`);
@@ -420,9 +329,9 @@ serve(async (req) => {
     // Step 3: Select candidates with round-robin balance, then verify per-adapter
     // Use fewer candidates for vague queries to avoid timeouts
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 24 : 30;
+    const maxCandidates = isVagueQuery ? 18 : 24;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
-    const selected = selectCandidatesForVerification(allCandidates, maxCandidates, params);
+    const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
@@ -430,27 +339,15 @@ serve(async (req) => {
     const selectedIds = new Set(selected.map(r => r.name + r.platform));
     const remainingAfterSelection = allCandidates.filter(c => !selectedIds.has(c.name + c.platform));
 
-    const t2 = Date.now();
-    // Phase 1: Verify Resy first (fast, high success rate, clean Firecrawl bandwidth)
-    const resyCandidates = selected.filter(c => c.platform === "resy");
-    const otCandidates = selected.filter(c => c.platform === "opentable");
-    const yelpCandidates = selected.filter(c => c.platform === "yelp");
-
-    const resyResults = await resyAdapter.verify(resyCandidates, params, keys, amenityTerms, pools);
-    console.log(`[PHASE1] Resy verified: ${resyResults.length}/${resyCandidates.length} (${Date.now() - t2}ms)`);
-
-    // Phase 2: OT + Yelp in parallel (heavier scrapes, share remaining bandwidth)
-    const [otResults, yelpResults] = await Promise.all([
-      opentableAdapter.verify(otCandidates, params, keys, amenityTerms, pools),
-      yelpAdapter.verify(yelpCandidates, params, keys, amenityTerms, pools),
-    ]);
-    console.log(`[PHASE2] OT: ${otResults.length}/${otCandidates.length}, Yelp: ${yelpResults.length}/${yelpCandidates.length} (${Date.now() - t2}ms)`);
-
-    let verified = [...resyResults, ...otResults, ...yelpResults];
+    let verified = (await Promise.all(
+      adapters.map(a => a.verify(
+        selected.filter(c => c.platform === a.platform),
+        params, keys, amenityTerms
+      ))
+    )).flat();
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
-    console.log(`[TIMING] verification: ${Date.now() - t2}ms`);
 
     // Yelp fallback no longer needed — Yelp candidates are pre-verified from search page
 
@@ -465,43 +362,25 @@ serve(async (req) => {
     }
 
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
-    // Time-budget: skip enrichment if already past 30s to keep first response fast
+    // If we're past 110s, skip enrichment to ensure we return in time
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 30_000;
+    const skipEnrichment = elapsed > 110_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
 
-    const t3 = Date.now();
-    // Cap geocoding to 6s max
-    const geocodePromise = Promise.race([
-      geocodeVerifiedResults(verified, params),
-      new Promise<void>(resolve => setTimeout(resolve, 6_000)),
-    ]);
-    // Cap enrichment to 6s max as well
-    const rawEnrichmentPromise = skipEnrichment
-      ? Promise.resolve(new Map<number, any>())
+    const enrichmentPromise = skipEnrichment 
+      ? Promise.resolve(new Map<number, any>()) 
       : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
-    const enrichmentPromise = Promise.race([
-      rawEnrichmentPromise,
-      new Promise<Map<number, any>>(resolve => setTimeout(() => resolve(new Map()), 6_000)),
-    ]);
 
     const [, enrichmentMap] = await Promise.all([
-      geocodePromise,
+      geocodeVerifiedResults(verified, params),
       enrichmentPromise,
     ]);
-    console.log(`[TIMING] geocode+enrich: ${Date.now() - t3}ms`);
 
     // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
-    // Distance is measured from the USER's coords when available, falling back to city centroid.
-    const refLat = params.userLat ?? params.lat ?? 0;
-    const refLng = params.userLng ?? params.lng ?? 0;
-    console.log(
-      params.userLat != null
-        ? `Distance ref: user coords (${refLat}, ${refLng})`
-        : `Distance ref: city centroid (${refLat}, ${refLng})`
-    );
+    const cityLat = params.lat ?? 0;
+    const cityLng = params.lng ?? 0;
     for (let i = 0; i < verified.length; i++) {
       const e = enrichmentMap.get(i);
       if (!e) continue;
@@ -517,8 +396,8 @@ serve(async (req) => {
       }
 
       // AI coordinate fallback: fill distance for restaurants Nominatim missed
-      if (r.distanceMiles == null && typeof e.lat === "number" && typeof e.lng === "number" && refLat !== 0 && refLng !== 0) {
-        const aiDist = +haversine(refLat, refLng, e.lat, e.lng).toFixed(1);
+      if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
+        const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
         if (aiDist <= 200) {
           r.distanceMiles = aiDist;
           if (e.neighborhood) r.neighborhood = e.neighborhood;
@@ -528,15 +407,14 @@ serve(async (req) => {
         }
       }
     }
-    const geocodedCount = verified.filter(r => r.distanceMiles != null).length;
-    console.log(`Final geocoding: ${geocodedCount}/${verified.length} restaurants have distances`);
-    console.log(`[TIMING] total: ${Date.now() - startTime}ms`);
+    const aiGeocoded = verified.filter(r => r.distanceMiles != null && r.platform !== "yelp").length;
+    const totalNonYelp = verified.filter(r => r.platform !== "yelp").length;
+    console.log(`Final geocoding: ${aiGeocoded}/${totalNonYelp} non-Yelp restaurants have distances`);
 
     // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
     const wasMetroNormalized = metroCity !== (params.city || "");
-    const hasUserCoords = params.userLat != null && params.userLng != null;
-    const MAX_DISTANCE_MILES = hasUserCoords ? 25 : (wasMetroNormalized ? 30 : 15);
+    const MAX_DISTANCE_MILES = wasMetroNormalized ? 30 : 15;
     const nearby = verified.filter((r) => {
       const d = r.distanceMiles;
       if (d === null || d === undefined) return true;
@@ -755,26 +633,6 @@ User query: "${query}"`;
   const parsed = JSON.parse(toolCall.function.arguments) as SearchParams;
   parsed.country = ((parsed as any).country || "us").toLowerCase().trim();
   if (parsed.country !== "gb") parsed.country = "us"; // Only us and gb supported
-
-  // ─── Deterministic UK city safety net ───
-  // The AI parser occasionally misclassifies well-known UK cities as country="us".
-  // If the parsed city matches a major UK city AND no US state was provided,
-  // force country="gb". This prevents the disambiguation error against US homonyms
-  // (e.g. London, KY / London, OH).
-  const UK_MAJOR_CITIES = new Set([
-    "london", "manchester", "edinburgh", "birmingham", "liverpool", "glasgow",
-    "bristol", "leeds", "sheffield", "oxford", "cambridge", "brighton",
-    "cardiff", "belfast", "newcastle", "nottingham", "bath", "york",
-    "southampton", "portsmouth", "leicester", "coventry", "reading", "aberdeen",
-    "dundee", "swansea", "norwich", "exeter", "bournemouth", "plymouth",
-  ]);
-  const cityLowerForUK = ((parsed as any).city || "").trim().toLowerCase();
-  const stateRawForUK = ((parsed as any).state || "").trim();
-  const looksLikeUSState = /^[A-Z]{2}$/.test(stateRawForUK) && stateRawForUK !== "UK";
-  if (parsed.country === "us" && UK_MAJOR_CITIES.has(cityLowerForUK) && !looksLikeUSState) {
-    console.log(`UK city safety net: reclassifying "${parsed.city}" as country="gb" (was "us")`);
-    parsed.country = "gb";
-  }
   
   // Normalize cuisineType and dishKeyword
   parsed.cuisineType = (parsed.cuisineType || "").trim().toLowerCase();
@@ -850,7 +708,6 @@ User query: "${query}"`;
   // Parse browser location string for reliable city/state
   let browserCity = "";
   let browserState = "";
-  let cityFromBrowser = false;
   if (location) {
     // US format: "City, ST"  UK format: "City, England" or "London, UK"
     const locMatch = location.match(/^(.+),\s*([A-Z]{2})$/);
@@ -863,23 +720,6 @@ User query: "${query}"`;
       browserState = locMatchUK[2].trim();
       if (parsed.country === "us") parsed.country = "gb"; // auto-detect UK from browser
     }
-  }
-
-  // If AI returned the same city the browser detected but no state, trust the browser state/coords.
-  if (
-    browserCity &&
-    browserState &&
-    parsed.city &&
-    !parsed.state &&
-    normalizePlaceToken(parsed.city) === normalizePlaceToken(browserCity)
-  ) {
-    parsed.state = browserState;
-    if (lat && lng) {
-      parsed.lat = lat;
-      parsed.lng = lng;
-    }
-    cityFromBrowser = true;
-    console.log(`Adopted browser state for ambiguous city: ${parsed.city}, ${parsed.state}`);
   }
 
   // Handle zip code: geocode to city/state/coords
@@ -929,6 +769,7 @@ User query: "${query}"`;
   }
 
   // If city is still empty, use browser-provided location directly (no redundant Nominatim call)
+  let cityFromBrowser = false;
   if (!parsed.city) {
     if (browserCity && browserState) {
       parsed.city = browserCity;
@@ -1025,14 +866,11 @@ User query: "${query}"`;
     }
   } else if (!hasExplicitState && !cityFromBrowser) {
     if (distinctStates.length > 1) {
-      // If browser told us the state and it's among the candidate states, trust it.
-      if (browserState && distinctStates.includes(browserState.toUpperCase())) {
-        parsed.state = browserState.toUpperCase();
-      } else {
       const options = [...new Set(usableCandidates.map((c: any) => `${parsed.city}, ${c.stateCode}`))].slice(0, 4);
       throw new Error(`Multiple locations found for "${parsed.city}". Please include the state or zip code — e.g. ${options.join(" or ")}.`);
-      }
-    } else if (distinctStates.length === 1) {
+    }
+
+    if (distinctStates.length === 1) {
       parsed.state = distinctStates[0];
     }
   } else if (!parsed.state && distinctStates.length === 1) {
@@ -1059,24 +897,9 @@ User query: "${query}"`;
   const candidatePool = stateFiltered.length > 0 ? stateFiltered : usableCandidates;
   let selectedCandidate = (candidatePool.sort((a: any, b: any) => cityTypeRank(a.type) - cityTypeRank(b.type))[0]) || null;
 
-  // Distance origin selection:
-  //   1. If user has precise browser coords AND parsed city matches detected city → use the user's actual coords.
-  //      (Handles unincorporated areas / suburbs where city centroid is far from the user.)
-  //   2. Else if a candidate centroid is available → use it (user typed a different city than detected).
-  //   3. Else fall back to whatever browser coords we have.
-  const parsedMatchesBrowser =
-    !!browserCity &&
-    !!parsed.city &&
-    normalizePlaceToken(parsed.city) === normalizePlaceToken(browserCity);
-
-  if (lat && lng && (cityFromBrowser || parsedMatchesBrowser)) {
-    parsed.lat = lat;
-    parsed.lng = lng;
-    console.log(`Distance origin: user coords (${lat.toFixed(4)}, ${lng.toFixed(4)}) for ${parsed.city}, ${parsed.state}`);
-  } else if (selectedCandidate) {
+  if (selectedCandidate && !cityFromBrowser) {
     parsed.lat = selectedCandidate.lat;
     parsed.lng = selectedCandidate.lng;
-    console.log(`Distance origin: city centroid (${selectedCandidate.lat.toFixed(4)}, ${selectedCandidate.lng.toFixed(4)}) for ${parsed.city}, ${parsed.state}`);
   }
 
   // Last fallback to browser coordinates.
@@ -1098,27 +921,6 @@ const STATE_CODE_AFTER_COMMA = /,\s*(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|i
 const STATE_CODE_STANDALONE_SAFE = /\b(al|ak|az|ar|ca|co|ct|de|fl|ga|id|il|ia|ks|ky|la|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)\b/i;
 function normalizePlaceToken(value: string): string {
   return (value || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
-}
-
-async function reverseGeocodeToZip(lat: number, lng: number): Promise<string> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 5000);
-  try {
-    const resp = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=18&addressdetails=1`,
-      { headers: { "User-Agent": "TableFinder/1.0" }, signal: ctrl.signal }
-    );
-    const data = await resp.json();
-    const postcode: string = data?.address?.postcode || "";
-    // For US, return only the 5-digit base ZIP (Yelp/OT prefer this).
-    const usZip = postcode.match(/^(\d{5})/);
-    if (usZip) return usZip[1];
-    // For UK, return the full postcode.
-    if (/^[A-Z]{1,2}\d/i.test(postcode)) return postcode.toUpperCase();
-    return "";
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function extractStateCode(address: any): string {
@@ -1216,10 +1018,6 @@ async function searchFirecrawl(
         return [
           `${otSite} ${cityState} best rated${cuisine} restaurant`,
           `${otSite} ${cityState} top${cuisine} restaurant reservation`,
-          // Hyperlocal supplemental query using user's ZIP — surfaces ZIP-local OT venues that metro queries miss.
-          ...(params.userZip && !isUK ? [
-            `${otSite} ${params.userZip}${cuisine} restaurant reservation`,
-          ] : []),
           ...(needsCuisineTypeQuery ? [
             `${otSite} ${cityState}${cuisineTypeSuffix} restaurant reservation`,
           ] : []),
@@ -1227,13 +1025,12 @@ async function searchFirecrawl(
         ];
       })()
     : [
-        `site:yelp.com/reservations ${cityState}${cuisine} restaurant`,
-        `site:yelp.com/reservations ${cityState} best rated${cuisine} restaurant`,
-        `site:yelp.com/reservations ${cityState} find open tables${cuisine}`,
+        `site:yelp.com/reservations ${cityState} best${cuisine}`,
+        `site:yelp.com/biz ${cityState} top rated${cuisine} reservation`,
         ...(needsCuisineTypeQuery ? [
-          `site:yelp.com/reservations ${cityState}${cuisineTypeSuffix} restaurant`,
+          `site:yelp.com/biz ${cityState}${cuisineTypeSuffix} restaurant reservation`,
         ] : []),
-        ...(amenitySuffix ? [`site:yelp.com/reservations ${cityState}${amenitySuffix} restaurant`] : []),
+        ...(amenitySuffix ? [`site:yelp.com/biz ${cityState}${amenitySuffix} restaurant reservation`] : []),
       ];
 
   if (hasDishKeyword) {
@@ -1504,7 +1301,7 @@ function normalizeCandidates(
         ? addResyParams(canonUrl, params)
         : platform === "opentable"
         ? addOTParams(canonUrl, params)
-        : buildYelpAvailabilityUrl(canonUrl, params);
+        : canonUrl;
 
       return {
         id: `${platform}-${hashKey(canonUrl)}`,
@@ -1592,8 +1389,6 @@ function cleanName(title: string | undefined, url: string, platform: string): st
       .replace(/\s+reservation(s)?.*$/i, "")
       .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "") // trailing "- Atlanta, GA" or "- Buckhead"
       .replace(/\s*-\s*(Updated|Restaurant)\s.*$/i, "") // "- Updated 2026" or "- Restaurant Name"
-      .replace(/\s*[-–—]+\s*$/i, "")  // trailing dashes/hyphens
-      .replace(/\s*[,;:]+\s*$/i, "")   // trailing punctuation
       .trim();
     if (cleaned.length > 1) return cleaned;
   }
@@ -1618,7 +1413,6 @@ async function fetchYelpCandidates(
   params: SearchParams, firecrawlKey: string, aiKey: string, amenityTerms: string[] = []
 ): Promise<Restaurant[]> {
   try {
-    console.log(">>> YELP DISCOVERY FUNCTION ENTERED <<<");
     const amenitySuffix = amenityTerms.length > 0 ? ` ${amenityTerms.join(" ")}` : "";
     const MEAL_AS_CUISINE_YELP = new Set(["brunch", "breakfast"]);
     const YELP_MEAL_STRIP = /\b(dinner|lunch|breakfast|supper|brunch|meal|dining)\b/gi;
@@ -1627,12 +1421,9 @@ async function fetchYelpCandidates(
     }).replace(/\s+/g, " ").trim();
 
     const yelpCity = getMetroCityName(params.city, params.state);
-    // Prefer the user's actual ZIP for hyperlocal Yelp results (ranked outward from ZIP centroid).
-    const yelpLocation = params.userZip
-      ? params.userZip
-      : params.country === "gb"
-        ? `${yelpCity}, UK`
-        : `${yelpCity}, ${params.state}`;
+    const yelpLocation = params.country === "gb"
+      ? `${yelpCity}, UK`
+      : `${yelpCity}, ${params.state}`;
 
     // Build Yelp search URL with reservation filter AND reservation params
     const searchTerm = `${yelpCuisine}${amenitySuffix} restaurants`.trim();
@@ -1647,229 +1438,161 @@ async function fetchYelpCandidates(
     yelpSearchUrl.searchParams.set("reservation_time", params.time.replace(":", ""));
     yelpSearchUrl.searchParams.set("reservation_covers", String(params.partySize));
 
-    console.log(`Yelp discovery: ${searchTerm} in ${yelpLocation}`);
+    console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Strategy: Use Yelp's internal /search/snippet JSON API (same endpoint their frontend XHR uses)
-    // This returns structured JSON without needing a browser or bypassing DataDome's JS challenge
-    let snippetResults: Array<Record<string, any>> = [];
+    // Scrape Yelp search results via Steel.dev stealth browser (Firecrawl can't bypass DataDome)
+    const steelApiKey = Deno.env.get("STEEL_API_KEY");
+    if (!steelApiKey) {
+      console.log("Yelp discovery skipped: STEEL_API_KEY not configured");
+      return [];
+    }
+
     let markdown = "";
     let links: string[] = [];
-    let domCards: Array<Record<string, string>> = [];
+    let steelSessionId: string | null = null;
 
-    const snippetUrl = new URL("https://www.yelp.com/search/snippet");
-    snippetUrl.searchParams.set("find_desc", searchTerm);
-    snippetUrl.searchParams.set("find_loc", yelpLocation);
-    snippetUrl.searchParams.set("request_origin", "user");
-    if (params.country !== "gb") {
-      snippetUrl.searchParams.set("attrs", "reservation");
-    }
-    snippetUrl.searchParams.set("reservation_date", params.date);
-    snippetUrl.searchParams.set("reservation_time", params.time.replace(":", ""));
-    snippetUrl.searchParams.set("reservation_covers", String(params.partySize));
-
-    console.log(`[YELP_SNIPPET] Fetching: ${snippetUrl.toString()}`);
-
+      console.log("[YELP_STEEL] Starting Steel.dev discovery session...");
     try {
-      const snippetResp = await fetch(snippetUrl.toString(), {
+      // 1. Create Steel session with proxy + captcha solving
+      const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
+        method: "POST",
         headers: {
-          "Accept": "application/json, text/plain, */*",
-          "Accept-Language": "en-US,en;q=0.9",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-          "Referer": "https://www.yelp.com/search?" + snippetUrl.searchParams.toString(),
-          "X-Requested-With": "XMLHttpRequest",
+          "steel-api-key": steelApiKey,
+          "Content-Type": "application/json",
         },
+        body: JSON.stringify({
+          useProxy: false,
+          solveCaptcha: false,
+        }),
+      });
+      if (!sessionResp.ok) {
+        const errText = await sessionResp.text().catch(() => "");
+        console.log(`Yelp discovery Steel session failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
+        return [];
+      }
+      const sessionData = await sessionResp.json();
+      steelSessionId = sessionData.id;
+      if (!steelSessionId) {
+        console.log("Yelp discovery Steel session missing id");
+        return [];
+      }
+      console.log(`[YELP_STEEL] Session created: ${steelSessionId}`);
+
+      // 2. Connect via CDP WebSocket
+      const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
+      const ws = new WebSocket(connectUrl);
+      let cdpId = 1;
+      const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+      let cdpSessionId: string | null = null;
+
+      const cdpSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
+        return new Promise((resolve, reject) => {
+          const id = cdpId++;
+          pending.set(id, { resolve, reject });
+          const msg: Record<string, unknown> = { id, method, params };
+          if (cdpSessionId) msg.sessionId = cdpSessionId;
+          ws.send(JSON.stringify(msg));
+          setTimeout(() => {
+            if (pending.has(id)) {
+              pending.delete(id);
+              reject(new Error(`CDP timeout: ${method}`));
+            }
+          }, 30000);
+        });
+      };
+
+      await new Promise<void>((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = (e) => reject(e);
+        setTimeout(() => reject(new Error("WS connect timeout")), 15000);
       });
 
-      console.log(`[YELP_SNIPPET] Response status: ${snippetResp.status}`);
-
-      if (snippetResp.ok) {
-        const snippetData = await snippetResp.json();
-        const components = snippetData?.searchPageProps?.mainContentComponentsListProps || [];
-        console.log(`[YELP_SNIPPET] Got ${components.length} components`);
-
-        for (const comp of components) {
-          const biz = comp?.searchResultBusiness;
-          if (!biz) continue;
-          snippetResults.push(biz);
-        }
-        console.log(`[YELP_SNIPPET] Extracted ${snippetResults.length} businesses`);
-      } else {
-        const errBody = await snippetResp.text().catch(() => "");
-        console.log(`[YELP_SNIPPET] Failed: ${snippetResp.status}, body=${errBody.slice(0, 500)}`);
-      }
-    } catch (snippetErr: any) {
-      console.log(`[YELP_SNIPPET] Error: ${snippetErr.message || snippetErr}`);
-    }
-
-    // If snippet API returned results, parse them into our standard format
-    let extracted: Array<{
-      name: string;
-      neighborhood?: string;
-      rating?: number;
-      reviewCount?: number;
-      priceRange?: string;
-      cuisineCategories: string[];
-      availableTimes: string[];
-      reservationUrl?: string;
-      businessUrl?: string;
-      alias?: string;
-    }> = [];
-
-    if (snippetResults.length > 0) {
-      extracted = snippetResults.map(biz => {
-        const alias = biz.alias || biz.businessUrl?.match(/\/biz\/([^?#]+)/)?.[1] || "";
-        const categories = (biz.categories || []).map((c: any) => c?.title || "").filter(Boolean);
-        const neighborhoods = biz.neighborhoods || [];
-        const reservationUrl = biz.reservationUrl
-          ? (biz.reservationUrl.startsWith("http") ? biz.reservationUrl : `https://www.yelp.com${biz.reservationUrl}`)
-          : null;
-        const businessUrl = biz.businessUrl
-          ? (biz.businessUrl.startsWith("http") ? biz.businessUrl : `https://www.yelp.com${biz.businessUrl}`)
-          : (alias ? `https://www.yelp.com/biz/${alias}` : null);
-
-        return {
-          name: biz.name || "",
-          neighborhood: neighborhoods[0] || "",
-          rating: typeof biz.rating === "number" ? biz.rating : undefined,
-          reviewCount: typeof biz.reviewCount === "number" ? biz.reviewCount : undefined,
-          priceRange: biz.priceRange || "",
-          cuisineCategories: categories,
-          availableTimes: [] as string[],
-          reservationUrl: reservationUrl || undefined,
-          businessUrl: businessUrl || undefined,
-          alias,
-        };
-      }).filter(r => r.name);
-      console.log(`[YELP_SNIPPET] Parsed ${extracted.length} restaurants from snippet API`);
-    }
-
-    // Fallback: if snippet API failed/blocked, try Steel.dev stealth browser
-    if (extracted.length === 0) {
-      console.log("[YELP_FALLBACK] Snippet API returned 0 results, trying Steel.dev fallback...");
-      const steelApiKey = Deno.env.get("STEEL_API_KEY");
-      if (steelApiKey) {
-        let steelSessionId: string | null = null;
+      ws.onmessage = (event) => {
         try {
-          const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
+          const msg = JSON.parse(typeof event.data === "string" ? event.data : "{}");
+          if (msg.id && pending.has(msg.id)) {
+            const p = pending.get(msg.id)!;
+            pending.delete(msg.id);
+            if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
+            else p.resolve(msg.result);
+          }
+        } catch (_) {}
+      };
+
+      // 3. Create target, attach, navigate
+      const targetResult = await cdpSend("Target.createTarget", { url: "about:blank" });
+      const targetId = targetResult?.targetId;
+      if (!targetId) throw new Error("Failed to create browser target");
+
+      const attachResult = await cdpSend("Target.attachToTarget", { targetId, flatten: true });
+      cdpSessionId = attachResult?.sessionId;
+      if (!cdpSessionId) throw new Error("Failed to attach to target");
+
+      await cdpSend("Page.enable");
+      await cdpSend("Runtime.enable");
+      await cdpSend("Page.navigate", { url: yelpSearchUrl.toString() });
+
+      // Wait for page to render
+      await new Promise(resolve => setTimeout(resolve, 8000));
+
+      // 4. Scroll down to load more results
+      for (let i = 0; i < 3; i++) {
+        await cdpSend("Runtime.evaluate", {
+          expression: `window.scrollBy(0, 1500); 'scrolled-${i}'`,
+          returnByValue: true,
+        });
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+
+      // 5. Extract page text content and all links
+      const extractResult = await cdpSend("Runtime.evaluate", {
+        expression: `
+          (function() {
+            const anchors = Array.from(document.querySelectorAll('a[href]'));
+            const hrefs = anchors.map(a => a.href).filter(h => h.includes('yelp.com'));
+            const text = document.body.innerText || document.body.textContent || '';
+            return JSON.stringify({ text: text, links: hrefs });
+          })()
+        `,
+        returnByValue: true,
+      });
+
+      const extracted = JSON.parse(extractResult?.result?.value || '{"text":"","links":[]}');
+      markdown = extracted.text || "";
+      links = extracted.links || [];
+
+      // Close WebSocket
+      try { ws.close(); } catch (_) {}
+
+      console.log(`Yelp Steel discovery: links=${links.length}, markdown=${markdown.length} chars`);
+      console.log(`[DEBUG] Yelp Steel discovery text (first 1500 chars):\n${markdown.slice(0, 1500)}`);
+    } catch (steelErr: any) {
+      console.log(`Yelp discovery Steel error: ${steelErr.message || steelErr}`);
+    } finally {
+      // Release Steel session
+      if (steelSessionId) {
+        try {
+          await fetch(`https://api.steel.dev/v1/sessions/${steelSessionId}/release`, {
             method: "POST",
-            headers: { "steel-api-key": steelApiKey, "Content-Type": "application/json" },
-            body: JSON.stringify({ useProxy: false, solveCaptcha: false }),
+            headers: { "steel-api-key": steelApiKey! },
           });
-          if (sessionResp.ok) {
-            const sessionData = await sessionResp.json();
-            steelSessionId = sessionData.id;
-            if (steelSessionId) {
-              console.log(`[YELP_STEEL] Session created: ${steelSessionId}`);
-              const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
-              const ws = new WebSocket(connectUrl);
-              let cdpId = 1;
-              const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
-              let cdpSessionId: string | null = null;
-
-              const cdpSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
-                return new Promise((resolve, reject) => {
-                  const id = cdpId++;
-                  pending.set(id, { resolve, reject });
-                  const msg: Record<string, unknown> = { id, method, params };
-                  if (cdpSessionId) msg.sessionId = cdpSessionId;
-                  ws.send(JSON.stringify(msg));
-                  setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error(`CDP timeout: ${method}`)); } }, 30000);
-                });
-              };
-
-              await new Promise<void>((resolve, reject) => {
-                ws.onopen = () => resolve();
-                ws.onerror = (e) => reject(e);
-                setTimeout(() => reject(new Error("WS connect timeout")), 15000);
-              });
-
-              ws.onmessage = (event) => {
-                try {
-                  const msg = JSON.parse(typeof event.data === "string" ? event.data : "{}");
-                  if (msg.id && pending.has(msg.id)) {
-                    const p = pending.get(msg.id)!;
-                    pending.delete(msg.id);
-                    if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
-                    else p.resolve(msg.result);
-                  }
-                } catch (_) {}
-              };
-
-              const targetResult = await cdpSend("Target.createTarget", { url: "about:blank" });
-              const targetId = targetResult?.targetId;
-              if (targetId) {
-                const attachResult = await cdpSend("Target.attachToTarget", { targetId, flatten: true });
-                cdpSessionId = attachResult?.sessionId;
-                if (cdpSessionId) {
-                  await cdpSend("Page.enable");
-                  await cdpSend("Runtime.enable");
-                  await cdpSend("Page.navigate", { url: yelpSearchUrl.toString() });
-                  await new Promise(resolve => setTimeout(resolve, 8000));
-                  for (let i = 0; i < 3; i++) {
-                    await cdpSend("Runtime.evaluate", { expression: `window.scrollBy(0, 1500); 'scrolled-${i}'`, returnByValue: true });
-                    await new Promise(resolve => setTimeout(resolve, 1500));
-                  }
-                  const extractResult = await cdpSend("Runtime.evaluate", {
-                    expression: `(function() {
-                      const anchors = Array.from(document.querySelectorAll('a[href]'));
-                      const hrefs = anchors.map(a => a.href).filter(h => h.includes('yelp.com'));
-                      const skipName = /^(skip|filters?|sort|more filters|sponsored|ad|map|delivery|takeout|open now|yelp)$/i;
-                      const cardsByAlias = new Map();
-                      for (const anchor of anchors) {
-                        const href = anchor.href || '';
-                        if (!/\\/(?:biz|reservations)\\//i.test(href)) continue;
-                        const rawName = (anchor.textContent || '').replace(/\\s+/g, ' ').trim();
-                        if (!rawName || rawName.length < 2 || rawName.length > 120 || skipName.test(rawName)) continue;
-                        const aliasMatch = href.match(/\\/(?:biz|reservations)\\/([^/?#]+)/i);
-                        const alias = (aliasMatch?.[1] || rawName.toLowerCase().replace(/[^a-z0-9]+/g, '-')).toLowerCase();
-                        const container = anchor.closest('li, article, [role="article"]') || anchor.parentElement || anchor;
-                        const snippet = (container?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 700);
-                        const existing = cardsByAlias.get(alias) || { alias, name: rawName, businessUrl: '', reservationUrl: '', snippet: '' };
-                        if (/\\/reservations\\//i.test(href)) existing.reservationUrl = href;
-                        if (/\\/biz\\//i.test(href)) existing.businessUrl = href;
-                        if (!existing.name || rawName.length > existing.name.length) existing.name = rawName;
-                        if (snippet.length > (existing.snippet || '').length) existing.snippet = snippet;
-                        cardsByAlias.set(alias, existing);
-                      }
-                      const text = document.body.innerText || document.body.textContent || '';
-                      return JSON.stringify({ text, links: hrefs, cards: Array.from(cardsByAlias.values()) });
-                    })()`,
-                    returnByValue: true,
-                  });
-                  const ext = JSON.parse(extractResult?.result?.value || '{"text":"","links":[],"cards":[]}');
-                  markdown = typeof ext.text === "string" ? ext.text : "";
-                  links = Array.isArray(ext.links) ? ext.links : [];
-                  domCards = Array.isArray(ext.cards) ? ext.cards : [];
-                }
-              }
-              try { ws.close(); } catch (_) {}
-              console.log(`[YELP_STEEL] links=${links.length}, cards=${domCards.length}, text=${markdown.length} chars`);
-            }
-          }
-        } catch (steelErr: any) {
-          console.log(`[YELP_STEEL] Error: ${steelErr.message || steelErr}`);
-        } finally {
-          if (steelSessionId) {
-            try {
-              await fetch(`https://api.steel.dev/v1/sessions/${steelSessionId}/release`, {
-                method: "POST", headers: { "steel-api-key": Deno.env.get("STEEL_API_KEY")! },
-              });
-            } catch (_) {}
-          }
-        }
-        const extractedFromCards = parseYelpDomCards(domCards);
-        const extractedFromMarkdown = parseYelpMarkdownResults(markdown);
-        extracted = extractedFromCards.length > 0 ? extractedFromCards : extractedFromMarkdown;
-        console.log(`[YELP_STEEL] Parsed cards=${extractedFromCards.length}, markdown=${extractedFromMarkdown.length}`);
-      } else {
-        console.log("[YELP_FALLBACK] No STEEL_API_KEY configured, skipping Steel fallback");
+        } catch (_) {}
       }
     }
-    console.log(`Yelp discovery: extracted=${extracted.length} restaurants`);
 
+    // Parse restaurants from markdown using regex patterns
+    // Yelp markdown typically has restaurant names as bold or header text followed by ratings, categories, and time slots
+    const extracted = parseYelpMarkdownResults(markdown);
+    console.log(`Yelp markdown parsed ${extracted.length} restaurants`);
+
+    // Build markdown-based time slot map (already done during parsing)
     const markdownTimesMap = new Map<string, string[]>();
+    for (const rest of extracted) {
+      if (rest.availableTimes.length > 0) {
+        markdownTimesMap.set(rest.name, rest.availableTimes);
+      }
+    }
 
-    // Build alias map from links for URL construction
     // Build alias map from links for URL construction
     const reservationLinkMap = new Map<string, string>();
     const bizLinkMap = new Map<string, string>();
@@ -1918,17 +1641,15 @@ async function fetchYelpCandidates(
       }
 
       if (!alias) {
-        alias = typeof (rest as any).alias === "string"
-          ? (rest as any).alias.toLowerCase()
-          : rest.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        alias = rest.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       }
 
       reservationUrl = reservationUrl || reservationLinkMap.get(alias) || null;
       bizUrl = bizUrl || bizLinkMap.get(alias) || null;
       const bestUrl = reservationUrl || (bizUrl ? bizUrl.replace("/biz/", "/reservations/") : `https://www.yelp.com/reservations/${alias}`);
 
-      const markdownTimes = markdownTimesMap.get(normalizeRestaurantNameForMatch(rest.name)) || [];
-      const allTimes = rest.availableTimes.length > 0 ? rest.availableTimes : markdownTimes;
+      // Use times from parsing
+      const allTimes = rest.availableTimes;
 
       results.push({
         id: `yelp-${alias}`,
@@ -2054,84 +1775,6 @@ function parseYelpMarkdownResults(markdown: string): Array<{
       availableTimes,
       reservationUrl: undefined, // Will be constructed from alias in the caller
       businessUrl: entry.url,
-    });
-  }
-
-  return results;
-}
-
-function parseYelpDomCards(cards: Array<Record<string, string>>): Array<{
-  alias?: string;
-  name: string;
-  neighborhood?: string;
-  rating?: number;
-  reviewCount?: number;
-  priceRange?: string;
-  cuisineCategories: string[];
-  availableTimes: string[];
-  reservationUrl?: string;
-  businessUrl?: string;
-}> {
-  if (!Array.isArray(cards) || cards.length === 0) return [];
-
-  const results: Array<{
-    alias?: string;
-    name: string;
-    neighborhood?: string;
-    rating?: number;
-    reviewCount?: number;
-    priceRange?: string;
-    cuisineCategories: string[];
-    availableTimes: string[];
-    reservationUrl?: string;
-    businessUrl?: string;
-  }> = [];
-
-  const seen = new Set<string>();
-  const SKIP_NAMES = /^(skip|top \d|can't find|trending|seasonal|more nearby|browse|popular brands|nearby cities|neighborhoods|streets|campuses|related|more filters|filters|sort|sponsored|ad)$/i;
-
-  for (const card of cards) {
-    const name = typeof card?.name === "string" ? card.name.replace(/\s+/g, " ").trim() : "";
-    if (!name || name.length < 2 || name.length > 120 || SKIP_NAMES.test(name)) continue;
-
-    const businessUrl = typeof card?.businessUrl === "string" && card.businessUrl ? card.businessUrl : undefined;
-    const reservationUrl = typeof card?.reservationUrl === "string" && card.reservationUrl ? card.reservationUrl : undefined;
-    const alias = typeof card?.alias === "string" && card.alias
-      ? card.alias.toLowerCase()
-      : extractYelpAliasFromUrl(reservationUrl || businessUrl || "") || normalizeRestaurantNameForMatch(name);
-
-    if (!alias || seen.has(alias)) continue;
-    seen.add(alias);
-
-    const snippet = typeof card?.snippet === "string" ? card.snippet : "";
-    const ratingMatch = snippet.match(/(?:^|\s)([1-5]\.\d)(?=\s*(?:star|stars|rating|\(|\d+(?:\.\d+)?k?\s*reviews?))/i) || snippet.match(/★\s*([1-5]\.\d)/);
-    const rating = ratingMatch ? parseFloat(ratingMatch[1]) : undefined;
-
-    const reviewMatch = snippet.match(/([\d,]+(?:\.\d+)?k?)\s*reviews?/i);
-    let reviewCount: number | undefined;
-    if (reviewMatch) {
-      const raw = reviewMatch[1].replace(/,/g, "");
-      reviewCount = raw.endsWith("k") ? Math.round(parseFloat(raw) * 1000) : parseInt(raw);
-    }
-
-    const priceRange = snippet.match(/(\${1,4})/)?.[1];
-    const neighborhood = snippet.match(/·\s*([A-Z][a-zA-Z\s]{2,25})(?:\s*·|\s*$)/m)?.[1]?.trim();
-    const rawTimes = snippet.match(/\d{1,2}:\d{2}\s*(?:AM|PM)/gi) || [];
-    const availableTimes = [...new Set(
-      rawTimes.map((value) => normalizeExtractedTimeLabel(value)).filter(Boolean) as string[]
-    )];
-
-    results.push({
-      alias,
-      name,
-      neighborhood,
-      rating,
-      reviewCount,
-      priceRange,
-      cuisineCategories: [],
-      availableTimes,
-      reservationUrl,
-      businessUrl,
     });
   }
 
@@ -2304,10 +1947,9 @@ function toTwelveHourLabel(time24: string): string {
 // ─── Batch geocode verified results ───
 
 async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams): Promise<void> {
-  // Prefer the user's true browser coords; fall back to city centroid.
-  const refLat = params.userLat || params.lat || 0;
-  const refLng = params.userLng || params.lng || 0;
-  if (!refLat || !refLng) {
+  const cityLat = params.lat || 0;
+  const cityLng = params.lng || 0;
+  if (!cityLat || !cityLng) {
     console.log("No search coordinates for distance calculation, skipping geocode");
     return;
   }
@@ -2317,6 +1959,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 
   // Single geocoding helper: tries up to 4 strategies, returns on first success
   async function geocodeOne(r: Restaurant): Promise<void> {
+    if (r.platform === "yelp") return; // Yelp has API-provided distance
     if (r.distanceMiles != null) return; // Already geocoded
 
     const cleanedName = r.name
@@ -2339,7 +1982,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
         const lat = parseFloat(data[0].lat);
         const lng = parseFloat(data[0].lon);
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
-        const dist = +haversine(refLat, refLng, lat, lng).toFixed(1);
+        const dist = +haversine(cityLat, cityLng, lat, lng).toFixed(1);
         if (dist > 200) {
           console.log(`  Geocode sanity fail (${label}) ${r.name}: ${dist} mi — discarding`);
           return false;
@@ -2389,19 +2032,19 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
     console.log(`  Nominatim miss for ${r.name} — will use AI coordinates`);
   }
 
-  const toGeocode = results.filter(r => r.distanceMiles == null);
+  const toGeocode = results.filter(r => r.platform !== "yelp");
   if (toGeocode.length === 0) return;
 
   console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim...`);
 
-  // Fire in batches of 8 with 25ms stagger between batches
-  const BATCH_SIZE = 8;
+  // Fire in batches of 4 with 40ms stagger between batches
+  const BATCH_SIZE = 4;
   const geocodePromises: Promise<void>[] = [];
   for (let i = 0; i < toGeocode.length; i++) {
     const batchIndex = Math.floor(i / BATCH_SIZE);
     geocodePromises.push(
       new Promise<void>(async (resolve) => {
-        await new Promise(w => setTimeout(w, batchIndex * 25));
+        await new Promise(w => setTimeout(w, batchIndex * 40));
         await geocodeOne(toGeocode[i]);
         resolve();
       })
@@ -2493,7 +2136,7 @@ ${list}`,
 // Clean transient fields before returning results
 function cleanTransientFields(results: Restaurant[]): Restaurant[] {
   return results.map(r => {
-    const { _address, _addressCity, _yelpCrossplatformGuess, _yelpCategories, _yelpSearchPageVerified, _yelpSearchVerified, _xplatMarkdown, _xplatHtml, _xplatMeta, _deferredCuisineTokens, _deferredIsDishSearch, ...clean } = r as any;
+    const { _address, _addressCity, _yelpCrossplatformGuess, _yelpCategories, _yelpSearchPageVerified, _yelpSearchVerified, _xplatMarkdown, _xplatHtml, _xplatMeta, ...clean } = r as any;
     return clean;
   });
 }
@@ -2517,65 +2160,9 @@ const NO_AVAILABILITY_SIGNALS = [
   "temporarily unavailable",
 ];
 
-// ─── Pre-verification relevance scoring ───
-// Ranks candidates by name/URL relevance to search cuisine BEFORE expensive scraping.
-// Obvious mismatches (Thai restaurant for "sushi") get sorted to the end so they're
-// only checked if budget remains.
-const CUISINE_NAME_INDICATORS: Record<string, string[]> = {
-  sushi: ["sushi", "japanese", "omakase", "ramen", "izakaya", "hibachi", "teppanyaki", "poke", "yakitori", "tempura", "udon", "sashimi", "maki", "nigiri", "robata"],
-  japanese: ["sushi", "japanese", "omakase", "ramen", "izakaya", "hibachi", "teppanyaki", "yakitori", "tempura", "udon", "robata"],
-  italian: ["italian", "pizza", "pasta", "trattoria", "ristorante", "osteria", "pizzeria"],
-  mexican: ["mexican", "taco", "taqueria", "cantina", "burrito", "enchilada"],
-  thai: ["thai", "pad thai", "tom yum", "bangkok"],
-  chinese: ["chinese", "dim sum", "szechuan", "sichuan", "cantonese", "wok", "dumpling"],
-  indian: ["indian", "curry", "tandoori", "masala", "biryani", "naan"],
-  korean: ["korean", "bbq", "bibimbap", "kimchi", "bulgogi"],
-  seafood: ["seafood", "fish", "oyster", "crab", "lobster", "shrimp", "clam"],
-  steak: ["steak", "steakhouse", "chophouse", "prime", "wagyu", "filet"],
-  french: ["french", "bistro", "brasserie", "crêpe", "patisserie"],
-  mediterranean: ["mediterranean", "greek", "hummus", "falafel", "kebab"],
-};
-
-// Negative indicators — if the restaurant name contains these AND the cuisine is NOT this type,
-// it's likely a mismatch (e.g., "Paya Thai" when searching for sushi)
-const NEGATIVE_CUISINE_INDICATORS: Record<string, string[]> = {
-  thai: ["thai", "bangkok", "pad thai"],
-  vietnamese: ["vietnamese", "pho", "banh mi", "viet"],
-  indian: ["indian", "curry house", "tandoori", "masala"],
-  mexican: ["mexican", "taqueria", "cantina"],
-  ethiopian: ["ethiopian", "habesha"],
-};
-
-function scoreNameRelevance(name: string, url: string, cuisine: string, cuisineType: string, dishKeyword: string): number {
-  const lower = `${name} ${url}`.toLowerCase();
-  const searchTerms = [cuisine, cuisineType, dishKeyword].filter(Boolean).map(s => s.toLowerCase());
-  if (searchTerms.length === 0) return 0; // no cuisine filter = all relevant
-  
-  // Check for positive indicators
-  let score = 0;
-  for (const term of searchTerms) {
-    const indicators = CUISINE_NAME_INDICATORS[term] || [term];
-    for (const ind of indicators) {
-      if (lower.includes(ind)) { score += 2; break; }
-    }
-  }
-  
-  // Check for negative indicators (penalize obvious mismatches)
-  const primaryCuisine = (cuisineType || cuisine || "").toLowerCase();
-  for (const [negCuisine, negTerms] of Object.entries(NEGATIVE_CUISINE_INDICATORS)) {
-    if (primaryCuisine.includes(negCuisine)) continue; // this IS the searched cuisine
-    for (const neg of negTerms) {
-      if (lower.includes(neg)) { score -= 3; break; }
-    }
-  }
-  
-  return score;
-}
-
 function selectCandidatesForVerification(
   candidates: Restaurant[],
-  maxCandidates: number,
-  params?: SearchParams
+  maxCandidates: number
 ): Restaurant[] {
   const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp"];
   const buckets = {
@@ -2584,33 +2171,22 @@ function selectCandidatesForVerification(
     yelp: candidates.filter((c) => c.platform === "yelp"),
   };
 
-  // Proportional allocation: distribute slots based on candidate volume per platform.
-  // OpenTable uses stealth proxy — allow more candidates since some will still fail.
+  // Proportional allocation: distribute slots based on candidate volume per platform
   const total = candidates.length || 1;
-  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 5, yelp: 10 };
-  // Pre-verification relevance sorting: rank candidates by name/URL relevance so
-  // obvious matches get verified first and mismatches only get checked if budget remains
-  if (params) {
-    for (const platform of platformOrder) {
-      buckets[platform] = buckets[platform]
-        .map(c => ({ c, score: scoreNameRelevance(c.name, c.platformUrl, params.cuisine || "", params.cuisineType || "", params.dishKeyword || "") }))
-        .sort((a, b) => b.score - a.score)
-        .map(x => x.c);
-    }
-  }
-
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
     const raw = Math.round((buckets[platform].length / total) * maxCandidates);
-    quotas[platform] = Math.min(raw, hardCaps[platform], buckets[platform].length);
+    // Cap quota to actual bucket size; Yelp capped at 6 due to waitFor latency cost
+    const platformCap = platform === "yelp" ? Math.min(raw, 6) : raw;
+    quotas[platform] = Math.min(platformCap, buckets[platform].length);
     assigned += quotas[platform];
   }
   // Distribute any remaining slots (due to rounding or capped buckets) round-robin
   let remaining = maxCandidates - assigned;
   for (const platform of platformOrder) {
     if (remaining <= 0) break;
-    const canAdd = Math.min(buckets[platform].length, hardCaps[platform]) - quotas[platform];
+    const canAdd = buckets[platform].length - quotas[platform];
     if (canAdd > 0) {
       const add = Math.min(canAdd, remaining);
       quotas[platform] += add;
@@ -2633,13 +2209,9 @@ async function verifyAvailability(
   params: SearchParams,
   firecrawlKey: string,
   amenityTerms: string[] = [],
-  globalStartTime?: number,
-  pools?: ConcurrencyPools
+  globalStartTime?: number
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
-
-  // Global elapsed-time guard: skip candidates if we're nearing the 150s edge function limit
-  const VERIFY_DEADLINE_MS = 70_000; // stop starting new scrapes after 70s elapsed
 
   // Steel.dev concurrency limiter (hobby tier: be conservative)
   let steelActiveCount = 0;
@@ -2658,39 +2230,221 @@ async function verifyAvailability(
     if (next) { steelActiveCount++; next(); }
   };
 
-  // Use global shared pools (passed from handler) or create local fallback
-  const acquireFastSlot = pools?.acquireFast ?? (() => Promise.resolve());
-  const releaseFastSlot = pools?.releaseFast ?? (() => {});
-  const acquireOtSlot = pools?.acquireOt ?? (() => Promise.resolve());
-  const releaseOtSlot = pools?.releaseOt ?? (() => {});
-  // Per-provider timeout counters for diagnostics
-  const timeoutCounts: Record<string, number> = { resy: 0, opentable: 0, yelp: 0 };
-  // Per-provider success/fail/skip counters for comprehensive diagnostics
-  const diagCounts: Record<string, { success: number; failed: number; blocked: number; timeout: number; noSlots: number; irrelevant: number; skipped: number }> = {
-    resy: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
-    opentable: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
-    yelp: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
-  };
-  // OT consecutive failure counter — diagnostic only, not a hard gate
-  let otConsecutiveFailures = 0;
-
   // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
      try {
-       // Check global elapsed time before starting this candidate
-       if (globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS) {
-         console.log(`⏱ Skipping ${r.name} [${r.platform}] — global deadline exceeded (${Math.round((Date.now() - globalStartTime)/1000)}s)`);
-         diagCounts[r.platform].skipped++;
-         return null;
-       }
-
        const isYelp = r.platform === "yelp";
+
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
 
-      // ── YELP: Firecrawl reservation-page scrape ──
+      // ── YELP: Steel.dev stealth browser scrape ──
+      // Firecrawl can't bypass Yelp's DataDome. Use Steel.dev CDP for Yelp.
       let yelpSteelHtml = "";
       let yelpHasConcreteSlotEvidence = false;
+       if (isYelp) {
+        await acquireSteelSlot();
+        const steelApiKey = Deno.env.get("STEEL_API_KEY");
+        if (!steelApiKey) {
+          releaseSteelSlot();
+          console.log(`✗ ${r.name} [yelp] — skipped: STEEL_API_KEY not configured`);
+          return null;
+        }
+        try {
+          console.log(`  ${r.name} [yelp] — starting Steel.dev stealth session for: ${r.platformUrl}`);
+          // 1. Create session via Steel REST API
+          const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
+            method: "POST",
+            headers: {
+              "steel-api-key": steelApiKey,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              useProxy: false,
+              solveCaptcha: false,
+            }),
+          });
+          if (!sessionResp.ok) {
+            const errText = await sessionResp.text().catch(() => "");
+            console.log(`✗ ${r.name} [yelp] — Steel session create failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
+            releaseSteelSlot();
+            return null;
+          }
+          const sessionData = await sessionResp.json();
+          const steelSessionId = sessionData.id;
+          if (!steelSessionId) {
+            console.log(`✗ ${r.name} [yelp] — Steel session missing id`);
+            releaseSteelSlot();
+            return null;
+          }
+
+          // 2. Connect via CDP WebSocket
+          const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
+          const ws = new WebSocket(connectUrl);
+          let cdpId = 1;
+          const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+          let cdpSessionId: string | null = null;
+
+          const cdpSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
+            return new Promise((resolve, reject) => {
+              const id = cdpId++;
+              pending.set(id, { resolve, reject });
+              const msg: Record<string, unknown> = { id, method, params };
+              if (cdpSessionId) msg.sessionId = cdpSessionId;
+              ws.send(JSON.stringify(msg));
+              setTimeout(() => {
+                if (pending.has(id)) {
+                  pending.delete(id);
+                  reject(new Error(`CDP timeout: ${method}`));
+                }
+              }, 30000);
+            });
+          };
+
+          await new Promise<void>((resolve, reject) => {
+            ws.onopen = () => resolve();
+            ws.onerror = (e) => reject(e);
+            setTimeout(() => reject(new Error("WS connect timeout")), 15000);
+          });
+
+          ws.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(typeof event.data === "string" ? event.data : "{}");
+              if (msg.id && pending.has(msg.id)) {
+                const p = pending.get(msg.id)!;
+                pending.delete(msg.id);
+                if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
+                else p.resolve(msg.result);
+              }
+            } catch (_) { /* ignore parse errors */ }
+          };
+
+          // 3. Create a new page target and attach to it with flatten=true
+          const targetResult = await cdpSend("Target.createTarget", { url: "about:blank" });
+          const targetId = targetResult?.targetId;
+          if (!targetId) throw new Error("Failed to create browser target");
+
+          const attachResult = await cdpSend("Target.attachToTarget", { targetId, flatten: true });
+          cdpSessionId = attachResult?.sessionId;
+          if (!cdpSessionId) throw new Error("Failed to attach to target");
+
+          // 4. Navigate to the Yelp reservation URL
+          await cdpSend("Page.enable");
+          await cdpSend("Runtime.enable");
+          await cdpSend("Page.navigate", { url: r.platformUrl });
+
+          // Wait for page load
+          await new Promise(resolve => setTimeout(resolve, 10000));
+
+          // 5. Scroll down to trigger lazy-loaded reservation widget
+          await cdpSend("Runtime.evaluate", {
+            expression: "window.scrollBy(0, 1500); 'scrolled'",
+            returnByValue: true,
+          });
+          await new Promise(resolve => setTimeout(resolve, 3000));
+
+          // Try clicking reservation-related elements
+          const clickResult = await cdpSend("Runtime.evaluate", {
+            expression: `
+              (function() {
+                const btns = document.querySelectorAll('button, a, [role="button"]');
+                for (const b of btns) {
+                  const text = (b.textContent || '').toLowerCase();
+                  if (text.includes('find a table') || text.includes('make a reservation') || text.includes('check availability')) {
+                    b.click();
+                    return 'clicked: ' + text.trim().slice(0, 50);
+                  }
+                }
+                return 'no reservation button found';
+              })()
+            `,
+            returnByValue: true,
+          }).catch(() => ({ result: { value: "click failed" } }));
+          console.log(`  ${r.name} [yelp] click result: ${JSON.stringify(clickResult?.result?.value)}`);
+
+          // Wait for widget to render after click
+          await new Promise(resolve => setTimeout(resolve, 6000));
+
+          // 6. Extract the full page HTML
+          const docResult = await cdpSend("Runtime.evaluate", {
+            expression: "document.documentElement.outerHTML",
+            returnByValue: true,
+          });
+          yelpSteelHtml = docResult?.result?.value || "";
+          console.log(`  ${r.name} [yelp] Steel extracted ${yelpSteelHtml.length} chars of HTML`);
+          console.log(`  [DEBUG] ${r.name} [yelp] Steel HTML (first 2000 chars):\n${yelpSteelHtml.slice(0, 2000)}`);
+
+          // Check final URL (redirect detection)
+          const locationResult = await cdpSend("Runtime.evaluate", {
+            expression: "window.location.href",
+            returnByValue: true,
+          });
+          const finalUrl = locationResult?.result?.value || "";
+
+          // Close session
+          try { ws.close(); } catch (_) {}
+          // Release Steel session via API
+          try {
+            await fetch(`https://api.steel.dev/v1/sessions/${steelSessionId}/release`, {
+              method: "POST",
+              headers: { "steel-api-key": steelApiKey },
+            });
+          } catch (_) {}
+
+          // Check for redirect away from /reservations/
+          if (finalUrl && !finalUrl.includes("/reservations/")) {
+            console.log(`✗ ${r.name} [yelp] — redirected to: ${finalUrl}, skipping`);
+            releaseSteelSlot();
+            return null;
+          }
+
+          // 7. Parse HTML for time slot buttons
+          const timeButtonRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
+          const renderedTimes: string[] = [];
+          let tbMatch;
+          while ((tbMatch = timeButtonRegex.exec(yelpSteelHtml)) !== null) {
+            renderedTimes.push(tbMatch[1].trim());
+          }
+
+          // Also check for standalone time text lines
+          const textContent = yelpSteelHtml.replace(/<[^>]+>/g, "\n");
+          const textLines = textContent.split("\n");
+          let standaloneTimeLines = 0;
+          for (const line of textLines) {
+            if (/^\s*\d{1,2}:\d{2}\s*(AM|PM)\s*$/i.test(line)) standaloneTimeLines++;
+          }
+
+          const reservationKeywords = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
+          const hasReservationSection = reservationKeywords.test(yelpSteelHtml);
+
+          yelpHasConcreteSlotEvidence = renderedTimes.length >= 2 || standaloneTimeLines >= 2 || (hasReservationSection && (renderedTimes.length >= 1 || standaloneTimeLines >= 1));
+
+          console.log(`  ${r.name} [yelp] Steel widget check: ${renderedTimes.length} button times, ${standaloneTimeLines} standalone time lines, reservationSection=${hasReservationSection}, evidence=${yelpHasConcreteSlotEvidence}`);
+          if (renderedTimes.length > 0) {
+            console.log(`  ${r.name} [yelp] Steel found times: ${renderedTimes.slice(0, 10).join(", ")}`);
+          }
+
+          if (!yelpHasConcreteSlotEvidence) {
+            console.log(`✗ ${r.name} [yelp] — rejected: Steel stealth browser found no concrete slot evidence`);
+            releaseSteelSlot();
+            return null;
+          }
+          releaseSteelSlot();
+        } catch (steelErr: any) {
+          releaseSteelSlot();
+          console.log(`✗ ${r.name} [yelp] — Steel error: ${steelErr.message || steelErr}`);
+          return null;
+        }
+      }
+
+      // ── Non-Yelp: Firecrawl scrape (Resy / OpenTable) ──
+      const scrapePayload: Record<string, unknown> = {
+          url: r.platformUrl,
+          formats: isOT ? ["markdown", "html"] : ["markdown"],
+          onlyMainContent: false,
+          ...(isOT && { waitFor: 3500 }),
+        };
+
       let markdown = "";
       let html = "";
       let links: string[] = [];
@@ -2698,141 +2452,67 @@ async function verifyAvailability(
       let data: any = null;
 
       if (isYelp) {
-        await acquireFastSlot();
+        // For Yelp, convert Browserbase HTML to pseudo-markdown for downstream parsing
+        const textContent = yelpSteelHtml.replace(/<[^>]+>/g, "\n").replace(/\n{3,}/g, "\n\n");
+        markdown = textContent;
+        html = yelpSteelHtml;
+      } else {
+        // Firecrawl for Resy/OT
         const scrapeAbort = new AbortController();
-        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 15_000);
-        let yelpResp: Response;
+        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
+        let resp: Response;
         try {
-          yelpResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+          resp = await fetch(`${FIRECRAWL_API}/scrape`, {
             method: "POST",
             headers: {
               Authorization: `Bearer ${firecrawlKey}`,
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({
-              url: r.platformUrl,
-              formats: ["markdown", "html"],
-              onlyMainContent: false,
-              waitFor: 5000,
-            }),
+            body: JSON.stringify(scrapePayload),
             signal: scrapeAbort.signal,
           });
         } catch (fetchErr: any) {
           clearTimeout(scrapeTimer);
-          console.log(`✗ ${r.name} [yelp] — Firecrawl fetch error: ${fetchErr.name === "AbortError" ? "timeout" : fetchErr}`);
-          releaseFastSlot();
+          if (fetchErr.name === "AbortError") {
+            console.log(`Scrape timeout (25s abort) for ${r.name} [${r.platform}]`);
+          } else {
+            console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+          }
           return null;
         }
         clearTimeout(scrapeTimer);
 
-        if (!yelpResp.ok) {
-          const errBody = await yelpResp.text().catch(() => "");
-          console.log(`✗ ${r.name} [yelp] — Firecrawl scrape failed (${yelpResp.status}): ${errBody.slice(0, 300)}`);
-          releaseFastSlot();
-          return null;
-        }
-        releaseFastSlot();
-
-        const yelpData = await yelpResp.json();
-        const yelpMarkdown = extractFirecrawlMarkdown(yelpData);
-        const yelpHtml = extractFirecrawlHtml(yelpData);
-        markdown = yelpMarkdown;
-        html = yelpHtml;
-        yelpSteelHtml = yelpHtml;
-
-        const lowerYelp = `${yelpMarkdown}\n${yelpHtml}`.toLowerCase();
-        const reservationKeywords = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
-        const buttonOrInlineTimes = [...new Set((`${yelpMarkdown}\n${yelpHtml}`.match(/\b\d{1,2}:\d{2}\s*(?:AM|PM)\b/gi) || []).map(v => v.trim()))];
-        yelpHasConcreteSlotEvidence = reservationKeywords.test(lowerYelp) || buttonOrInlineTimes.length >= 2;
-        console.log(`  ${r.name} [yelp] Firecrawl evidence: times=${buttonOrInlineTimes.length}, reservationSection=${reservationKeywords.test(lowerYelp)}, evidence=${yelpHasConcreteSlotEvidence}`);
-      }
-
-      // ── Non-Yelp: Firecrawl scrape (Resy / OpenTable) ──
-      // OT gets both markdown + HTML so the HTML slot parser can run as fallback
-      if (!isYelp) {
-        // ── Resy & OT: Firecrawl scrape with cascade for OT ──
-        const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
-          const scrapeAbort = new AbortController();
-          const scrapeTimer = setTimeout(() => scrapeAbort.abort(), timeoutMs);
+        // Retry once on 408
+        if (resp.status === 408) {
+          const errBody408 = await resp.text().catch(() => "(no body)");
+          console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
+          const retryAbort = new AbortController();
+          const retryTimer = setTimeout(() => retryAbort.abort(), 20_000);
           try {
-            const fcResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+            resp = await fetch(`${FIRECRAWL_API}/scrape`, {
               method: "POST",
               headers: {
                 Authorization: `Bearer ${firecrawlKey}`,
                 "Content-Type": "application/json",
               },
-              body: JSON.stringify(payload),
-              signal: scrapeAbort.signal,
+              body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
+              signal: retryAbort.signal,
             });
-            clearTimeout(scrapeTimer);
-            return fcResp;
-          } catch (err: any) {
-            clearTimeout(scrapeTimer);
-            if (err.name === "AbortError") return { aborted: true };
-            throw err;
+          } catch (retryFetchErr: any) {
+            clearTimeout(retryTimer);
+            console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}]: ${retryFetchErr.name === "AbortError" ? "timeout" : retryFetchErr}`);
+            return null;
           }
-        };
-
-        // OT: single direct stealth scrape. Akamai blocks all non-proxy attempts so a
-        // light-first cascade only wastes time budget. Resy needs no proxy.
-        const otPayload: Record<string, unknown> = {
-          url: r.platformUrl,
-          formats: ["markdown", "html"],
-          onlyMainContent: false,
-          actions: [{ type: "wait", milliseconds: 5000 }],
-          timeout: 25000,
-          proxy: "stealth",
-        };
-        const resyPayload: Record<string, unknown> = {
-          url: r.platformUrl,
-          formats: ["markdown"],
-          onlyMainContent: false,
-        };
-
-        if (isOT) {
-          await acquireOtSlot();
-        } else {
-          await acquireFastSlot();
+          clearTimeout(retryTimer);
         }
-        let resp: Response | null = null;
 
-        try {
-          const scrapePayloadFinal = isOT ? otPayload : resyPayload;
-          const clientTimeout = isOT ? 20_000 : 15_000;
-          const attempt = await doScrape(clientTimeout, scrapePayloadFinal);
-
-          if ("aborted" in attempt) {
-            timeoutCounts[r.platform]++;
-            diagCounts[r.platform].timeout++;
-            if (isOT) otConsecutiveFailures++;
-            console.log(`Scrape timeout for ${r.name} [${r.platform}]`);
-            if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
-            return null;
-          }
-
-          resp = attempt as Response;
-
-          if (resp.status === 408 || !resp.ok) {
-            const errBody = await resp.text().catch(() => "(no body)");
-            console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
-            diagCounts[r.platform].failed++;
-            if (isOT) otConsecutiveFailures++;
-            if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
-            return null;
-          }
-        } catch (fetchErr: any) {
-          console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
-          diagCounts[r.platform].failed++;
-          if (isOT) otConsecutiveFailures++;
-          if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
+        if (!resp.ok) {
+          const errBody = await resp.text().catch(() => "(no body)");
+          console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
           return null;
         }
-        if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
 
-        // Diagnostic only — reset on success
-        if (isOT) otConsecutiveFailures = 0;
-
-        data = await resp!.json();
+        data = await resp.json();
         markdown = extractFirecrawlMarkdown(data);
         html = extractFirecrawlHtml(data);
         links = extractFirecrawlLinks(data);
@@ -2841,14 +2521,13 @@ async function verifyAvailability(
 
       if (!markdown && !html && !jsonData) {
         console.log(`No content for ${r.name} [${r.platform}]`);
-        diagCounts[r.platform].failed++;
         return null;
       }
 
       // Extract structured data from Firecrawl JSON extraction (if present)
       
       // Extract address from markdown/metadata (all platforms)
-      if (!r._address) {
+      if (r.platform !== "yelp" && !r._address) {
         // Try OG metadata first (OpenTable populates these)
         const meta2 = data?.data?.metadata || data?.metadata;
         const ogStreet = meta2?.["og:street-address"] || meta2?.["street-address"];
@@ -2998,16 +2677,9 @@ async function verifyAvailability(
       }
       
       if (verifyTokens.length > 0) {
-        const isDishSearch = !!params.dishKeyword;
-        // DEFER cuisine check for OpenTable — OT page scrapes are often too thin
-        // to contain cuisine keywords. Check AFTER slot parsing instead.
-        if (isOT) {
-          // Store tokens for post-slot cuisine check
-          (r as any)._deferredCuisineTokens = verifyTokens;
-          (r as any)._deferredIsDishSearch = isDishSearch;
-        } else {
         const restaurantName = (r.name || "").toLowerCase();
         const pageText = `${lower} ${restaurantName}`;
+        const isDishSearch = !!params.dishKeyword;
 
         const tokenMatches = (text: string, token: string): boolean => {
           if (text.includes(token)) return true;
@@ -3084,17 +2756,14 @@ async function verifyAvailability(
             ? `dish="${params.dishKeyword}" OR cuisineType="${params.cuisineType}"`
             : cuisineTokens.join(", ");
           console.log(`✗ ${r.name} [${r.platform}] — failed cuisine relevance (${isDishSearch ? "dish" : "category"}) for: ${label} (checked: ${verifyTokens.join(", ")})`);
-          diagCounts[r.platform].irrelevant++;
           return null;
         }
-        } // end non-OT cuisine check
       }
 
       // RELEVANCE CHECK: If user searched for an amenity (rooftop, patio, etc.),
       // verify the restaurant page actually mentions it. Zero extra latency — uses already-scraped markdown.
       if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(markdown, amenityTerms)) {
         console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${amenityTerms.join(", ")}`);
-        diagCounts[r.platform].irrelevant++;
         return null;
       }
 
@@ -3172,29 +2841,50 @@ async function verifyAvailability(
       };
 
        if (isYelp) {
+        // Extract times from Browserbase HTML — look for time patterns in button/link elements
+        // and standalone time lines from the rendered page
         const timeRegex = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
-        const source = `${markdown}\n${html}`;
-        const allTimesInSource = source.match(timeRegex) || [];
-
+        const allTimesInHtml = (yelpSteelHtml || "").match(timeRegex) || [];
+        
+        // Deduplicate and filter out operating hours patterns
+        // Operating hours typically appear as ranges "5:00 PM - 9:00 PM"
+        // Reservation buttons appear as standalone times
         const hoursRangeRegex = /\d{1,2}:\d{2}\s*(?:AM|PM)\s*[-–—]\s*\d{1,2}:\d{2}\s*(?:AM|PM)/gi;
-        const hoursRanges = source.match(hoursRangeRegex) || [];
+        const hoursRanges = (yelpSteelHtml || "").match(hoursRangeRegex) || [];
         const hoursTimesSet = new Set<string>();
         for (const range of hoursRanges) {
           const rangeMatches = range.match(timeRegex) || [];
           for (const t of rangeMatches) hoursTimesSet.add(t.trim().toUpperCase());
         }
 
-        for (const rawTime of allTimesInSource) {
-          const trimmed = rawTime.trim();
-          if (hoursTimesSet.has(trimmed.toUpperCase())) continue;
-          const parsed = parseTimeStr(trimmed);
+        // Use button-context times (from the Browserbase evidence check above)
+        const buttonTimeRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
+        let btMatch;
+        while ((btMatch = buttonTimeRegex.exec(yelpSteelHtml || "")) !== null) {
+          const rawTime = btMatch[1].trim();
+          if (hoursTimesSet.has(rawTime.toUpperCase())) continue; // skip operating hours times
+          const parsed = parseTimeStr(rawTime);
           if (parsed && !seenTimes.has(parsed.time)) {
             seenTimes.add(parsed.time);
             foundTimes.push(parsed);
           }
         }
 
-        console.log(`  ${r.name} [yelp]: Firecrawl extracted times: ${foundTimes.length} — ${foundTimes.map(t => t.time).slice(0, 8).join(", ")}`);
+        // Also check standalone time text lines
+        const textLines = (yelpSteelHtml || "").replace(/<[^>]+>/g, "\n").split("\n");
+        for (const line of textLines) {
+          const trimmed = line.trim();
+          if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
+            if (hoursTimesSet.has(trimmed.toUpperCase())) continue;
+            const parsed = parseTimeStr(trimmed);
+            if (parsed && !seenTimes.has(parsed.time)) {
+              seenTimes.add(parsed.time);
+              foundTimes.push(parsed);
+            }
+          }
+        }
+
+        console.log(`  ${r.name} [yelp]: Browserbase extracted times: ${foundTimes.length} — ${foundTimes.map(t => t.time).slice(0, 8).join(", ")}`);
 
         if (!yelpHasConcreteSlotEvidence) {
           foundTimes = [];
@@ -3285,38 +2975,89 @@ async function verifyAvailability(
       };
       
       if (isOT) {
-        const otVerifyStart = Date.now();
-        // Early exit: if page looks blocked (tiny markdown = anti-bot), skip immediately
-        const mdLen = markdown.length;
-        const looksBlocked = mdLen < 300 || /access denied|permission|reference #/i.test(markdown);
-        if (looksBlocked && !markdown.toLowerCase().includes("select a time")) {
-          console.log(`✗ ${r.name} [opentable] — blocked (mdLen=${mdLen}), skipping`);
-          return null;
-        }
-        
         // First pass: parse OT slots from markdown
         foundTimes = parseOTSlots(markdown);
         // Populate seenTimes from markdown slots BEFORE HTML merge to avoid dupes
         foundTimes.forEach(t => seenTimes.add(t.time));
         
-        const hadSelectSection = markdown.toLowerCase().includes("select a time");
+        // Also try HTML parsing for more complete extraction
+        const scrapeHtml = data?.data?.html || data?.html || "";
+        if (scrapeHtml) {
+          const htmlSlots = parseOTSlotsFromHTML(scrapeHtml);
+          for (const slot of htmlSlots) {
+            if (!seenTimes.has(slot.time)) {
+              seenTimes.add(slot.time);
+              foundTimes.push(slot);
+            }
+          }
+        }
+        
+        const hadSelectSection = markdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
         
         if (foundTimes.length > 0) {
-          console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from md: ${foundTimes.map(t=>t.time).join(", ")}`);
+          console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
         }
         
-        // Second pass: try HTML parser if markdown had no slots
-        if (foundTimes.length === 0 && html) {
-          const htmlSlots = parseOTSlotsFromHTML(html);
-          for (const s of htmlSlots) {
-            if (!seenTimes.has(s.time)) { seenTimes.add(s.time); foundTimes.push(s); }
-          }
-          if (foundTimes.length > 0) {
-            console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from HTML: ${foundTimes.map(t=>t.time).join(", ")}`);
+        // Two-pass retry: re-scrape with waitFor:8000 ONLY if no slots found AND no "Select a time" section
+        // (first pass already uses waitFor:5000 which should capture all rendered slots)
+        if (foundTimes.length === 0 && !hadSelectSection) {
+          console.log(`  ${r.name} [opentable]: no "Select a time" section on first pass — retrying with waitFor: 8000ms`);
+          try {
+            const otRetryAbort = new AbortController();
+            const otRetryTimer = setTimeout(() => otRetryAbort.abort(), 25_000);
+            const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${firecrawlKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                url: r.platformUrl,
+                formats: ["markdown", "html"],
+                onlyMainContent: false,
+                waitFor: 5500,
+              }),
+              signal: otRetryAbort.signal,
+            });
+            clearTimeout(otRetryTimer);
+            
+            if (retryResp.ok) {
+              const retryData = await retryResp.json();
+              const retryMarkdown = extractFirecrawlMarkdown(retryData);
+              const retryHtml = retryData?.data?.html || retryData?.html || "";
+              if (retryMarkdown || retryHtml) {
+                // Parse both markdown and HTML from retry
+                const retryMdSlots = retryMarkdown ? parseOTSlots(retryMarkdown) : [];
+                const retryHtmlSlots = retryHtml ? parseOTSlotsFromHTML(retryHtml) : [];
+                const allRetrySlots = [...retryMdSlots];
+                const retrySeenSet = new Set(retryMdSlots.map(s => s.time));
+                for (const s of retryHtmlSlots) {
+                  if (!retrySeenSet.has(s.time)) { retrySeenSet.add(s.time); allRetrySlots.push(s); }
+                }
+                
+                if (allRetrySlots.length > 0) {
+                  for (const slot of allRetrySlots) {
+                    if (!seenTimes.has(slot.time)) {
+                      seenTimes.add(slot.time);
+                      foundTimes.push(slot);
+                    }
+                  }
+                  console.log(`  ${r.name} [opentable] RETRY SUCCESS: now have ${foundTimes.length} total times: ${foundTimes.map(t=>t.time).join(", ")}`);
+                  if (retryMarkdown) bookingMarkdown = retryMarkdown;
+                } else {
+                  console.log(`  ${r.name} [opentable] RETRY: still no additional slots after waitFor`);
+                  if (retryMarkdown) bookingMarkdown = retryMarkdown;
+                }
+              }
+            } else {
+              console.log(`  ${r.name} [opentable] RETRY: scrape failed (${retryResp.status})`);
+            }
+          } catch (retryErr: any) {
+            console.log(`  ${r.name} [opentable] RETRY error: ${retryErr.name === "AbortError" ? "timeout (25s)" : retryErr}`);
           }
         }
         
-        // If still no OT-specific slots found, strip dropdown noise and fall through to generic regex
+        // Step 3: If still nothing, strip dropdown noise and fall through to generic regex
         if (foundTimes.length === 0) {
           const lines = bookingMarkdown.split("\n");
           const cleanedLines = lines.filter(line => {
@@ -3324,10 +3065,10 @@ async function verifyAvailability(
             return !timeMatches || timeMatches.length < 10;
           });
           bookingMarkdown = cleanedLines.join("\n");
-          console.log(`  ${r.name} [opentable]: no slots from "Select a time", falling through to generic regex (dropdown noise stripped) | selectSection=${hadSelectSection}, mdLen=${mdLen}, blocked=${looksBlocked}`);
+          console.log(`  ${r.name} [opentable]: no slots after retry, falling through to generic regex (dropdown noise stripped)`);
         }
         
-        // Apply ±2h OT time window
+        // Step 4: Apply ±2h OT time window
         if (foundTimes.length > 0) {
           const otWindowStart = windowStart;
           const otWindowEnd = windowEnd;
@@ -3337,39 +3078,11 @@ async function verifyAvailability(
           if (otFiltered.length > 0) {
             otFiltered.sort((a, b) => Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes));
             const top5 = otFiltered.slice(0, 5).sort((a, b) => a.minutes - b.minutes);
-            
-            // Deferred cuisine check for OT: now that we have real slots, apply cuisine filter
-            const deferredTokens = (r as any)._deferredCuisineTokens as string[] | undefined;
-            if (deferredTokens && deferredTokens.length > 0) {
-              const otName = (r.name || "").toLowerCase();
-              const otPageText = `${lower} ${otName}`;
-              const otIsDish = (r as any)._deferredIsDishSearch as boolean;
-              // Relaxed check for OT: name match OR any token in page OR just accept if OT page is thin
-              const otHasMatch = deferredTokens.some(token => {
-                if (otPageText.includes(token)) return true;
-                const singular = token.endsWith("s") ? token.slice(0, -1) : null;
-                if (singular && otPageText.includes(singular)) return true;
-                const plural = !token.endsWith("s") ? token + "s" : null;
-                if (plural && otPageText.includes(plural)) return true;
-                return false;
-              });
-              // If page is very thin (< 1000 chars), trust the discovery query's relevance
-              if (!otHasMatch && mdLen > 1000) {
-                console.log(`✗ ${r.name} [opentable] — deferred cuisine check failed (${deferredTokens.join(", ")}), ${Date.now() - otVerifyStart}ms`);
-                return null;
-              }
-              if (!otHasMatch) {
-                console.log(`  ${r.name} [opentable]: thin page (${mdLen} chars), trusting discovery relevance`);
-              }
-            }
-            
             r.timeSlots = top5.map(t => ({ time: t.time }));
-            console.log(`✓ Verified ${r.name} [opentable] — ${top5.length} slots in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}): ${top5.map(t => t.time).join(", ")} | ${Date.now() - otVerifyStart}ms`);
-            diagCounts.opentable.success++;
-            otConsecutiveFailures = 0; // reset on success
+            console.log(`✓ Verified ${r.name} [opentable] — ${top5.length} slots in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}): ${top5.map(t => t.time).join(", ")}`);
             return r;
           } else {
-            console.log(`✗ ${r.name} [opentable] — found ${foundTimes.length} slots but none in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}). Found: ${foundTimes.map(t => t.time).join(", ")} | ${Date.now() - otVerifyStart}ms`);
+            console.log(`✗ ${r.name} [opentable] — found ${foundTimes.length} slots but none in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}). Found: ${foundTimes.map(t => t.time).join(", ")}`);
             return null;
           }
         }
@@ -3477,9 +3190,10 @@ async function verifyAvailability(
         }
       }
 
+       // Yelp retry not needed — Browserbase already does full stealth rendering with scroll+click+wait
+
       if (isYelp && foundTimes.length === 0) {
-        console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after Firecrawl extraction`);
-        diagCounts.yelp.noSlots++;
+        console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after direct extract + retry`);
         return null;
       }
 
@@ -3518,7 +3232,6 @@ async function verifyAvailability(
 
         r.timeSlots = matchingTimes.map((t) => ({ time: t.time }));
         console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} ${mealLabel} slots (${windowStart/60|0}:${(windowStart%60).toString().padStart(2,"0")}–${windowEnd/60|0}:${(windowEnd%60).toString().padStart(2,"0")}): ${matchingTimes.map(t => t.time).join(", ")}`);
-        diagCounts[r.platform].success++;
         return r;
       }
 
@@ -3527,8 +3240,7 @@ async function verifyAvailability(
       // OpenTable: Do NOT fabricate fallback times from booking markers.
       // If real slots exist but are outside window, or parser found nothing, reject.
       if (isOT && foundTimes.length === 0) {
-        console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback) | selectSection=${markdown.toLowerCase().includes("select a time")}, mdLen=${markdown.length}, blocked=${markdown.length < 200 || /access denied/i.test(markdown)}`);
-        diagCounts.opentable.noSlots++;
+        console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback)`);
         return null;
       }
 
@@ -3536,7 +3248,6 @@ async function verifyAvailability(
         console.log(`✗ ${r.name} [${r.platform}] — found ${foundTimes.length} slots but none in ${mealLabel} window (found: ${foundTimes.map(t => t.time).join(", ")})`);
       } else {
         console.log(`No time slots for ${r.name} [${r.platform}]`);
-        diagCounts[r.platform].noSlots++;
       }
       return null;
     } catch (err) {
@@ -3544,27 +3255,6 @@ async function verifyAvailability(
       return null;
     }
   }));
-
-  // Diagnostic: per-provider timeout summary (helps spot Firecrawl contention)
-  const totalCands = candidates.length;
-  const platformCands = candidates.reduce<Record<string, number>>((acc, c) => {
-    acc[c.platform] = (acc[c.platform] || 0) + 1; return acc;
-  }, {});
-  const timeoutSummary = Object.entries(timeoutCounts)
-    .filter(([, n]) => n > 0)
-    .map(([p, n]) => `${p}: ${n}/${platformCands[p] || 0}`)
-    .join(", ");
-  if (timeoutSummary) {
-    console.log(`[VERIFY] Scrape timeouts — ${timeoutSummary} (of ${totalCands} total candidates)`);
-  }
-  // Comprehensive per-provider diagnostics
-  for (const p of ["resy", "opentable", "yelp"] as const) {
-    const d = diagCounts[p];
-    const total = platformCands[p] || 0;
-    if (total > 0) {
-      console.log(`[DIAG] ${p}: ${total} candidates → ${d.success} verified, ${d.failed} failed, ${d.blocked} blocked, ${d.timeout} timeout, ${d.noSlots} noSlots, ${d.irrelevant} irrelevant, ${d.skipped} skipped`);
-    }
-  }
 
   return checked.filter(Boolean) as Restaurant[];
 }
@@ -3673,8 +3363,8 @@ const resyAdapter: ProviderAdapter = {
     const raw = await searchFirecrawl(params, keys.firecrawlKey, "resy", amenityTerms);
     return normalizeCandidates("resy", raw, params);
   },
-  async verify(candidates, params, keys, amenityTerms, pools) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime, pools);
+  async verify(candidates, params, keys, amenityTerms) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
 
@@ -3684,19 +3374,18 @@ const opentableAdapter: ProviderAdapter = {
     const raw = await searchFirecrawl(params, keys.firecrawlKey, "opentable", amenityTerms);
     return normalizeCandidates("opentable", raw, params);
   },
-  async verify(candidates, params, keys, amenityTerms, pools) {
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime, pools);
+  async verify(candidates, params, keys, amenityTerms) {
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
 
 const yelpAdapter: ProviderAdapter = {
   platform: "yelp",
   async discover(params, keys, amenityTerms) {
-    const raw = await searchFirecrawl(params, keys.firecrawlKey, "yelp", amenityTerms);
-    return normalizeCandidates("yelp", raw, params);
+    return fetchYelpCandidates(params, keys.firecrawlKey, keys.aiKey, amenityTerms);
   },
-  async verify(candidates, params, keys, amenityTerms, pools) {
+  async verify(candidates, params, keys, amenityTerms) {
     console.log(`Yelp verify: checking ${candidates.length} candidates on reservation pages for real time slots`);
-    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime, pools);
+    return verifyAvailability(candidates, params, keys.firecrawlKey, amenityTerms, keys._startTime);
   },
 };
