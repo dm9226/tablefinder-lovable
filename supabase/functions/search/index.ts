@@ -2597,9 +2597,8 @@ async function verifyAvailability(
       // ── Non-Yelp: Firecrawl scrape (Resy / OpenTable) ──
       const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
-          formats: isOT ? ["markdown", "html"] : ["markdown"],
+          formats: ["markdown"],
           onlyMainContent: false,
-          ...(isOT && { waitFor: 3500 }),
         };
 
       if (!isYelp) {
@@ -3119,89 +3118,21 @@ async function verifyAvailability(
       };
       
       if (isOT) {
+        const otVerifyStart = Date.now();
         // First pass: parse OT slots from markdown
         foundTimes = parseOTSlots(markdown);
         // Populate seenTimes from markdown slots BEFORE HTML merge to avoid dupes
         foundTimes.forEach(t => seenTimes.add(t.time));
         
-        // Also try HTML parsing for more complete extraction
-        const scrapeHtml = data?.data?.html || data?.html || "";
-        if (scrapeHtml) {
-          const htmlSlots = parseOTSlotsFromHTML(scrapeHtml);
-          for (const slot of htmlSlots) {
-            if (!seenTimes.has(slot.time)) {
-              seenTimes.add(slot.time);
-              foundTimes.push(slot);
-            }
-          }
-        }
-        
-        const hadSelectSection = markdown.toLowerCase().includes("select a time") || scrapeHtml.toLowerCase().includes("select a time");
+        const hadSelectSection = markdown.toLowerCase().includes("select a time");
+        const mdLen = markdown.length;
+        const looksBlocked = mdLen < 200 || /access denied|permission|reference #/i.test(markdown);
         
         if (foundTimes.length > 0) {
-          console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
+          console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from md: ${foundTimes.map(t=>t.time).join(", ")}`);
         }
         
-        // Two-pass retry: re-scrape with waitFor:8000 ONLY if no slots found AND no "Select a time" section
-        // (first pass already uses waitFor:5000 which should capture all rendered slots)
-        if (foundTimes.length === 0 && !hadSelectSection) {
-          console.log(`  ${r.name} [opentable]: no "Select a time" section on first pass — retrying with waitFor: 8000ms`);
-          try {
-            const otRetryAbort = new AbortController();
-            const otRetryTimer = setTimeout(() => otRetryAbort.abort(), 30_000);
-            const retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${firecrawlKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                url: r.platformUrl,
-                formats: ["markdown", "html"],
-                onlyMainContent: false,
-                waitFor: 5500,
-              }),
-              signal: otRetryAbort.signal,
-            });
-            clearTimeout(otRetryTimer);
-            
-            if (retryResp.ok) {
-              const retryData = await retryResp.json();
-              const retryMarkdown = extractFirecrawlMarkdown(retryData);
-              const retryHtml = retryData?.data?.html || retryData?.html || "";
-              if (retryMarkdown || retryHtml) {
-                // Parse both markdown and HTML from retry
-                const retryMdSlots = retryMarkdown ? parseOTSlots(retryMarkdown) : [];
-                const retryHtmlSlots = retryHtml ? parseOTSlotsFromHTML(retryHtml) : [];
-                const allRetrySlots = [...retryMdSlots];
-                const retrySeenSet = new Set(retryMdSlots.map(s => s.time));
-                for (const s of retryHtmlSlots) {
-                  if (!retrySeenSet.has(s.time)) { retrySeenSet.add(s.time); allRetrySlots.push(s); }
-                }
-                
-                if (allRetrySlots.length > 0) {
-                  for (const slot of allRetrySlots) {
-                    if (!seenTimes.has(slot.time)) {
-                      seenTimes.add(slot.time);
-                      foundTimes.push(slot);
-                    }
-                  }
-                  console.log(`  ${r.name} [opentable] RETRY SUCCESS: now have ${foundTimes.length} total times: ${foundTimes.map(t=>t.time).join(", ")}`);
-                  if (retryMarkdown) bookingMarkdown = retryMarkdown;
-                } else {
-                  console.log(`  ${r.name} [opentable] RETRY: still no additional slots after waitFor`);
-                  if (retryMarkdown) bookingMarkdown = retryMarkdown;
-                }
-              }
-            } else {
-              console.log(`  ${r.name} [opentable] RETRY: scrape failed (${retryResp.status})`);
-            }
-          } catch (retryErr: any) {
-            console.log(`  ${r.name} [opentable] RETRY error: ${retryErr.name === "AbortError" ? "timeout (30s)" : retryErr}`);
-          }
-        }
-        
-        // Step 3: If still nothing, strip dropdown noise and fall through to generic regex
+        // If no OT-specific slots found, strip dropdown noise and fall through to generic regex
         if (foundTimes.length === 0) {
           const lines = bookingMarkdown.split("\n");
           const cleanedLines = lines.filter(line => {
@@ -3209,10 +3140,10 @@ async function verifyAvailability(
             return !timeMatches || timeMatches.length < 10;
           });
           bookingMarkdown = cleanedLines.join("\n");
-          console.log(`  ${r.name} [opentable]: no slots after retry, falling through to generic regex (dropdown noise stripped)`);
+          console.log(`  ${r.name} [opentable]: no slots from "Select a time", falling through to generic regex (dropdown noise stripped) | selectSection=${hadSelectSection}, mdLen=${mdLen}, blocked=${looksBlocked}`);
         }
         
-        // Step 4: Apply ±2h OT time window
+        // Apply ±2h OT time window
         if (foundTimes.length > 0) {
           const otWindowStart = windowStart;
           const otWindowEnd = windowEnd;
@@ -3224,9 +3155,10 @@ async function verifyAvailability(
             const top5 = otFiltered.slice(0, 5).sort((a, b) => a.minutes - b.minutes);
             r.timeSlots = top5.map(t => ({ time: t.time }));
             console.log(`✓ Verified ${r.name} [opentable] — ${top5.length} slots in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}): ${top5.map(t => t.time).join(", ")}`);
+            console.log(`  [OT_DIAG] ${r.name}: ${Date.now() - otVerifyStart}ms verify time`);
             return r;
           } else {
-            console.log(`✗ ${r.name} [opentable] — found ${foundTimes.length} slots but none in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}). Found: ${foundTimes.map(t => t.time).join(", ")}`);
+            console.log(`✗ ${r.name} [opentable] — found ${foundTimes.length} slots but none in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}). Found: ${foundTimes.map(t => t.time).join(", ")} | ${Date.now() - otVerifyStart}ms`);
             return null;
           }
         }
@@ -3382,7 +3314,7 @@ async function verifyAvailability(
       // OpenTable: Do NOT fabricate fallback times from booking markers.
       // If real slots exist but are outside window, or parser found nothing, reject.
       if (isOT && foundTimes.length === 0) {
-        console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback)`);
+        console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback) | selectSection=${markdown.toLowerCase().includes("select a time")}, mdLen=${markdown.length}, blocked=${markdown.length < 200 || /access denied/i.test(markdown)}`);
         return null;
       }
 
