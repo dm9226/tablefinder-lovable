@@ -3093,6 +3093,7 @@ async function verifyAvailability(
             ? `dish="${params.dishKeyword}" OR cuisineType="${params.cuisineType}"`
             : cuisineTokens.join(", ");
           console.log(`✗ ${r.name} [${r.platform}] — failed cuisine relevance (${isDishSearch ? "dish" : "category"}) for: ${label} (checked: ${verifyTokens.join(", ")})`);
+          diagCounts[r.platform].irrelevant++;
           return null;
         }
         } // end non-OT cuisine check
@@ -3102,6 +3103,7 @@ async function verifyAvailability(
       // verify the restaurant page actually mentions it. Zero extra latency — uses already-scraped markdown.
       if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(markdown, amenityTerms)) {
         console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${amenityTerms.join(", ")}`);
+        diagCounts[r.platform].irrelevant++;
         return null;
       }
 
