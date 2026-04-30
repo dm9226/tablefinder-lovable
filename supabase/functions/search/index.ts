@@ -1440,87 +1440,10 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Use Yelp Fusion API for discovery (Steel.dev hobby tier can't bypass DataDome)
-    const yelpApiKey = Deno.env.get("YELP_API_KEY");
-    if (!yelpApiKey) {
-      console.log("Yelp discovery skipped: YELP_API_KEY not configured");
-      return [];
-    }
-
-    console.log("[YELP_FUSION] Starting Yelp Fusion API discovery...");
-    
-    // Build Fusion API request
-    const fusionUrl = new URL("https://api.yelp.com/v3/businesses/search");
-    fusionUrl.searchParams.set("term", searchTerm);
-    fusionUrl.searchParams.set("location", yelpLocation);
-    fusionUrl.searchParams.set("limit", "20");
-    fusionUrl.searchParams.set("sort_by", "best_match");
-    // Filter for restaurants with reservations
-    fusionUrl.searchParams.set("categories", "restaurants");
-    if (params.lat && params.lng) {
-      fusionUrl.searchParams.set("latitude", String(params.lat));
-      fusionUrl.searchParams.set("longitude", String(params.lng));
-    }
-    
-    let fusionBusinesses: any[] = [];
-    try {
-      const fusionResp = await fetch(fusionUrl.toString(), {
-        headers: {
-          "Authorization": `Bearer ${yelpApiKey}`,
-          "Accept": "application/json",
-        },
-      });
-      if (!fusionResp.ok) {
-        const errText = await fusionResp.text().catch(() => "");
-        console.log(`[YELP_FUSION] API error (${fusionResp.status}): ${errText.slice(0, 300)}`);
-        return [];
-      }
-      const fusionData = await fusionResp.json();
-      fusionBusinesses = fusionData.businesses || [];
-      console.log(`[YELP_FUSION] Found ${fusionBusinesses.length} businesses`);
-    } catch (fusionErr: any) {
-      console.log(`[YELP_FUSION] Error: ${fusionErr.message || fusionErr}`);
-      return [];
-    }
-
-    // Convert Fusion API businesses to Restaurant candidates
-    const results: Restaurant[] = [];
-    for (const biz of fusionBusinesses) {
-      // Check if business supports reservations via transactions field
-      const hasReservation = biz.transactions?.includes("restaurant_reservation");
-      
-      const alias = biz.alias || biz.id;
-      const categories = (biz.categories || []).map((c: any) => c.title).join(", ");
-      const categoryAliases = (biz.categories || []).map((c: any) => c.alias).join(" ");
-      
-      // Build reservation URL
-      const reservationUrl = `https://www.yelp.com/reservations/${alias}`;
-      const distMiles = biz.distance ? +(biz.distance / 1609.34).toFixed(1) : null;
-      
-      // Only include businesses that support reservations
-      if (!hasReservation) {
-        continue;
-      }
-      
-      results.push({
-        id: `yelp-${alias}`,
-        name: biz.name,
-        cuisine: categories || (params.cuisine || "Restaurant"),
-        neighborhood: biz.location?.city || params.city,
-        rating: biz.rating,
-        reviewCount: biz.review_count,
-        priceRange: biz.price,
-        imageUrl: biz.image_url,
-        platform: "yelp" as const,
-        platformUrl: buildYelpAvailabilityUrl(reservationUrl, params),
-        timeSlots: [], // Will be populated during verification
-        distanceMiles: distMiles,
-        _yelpCategories: categoryAliases || alias.replace(/-/g, " "),
-      });
-    }
-
-    console.log(`[YELP_FUSION] Candidates with reservations: ${results.length}`);
-    return results;
+    // Yelp discovery disabled — Fusion API too expensive, Steel.dev hobby can't bypass DataDome,
+    // Firecrawl blocked by DataDome. No viable free/cheap approach currently available.
+    console.log("Yelp discovery skipped: no viable free discovery method available");
+    return [];
   } catch (err) {
     console.error("Yelp scrape error:", err);
     return [];
