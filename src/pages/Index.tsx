@@ -23,6 +23,8 @@ const Index = () => {
   const [lastQuery, setLastQuery] = useState<string>("");
   const [lastParams, setLastParams] = useState<any>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const extendAttempts = useRef(0);
+  const MAX_EXTEND_ATTEMPTS = 3;
 
   const requestLocation = useCallback(() => {
     if (!navigator.geolocation) {
@@ -84,6 +86,7 @@ const Index = () => {
       setRemainingCandidates([]);
       setLastQuery(query);
       setLastParams(null);
+      extendAttempts.current = 0;
 
       try {
         const { data, error: fnError } = await supabase.functions.invoke("search", {
@@ -130,8 +133,14 @@ const Index = () => {
 
   const handleExtendedSearch = useCallback(async () => {
     if (remainingCandidates.length === 0 || !lastParams) return;
+    if (extendAttempts.current >= MAX_EXTEND_ATTEMPTS) {
+      setHasMore(false);
+      setRemainingCandidates([]);
+      return;
+    }
 
     setIsExtending(true);
+    extendAttempts.current++;
     try {
       const { data, error: fnError } = await supabase.functions.invoke("search", {
         body: {
@@ -150,7 +159,10 @@ const Index = () => {
       const newResults = data?.results || [];
       if (newResults.length > 0) {
         setResults(prev => {
-          const merged = [...prev, ...newResults];
+          const existingIds = new Set(prev.map(r => r.id));
+          const unique = newResults.filter((r: Restaurant) => !existingIds.has(r.id));
+          if (unique.length === 0) return prev;
+          const merged = [...prev, ...unique];
           merged.sort((a, b) => {
             const dA = a.distanceMiles ?? 9999;
             const dB = b.distanceMiles ?? 9999;
@@ -167,6 +179,7 @@ const Index = () => {
       // Stop auto-extending on error
       setHasMore(false);
       setRemainingCandidates([]);
+      extendAttempts.current = MAX_EXTEND_ATTEMPTS;
     } finally {
       setIsExtending(false);
     }
@@ -174,10 +187,10 @@ const Index = () => {
 
   // Auto-trigger extended search when hasMore is true
   useEffect(() => {
-    if (hasMore && !isExtending && !isLoading && remainingCandidates.length > 0) {
+    if (hasMore && !isExtending && !isLoading && remainingCandidates.length > 0 && extendAttempts.current < MAX_EXTEND_ATTEMPTS) {
       handleExtendedSearch();
     }
-  }, [hasMore, isExtending, isLoading, remainingCandidates, handleExtendedSearch]);
+  }, [hasMore, isExtending, isLoading, remainingCandidates.length, handleExtendedSearch]);
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
