@@ -2648,11 +2648,11 @@ async function verifyAvailability(
           }
         };
         try {
-          let attempt = await doScrape(isOT ? 12_000 : 15_000, scrapePayload);
+          let attempt = await doScrape(isOT ? 18_000 : 15_000, scrapePayload);
           if ("aborted" in attempt) {
             timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
             if (isOT) {
-              console.log(`Scrape timeout (12s) for ${r.name} [opentable] — skipping OT candidate`);
+              console.log(`Scrape timeout (18s) for ${r.name} [opentable] — skipping OT candidate`);
               releaseFcSlot();
               return null;
             }
