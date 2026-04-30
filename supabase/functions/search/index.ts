@@ -2646,8 +2646,9 @@ async function verifyAvailability(
             onlyMainContent: false,
             actions: [{ type: "wait", milliseconds: 5000 }],
             timeout: 20000,
+            proxy: "stealth",
           } : scrapePayload;
-          const primaryTimeout = isOT ? 20_000 : 15_000;
+          const primaryTimeout = isOT ? 25_000 : 15_000;
           const retryTimeout = isOT ? 15_000 : 12_000;
           await acquireFcSlot();
           let resp: Response;
