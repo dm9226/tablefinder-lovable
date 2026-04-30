@@ -2475,9 +2475,9 @@ function selectCandidatesForVerification(
   };
 
   // Proportional allocation: distribute slots based on candidate volume per platform.
-  // OpenTable is currently frequently blocked/408ing, so keep a hard cap on it.
+  // OpenTable uses stealth proxy — allow more candidates since some will still fail.
   const total = candidates.length || 1;
-  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 6, yelp: 10 };
+  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 10, yelp: 10 };
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
@@ -2645,10 +2645,10 @@ async function verifyAvailability(
             formats: ["markdown", "html"],
             onlyMainContent: false,
             actions: [{ type: "wait", milliseconds: 5000 }],
-            timeout: 20000,
+            timeout: 25000,
             proxy: "stealth",
           } : scrapePayload;
-          const primaryTimeout = isOT ? 25_000 : 15_000;
+          const primaryTimeout = isOT ? 30_000 : 15_000;
           const retryTimeout = isOT ? 15_000 : 12_000;
           await acquireFcSlot();
           let resp: Response;
