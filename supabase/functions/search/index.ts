@@ -2790,15 +2790,15 @@ async function verifyAvailability(
         };
 
         if (isOT) {
-          await acquireOtFcSlot();
+          await acquireOtSlot();
         } else {
-          await acquireFastFcSlot();
+          await acquireFastSlot();
         }
         let resp: Response | null = null;
 
         try {
           const scrapePayloadFinal = isOT ? otPayload : resyPayload;
-          const clientTimeout = isOT ? 30_000 : 15_000;
+          const clientTimeout = isOT ? 20_000 : 15_000;
           const attempt = await doScrape(clientTimeout, scrapePayloadFinal);
 
           if ("aborted" in attempt) {
@@ -2806,60 +2806,28 @@ async function verifyAvailability(
             diagCounts[r.platform].timeout++;
             if (isOT) otConsecutiveFailures++;
             console.log(`Scrape timeout for ${r.name} [${r.platform}]`);
-            if (isOT) { releaseOtFcSlot(); } else { releaseFastFcSlot(); }
+            if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
             return null;
           }
 
           resp = attempt as Response;
 
           if (resp.status === 408 || !resp.ok) {
-            if (isOT) {
-              // Single retry with "enhanced" proxy on stealth proxy failure
-              const errStatus = resp.status;
-              await resp.text().catch(() => {});
-              console.log(`  ${r.name} [opentable] stealth failed (${errStatus}) — retrying with enhanced proxy`);
-              const enhancedPayload: Record<string, unknown> = {
-                url: r.platformUrl,
-                formats: ["markdown", "html"],
-                onlyMainContent: false,
-                actions: [{ type: "wait", milliseconds: 5000 }],
-                timeout: 25000,
-                proxy: "enhanced",
-              };
-              const retryAttempt = await doScrape(30_000, enhancedPayload);
-              if ("aborted" in retryAttempt) {
-                console.log(`  ${r.name} [opentable] enhanced retry timed out — skipping`);
-                diagCounts.opentable.timeout++;
-                otConsecutiveFailures++;
-                releaseOtFcSlot();
-                return null;
-              }
-              const retryResp = retryAttempt as Response;
-              if (!retryResp.ok) {
-                const retryErr = await retryResp.text().catch(() => "(no body)");
-                console.log(`  ${r.name} [opentable] enhanced retry also failed (${retryResp.status}): ${retryErr.slice(0, 200)}`);
-                diagCounts.opentable.failed++;
-                otConsecutiveFailures++;
-                releaseOtFcSlot();
-                return null;
-              }
-              resp = retryResp;
-            } else {
-              const errBody = await resp.text().catch(() => "(no body)");
-              console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
-              diagCounts[r.platform].failed++;
-              releaseFastFcSlot();
-              return null;
-            }
+            const errBody = await resp.text().catch(() => "(no body)");
+            console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
+            diagCounts[r.platform].failed++;
+            if (isOT) otConsecutiveFailures++;
+            if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
+            return null;
           }
         } catch (fetchErr: any) {
           console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
           diagCounts[r.platform].failed++;
           if (isOT) otConsecutiveFailures++;
-          if (isOT) { releaseOtFcSlot(); } else { releaseFastFcSlot(); }
+          if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
           return null;
         }
-        if (isOT) { releaseOtFcSlot(); } else { releaseFastFcSlot(); }
+        if (isOT) { releaseOtSlot(); } else { releaseFastSlot(); }
 
         // Diagnostic only — reset on success
         if (isOT) otConsecutiveFailures = 0;
