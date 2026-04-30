@@ -172,20 +172,6 @@ const Index = () => {
     }
   }, [remainingCandidates, lastParams, lastQuery, coords]);
 
-  // Auto-continue searching in background until MAX_RESULTS
-  useEffect(() => {
-    if (
-      !isLoading &&
-      !isExtending &&
-      hasMore &&
-      remainingCandidates.length > 0 &&
-      results.length < MAX_RESULTS &&
-      hasSearched
-    ) {
-      handleExtendedSearch();
-    }
-  }, [isLoading, isExtending, hasMore, remainingCandidates, results.length, hasSearched, handleExtendedSearch]);
-
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
       <Helmet>

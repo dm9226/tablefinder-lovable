@@ -212,9 +212,11 @@ serve(async (req) => {
       console.log(`[EXTENDED] Coords received: lat=${lat}, lng=${lng} | userLat=${params.userLat}, userLng=${params.userLng}`);
       const amenityTerms = extractAmenityTerms(params.cuisine || "", query || "");
 
-      // Verify up to 18 remaining candidates
-      const toVerify = (incomingCandidates as Restaurant[]).slice(0, 18);
-      const leftover = (incomingCandidates as Restaurant[]).slice(18);
+      // Verify a smaller balanced slice for extended searches so blocked OT candidates
+      // cannot dominate the follow-up request budget.
+      const toVerify = selectCandidatesForVerification((incomingCandidates as Restaurant[]), 12);
+      const selectedIds = new Set(toVerify.map(r => r.name + r.platform));
+      const leftover = (incomingCandidates as Restaurant[]).filter(c => !selectedIds.has(c.name + c.platform));
 
       let verified = (await Promise.all(
         adapters.map(a => a.verify(
@@ -2453,22 +2455,22 @@ function selectCandidatesForVerification(
     yelp: candidates.filter((c) => c.platform === "yelp"),
   };
 
-  // Proportional allocation: distribute slots based on candidate volume per platform
+  // Proportional allocation: distribute slots based on candidate volume per platform.
+  // OpenTable is currently frequently blocked/408ing, so keep a hard cap on it.
   const total = candidates.length || 1;
+  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 3, yelp: 10 };
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
     const raw = Math.round((buckets[platform].length / total) * maxCandidates);
-    // Cap quota to actual bucket size; Yelp capped at 10 due to waitFor latency cost
-    const platformCap = platform === "yelp" ? Math.min(raw, 10) : platform === "opentable" ? Math.min(raw, 5) : raw;
-    quotas[platform] = Math.min(platformCap, buckets[platform].length);
+    quotas[platform] = Math.min(raw, hardCaps[platform], buckets[platform].length);
     assigned += quotas[platform];
   }
   // Distribute any remaining slots (due to rounding or capped buckets) round-robin
   let remaining = maxCandidates - assigned;
   for (const platform of platformOrder) {
     if (remaining <= 0) break;
-    const canAdd = buckets[platform].length - quotas[platform];
+    const canAdd = Math.min(buckets[platform].length, hardCaps[platform]) - quotas[platform];
     if (canAdd > 0) {
       const add = Math.min(canAdd, remaining);
       quotas[platform] += add;
@@ -2627,9 +2629,14 @@ async function verifyAvailability(
           }
         };
         try {
-          let attempt = await doScrape(15_000, scrapePayload);
+          let attempt = await doScrape(isOT ? 6_000 : 15_000, scrapePayload);
           if ("aborted" in attempt) {
             timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
+            if (isOT) {
+              console.log(`Scrape timeout (6s) for ${r.name} [opentable] — skipping OT candidate`);
+              releaseFcSlot();
+              return null;
+            }
             console.log(`Scrape timeout (15s) for ${r.name} [${r.platform}] — retrying once`);
             await new Promise(res => setTimeout(res, 300));
             attempt = await doScrape(12_000, { ...scrapePayload, timeout: 10000 });
