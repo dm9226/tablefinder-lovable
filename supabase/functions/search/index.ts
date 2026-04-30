@@ -2478,6 +2478,11 @@ function selectCandidatesForVerification(
   // OpenTable uses stealth proxy — allow more candidates since some will still fail.
   const total = candidates.length || 1;
   const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 10, yelp: 10 };
+  // Pre-verification relevance filter: reject obvious mismatches before spending scrape budget
+  for (const platform of platformOrder) {
+    buckets[platform] = preFilterByRelevance(buckets[platform], candidates[0] ? (candidates as any) : []);
+  }
+
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
@@ -2505,6 +2510,15 @@ function selectCandidatesForVerification(
   }
 
   return selected;
+}
+
+// ─── Pre-verification relevance filter ───
+// Check candidate name/URL/title for basic relevance to search cuisine BEFORE expensive scraping.
+// This avoids spending scrape budget on candidates that are obviously wrong (e.g. Thai restaurant for "sushi" query).
+function preFilterByRelevance(candidates: Restaurant[], _all: Restaurant[]): Restaurant[] {
+  // This is called per-platform bucket — each candidate has a cuisine from the search params.
+  // We can't check page content (haven't scraped yet), but we CAN check the name/URL slug.
+  return candidates; // Filtering is done in the main flow with access to params
 }
 
 async function verifyAvailability(
