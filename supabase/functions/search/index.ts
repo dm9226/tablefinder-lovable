@@ -2635,7 +2635,8 @@ async function verifyAvailability(
             url: r.platformUrl,
             formats: ["markdown", "html"],
             onlyMainContent: false,
-            waitFor: 8000,
+            waitFor: 5000,
+            timeout: 15000,
             proxy: "enhanced",
           } : scrapePayload;
           const primaryTimeout = isOT ? 20_000 : 15_000;
