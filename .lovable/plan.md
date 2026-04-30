@@ -1,73 +1,143 @@
-I found the regression pattern: OpenTable candidates are still being discovered, but the verification scrape is no longer seeing any real OpenTable booking widget content. The logs show every OT candidate going down this path:
+I checked the current deployed search logs and the current `search` function. The problem is not just “OT is slow” — the pipeline is doing a lot of work, and the current OpenTable path is failing before it ever proves availability.
 
-```text
-[opentable]: no "Select a time" section on first pass
-[opentable] RETRY: still no additional slots after waitFor
-[opentable] — no parseable time slots found
+## What is happening right now
+
+### 1. The latest live run still took about 70s
+The direct backend test I triggered timed out from the caller side, but the function continued and eventually logged a response. The important timestamps in the backend logs:
+
+- Verification finished around `15:09:08`
+- Final response was not emitted until `15:09:30`
+- That means roughly 22s were spent after verification on geocoding / AI enrichment before the user saw the result
+
+So the previous changes shortened some OT scrape waits, but they did not fix the total request path.
+
+### 2. OpenTable selected only 3 candidates, and returned zero
+The run selected only 3 OT candidates because the code now hard-caps OT verification at 3:
+
+```ts
+hardCaps: { resy: maxCandidates, opentable: 3, yelp: 10 }
 ```
 
-There are also repeated OT address misses, which is a strong signal that the scrape is not receiving the normal restaurant page content at all. The current OT path is spending extra time on a JS-render/wait retry that is producing zero recovered results.
-
-## Plan
-
-### 1. Revert OpenTable verification to the last performant scrape shape
-In `supabase/functions/search/index.ts`, change only the OpenTable verification branch:
-
-- Use the historical OpenTable scrape strategy:
-  - `onlyMainContent: false` for OT, so the reservation widget can be included.
-  - `formats: ["markdown"]` for OT first pass.
-  - Remove the OT first-pass `waitFor` delay.
-- Keep Resy and Yelp scrape behavior unchanged.
-
-Reason: the older working OT architecture relied on the static markdown representation of the reservation widget (`### Select a time`) and avoided the slow JS-render path. The current `waitFor`/HTML/retry approach is now producing no OT slots and blowing up runtime.
-
-### 2. Keep strict, content-based OT verification
-No fake fallback results.
-
-OpenTable will only return a restaurant if the scrape contains real slot markers from the booking page. The parser will:
-
-- Find the OpenTable `Select a time` section.
-- Extract concrete time slots from that section.
-- Ignore dropdown/time-picker noise such as concatenated all-day time lists.
-- Ignore Notify/waitlist contexts.
-- Filter to the requested time window required by the project spec.
-- Return only restaurants with at least one verified slot.
-
-This preserves the core rule: no restaurant result is returned unless availability was verified from the actual booking URL.
-
-### 3. Remove the wasteful OT retry path
-Remove or disable the current second-pass OT retry that logs:
+The logs show:
 
 ```text
-retrying with waitFor: 8000ms
-RETRY: still no additional slots after waitFor
+Forza Storico Restaurant [opentable] — failed cuisine relevance
+Florence Tavern [opentable] — failed cuisine relevance
+Capolinea Restaurant [opentable] — 6s scrape timeout
 ```
 
-It is currently recovering zero OT results while adding roughly 10–20 seconds per wave. If the no-wait markdown scrape does not include a parseable `Select a time` section, reject the candidate quickly and let other candidates/platforms continue.
+So the OT slot parser did not actually get a fair shot:
 
-### 4. Add targeted diagnostics for OT only
-Add temporary-safe diagnostic logging for OT verification outcomes, without dumping page contents:
+- 2 OT candidates were rejected by the cuisine relevance gate before availability parsing.
+- 1 OT candidate timed out at the 6s hard cap.
+- Result: 0 OT verified restaurants.
 
-- Whether markdown contained `Select a time`.
-- Whether markdown looked blocked or empty.
-- Number of raw OT slot candidates found before filtering.
-- Number of OT slots remaining after the requested-time window filter.
-- Per-restaurant OT verification duration.
+### 3. The OT scrape content looks incomplete
+The same two OT candidates also had address misses:
 
-This will make the next failure obvious: no widget content, blocked scrape, parser miss, or valid slots outside window.
+```text
+[ADDR_MISS] No address pattern found for Florence Tavern [opentable]
+[ADDR_MISS] No address pattern found for Forza Storico Restaurant [opentable]
+```
 
-### 5. Validate with live backend tests before calling it fixed
-After implementation, run direct backend searches and inspect logs/results for:
+That strongly suggests Firecrawl is not returning the full useful OpenTable page content for those restaurant pages. If the scrape lacks address/cuisine/widget text, the app cannot verify slots. That is why OT suddenly looks “dead” even when discovery finds OT URLs.
 
-- At least one Atlanta query where OpenTable should have inventory, such as steak/Italian/dinner queries.
-- One broad Atlanta dinner query to confirm mixed-platform results still return within the first-results budget.
-- One Resy-heavy query to confirm Resy behavior is unchanged.
-- One Yelp-heavy query to confirm Yelp behavior is unchanged.
+### 4. There is also a code mismatch: HTML parser exists, but OT does not fetch HTML
+The function contains an OT HTML slot parser, but the current OT scrape payload fetches only markdown:
+
+```ts
+formats: ["markdown"]
+```
+
+So the HTML parser is effectively dead code for OT. If OpenTable’s slot widget is now only visible in processed HTML or not in markdown, the current verifier will never see it.
+
+### 5. The 70s runtime is not mostly the 6s OT timeout anymore
+The old “OT retry waterfall” was reduced, but the total path still blocks on:
+
+- Firecrawl discovery across Resy / OT / Yelp
+- Verification of up to 26 restaurants
+- Yelp scrapes with 25s caps
+- Nominatim geocoding for every verified restaurant
+- AI enrichment for every verified restaurant
+
+The last run had 15 verified restaurants, then spent another ~22s on distance/enrichment before returning. That is why the user-facing runtime stayed bad.
+
+## Fix plan
+
+### 1. Add hard stage timers first
+Add concise timing logs for:
+
+- query parse
+- ZIP reverse-geocode
+- discovery per provider
+- candidate selection
+- verification per provider
+- geocoding
+- AI enrichment
+- final response
+
+This makes every future “it took 70s” report attributable instead of guessing from sparse logs.
+
+### 2. Fix OT verification order
+For OpenTable only:
+
+- Parse and verify real slots before applying cuisine relevance.
+- Only apply cuisine relevance after slot evidence exists.
+- Relax OT cuisine rejection when the restaurant name or discovered snippet is a strong match, because OT page scrapes are currently too thin to use as the sole cuisine source.
+
+This prevents valid OT pages like Forza Storico from being thrown away before the availability parser runs.
+
+### 3. Make OT scrape payload match the parser
+Change OT verification to request both markdown and HTML in a single fast scrape:
+
+```ts
+formats: ["markdown", "html"]
+onlyMainContent: false
+```
+
+Then use the existing OT HTML parser when markdown lacks `Select a time`.
+
+Keep the rule intact: no OT result is returned unless real slot markers are found in scraped booking-page content.
+
+### 4. Replace the current “OT hard cap = 3” with a time-budget cap
+Instead of always verifying only 3 OT candidates:
+
+- Give OT a small fixed time budget, e.g. 8–10s total.
+- Verify 4–6 OT candidates concurrently within that budget.
+- Stop OT when the budget expires.
+
+This gives OT enough coverage to return results without letting it dominate the request.
+
+### 5. Stop blocking the first response on slow enrichment
+To cut the 70s runtime roughly in half:
+
+- Return verified results once availability is done and basic fields are ready.
+- Skip AI enrichment if the request is already past the first-response target.
+- Skip or cap geocoding after a short budget, preserving results even if distances are incomplete.
+
+The current code waits on geocoding + AI enrichment even after availability is already verified. That is not acceptable for the first response.
+
+### 6. Tighten non-OT provider budgets too
+Since the full request is slow even after OT is capped:
+
+- Reduce Yelp verification timeout from 25s to a smaller per-candidate budget.
+- Limit initial verification to enough candidates for a fast first page.
+- Keep remaining candidates behind manual “search more”, not automatic background work.
+
+### 7. Validate with live backend tests
+After implementation, run direct backend tests for:
+
+1. `Italian dinner in Atlanta tonight for 2`
+2. `steak dinner in Atlanta tonight for 2`
+3. a broad Atlanta dinner query
+4. a Resy-heavy query
+5. a Yelp-heavy query
 
 Acceptance criteria:
 
-- OpenTable results appear again only when verified slots are extracted from the booking page.
+- First response under ~35s, ideally closer to 25–30s.
+- OT returns when real OT slot markers are extracted.
 - No fabricated OT times.
 - No OT retry waterfall.
-- First response target stays at or below the 30-second user-facing cap.
-- Resy and Yelp results remain unaffected.
+- Resy/Yelp still return verified availability.
+- Logs clearly show where time is spent.
