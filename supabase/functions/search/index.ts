@@ -2441,7 +2441,7 @@ ${list}`,
 // Clean transient fields before returning results
 function cleanTransientFields(results: Restaurant[]): Restaurant[] {
   return results.map(r => {
-    const { _address, _addressCity, _yelpCrossplatformGuess, _yelpCategories, _yelpSearchPageVerified, _yelpSearchVerified, _xplatMarkdown, _xplatHtml, _xplatMeta, ...clean } = r as any;
+    const { _address, _addressCity, _yelpCrossplatformGuess, _yelpCategories, _yelpSearchPageVerified, _yelpSearchVerified, _xplatMarkdown, _xplatHtml, _xplatMeta, _deferredCuisineTokens, _deferredIsDishSearch, ...clean } = r as any;
     return clean;
   });
 }
