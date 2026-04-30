@@ -2621,6 +2621,15 @@ async function verifyAvailability(
   };
   // Per-provider timeout counters for diagnostics
   const timeoutCounts: Record<string, number> = { resy: 0, opentable: 0, yelp: 0 };
+  // Per-provider success/fail/skip counters for comprehensive diagnostics
+  const diagCounts: Record<string, { success: number; failed: number; blocked: number; timeout: number; noSlots: number; irrelevant: number; skipped: number }> = {
+    resy: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
+    opentable: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
+    yelp: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
+  };
+  // OT failure-aware budget: if consecutive OT failures exceed threshold, skip remaining
+  let otConsecutiveFailures = 0;
+  const OT_MAX_CONSECUTIVE_FAILURES = 4;
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
@@ -2628,13 +2637,20 @@ async function verifyAvailability(
        // Check global elapsed time before starting this candidate
        if (globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS) {
          console.log(`⏱ Skipping ${r.name} [${r.platform}] — global deadline exceeded (${Math.round((Date.now() - globalStartTime)/1000)}s)`);
+         diagCounts[r.platform].skipped++;
          return null;
        }
 
        const isYelp = r.platform === "yelp";
-
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
+
+      // OT failure-aware budget: skip if too many consecutive failures
+      if (isOT && otConsecutiveFailures >= OT_MAX_CONSECUTIVE_FAILURES) {
+        console.log(`⏱ Skipping ${r.name} [opentable] — ${otConsecutiveFailures} consecutive OT failures, preserving budget`);
+        diagCounts.opentable.skipped++;
+        return null;
+      }
 
       // ── YELP: Firecrawl reservation-page scrape ──
       let yelpSteelHtml = "";
