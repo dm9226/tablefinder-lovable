@@ -1,43 +1,30 @@
 
 ## Problem
 
-All OpenTable scrape attempts are timing out at the 8-second limit. The OT Firecrawl payload also lacks a `waitFor` parameter, so even if the request completes in time, Firecrawl captures the page before the JS booking widget renders.
+Steel.dev is returning empty content (`mdLen=0`) for every OpenTable restaurant and hitting 429 rate limits ("Session limit reached for your hobby plan"). OT is completely broken — zero results from every search.
 
-Latest logs confirm: **6/6 OT candidates timed out at 8s**, resulting in zero OT results.
+OpenTable previously worked with Firecrawl when it had adequate timeouts and `waitFor` for the JS booking widget to render.
 
 ## Plan
 
-### Step 1: Tune Firecrawl params for OT
+### Step 1: Revert OT from Steel back to Firecrawl
 
-In `supabase/functions/search/index.ts`, update the OT scrape payload (~line 2620):
+Replace the Steel scraping block for OpenTable (lines ~2631-2670) with a Firecrawl scrape identical to how Resy works, but with OT-specific settings:
 
-- Add `waitFor: 5000` so Firecrawl waits for the booking widget JS to render
-- Increase OT timeout from 8s to 15s (line 2656) to match Resy/Yelp — OT pages are heavier and 8s is consistently too short
+- `waitFor: 8000` (OT's booking widget needs time to render)
+- `formats: ["markdown", "html"]` (keep both for the HTML slot parser fallback)
+- `onlyMainContent: false`
+- 20s timeout (OT pages are heavier than Resy)
+- Single retry on timeout with 15s fallback
 
-```
-scrapePayload = {
-  url: r.platformUrl,
-  formats: ["markdown", "html"],
-  onlyMainContent: false,
-  waitFor: 5000,        // <-- NEW: wait for JS widget
-}
-```
+### Step 2: Remove Steel dependency
 
-Timeout change: `doScrape(isOT ? 8_000 : 15_000, ...)` becomes `doScrape(15_000, ...)` for both OT and Resy.
+Remove all Steel-related code and the `STEEL_API_KEY` check that currently gates OT scraping. OT will use the same Firecrawl concurrency slot system as Resy.
 
-### Step 2: Add OT retry with Browserbase fallback
+### Step 3: Validate
 
-If the Firecrawl scrape for an OT candidate returns blocked content (tiny markdown, "access denied") or still times out, attempt a single retry using Browserbase (key already configured as `BROWSERBASE_API_KEY`). This gives OT a full-browser path without changing the Resy/Yelp flow.
+Deploy and test with a live search to confirm OT results return with verified time slots.
 
-Only attempt Browserbase for OT, not other platforms, to keep costs controlled.
+## Technical Details
 
-### Step 3: Test and validate
-
-- Run a live search for "Italian dinner tonight for 2" in Atlanta
-- Confirm OT candidates no longer all time out
-- Verify total execution time stays under 30s
-- Check that OT results appear with verified time slots
-
-### Why this should work
-
-The 8s timeout is too aggressive for OT's JS-heavy pages. Firecrawl needs both more time AND explicit `waitFor` to let the booking widget render. If OT is actively blocking Firecrawl at the network level (not just slow rendering), the Browserbase fallback provides a full-browser alternative that is harder to block.
+The change is confined to `supabase/functions/search/index.ts`, replacing ~40 lines of Steel code with ~30 lines of Firecrawl code matching the existing Resy pattern but with `waitFor: 8000` and a 20s timeout.
