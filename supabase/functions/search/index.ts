@@ -2686,32 +2686,8 @@ async function verifyAvailability(
           releaseFcSlot();
 
           if (resp.status === 408) {
-            if (isOT) {
-              console.log(`Scrape 408 for ${r.name} [opentable] — retrying once with actions`);
-              await acquireFcSlot();
-              try {
-                const retryAttempt = await doScrape(retryTimeout, otPayload);
-                if ("aborted" in retryAttempt) {
-                  console.log(`Scrape 408 retry timeout for ${r.name} [opentable] — giving up`);
-                  releaseFcSlot();
-                  return null;
-                }
-                releaseFcSlot();
-                if (!retryAttempt.ok) {
-                  console.log(`Scrape 408 retry failed (${retryAttempt.status}) for ${r.name} [opentable]`);
-                  await retryAttempt.text().catch(() => {});
-                  return null;
-                }
-                resp = retryAttempt;
-              } catch (retryErr) {
-                releaseFcSlot();
-                console.log(`Scrape 408 retry error for ${r.name} [opentable]: ${retryErr}`);
-                return null;
-              }
-            } else {
-              console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
-              return null;
-            }
+            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping`);
+            return null;
           }
 
           if (!resp.ok) {
