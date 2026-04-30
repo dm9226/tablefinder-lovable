@@ -2630,10 +2630,17 @@ async function verifyAvailability(
       if (!isYelp) {
         {
           // ── Resy & OT: Use Firecrawl ──
-          // OT needs waitFor for JS booking widget to render
-          const otPayload = isOT ? { ...scrapePayload, waitFor: 5000 } : scrapePayload;
-          const primaryTimeout = isOT ? 25_000 : 15_000;
-          const retryTimeout = isOT ? 20_000 : 12_000;
+          // OT: use actions-based scraping with enhanced proxy for anti-bot bypass
+          const otPayload = isOT ? {
+            url: r.platformUrl,
+            formats: ["markdown", "html"],
+            onlyMainContent: false,
+            waitFor: 5000,
+            timeout: 15000,
+            proxy: "enhanced",
+          } : scrapePayload;
+          const primaryTimeout = isOT ? 20_000 : 15_000;
+          const retryTimeout = isOT ? 15_000 : 12_000;
           await acquireFcSlot();
           let resp: Response;
           const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
@@ -2679,7 +2686,7 @@ async function verifyAvailability(
           releaseFcSlot();
 
           if (resp.status === 408) {
-            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
+            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping`);
             return null;
           }
 
