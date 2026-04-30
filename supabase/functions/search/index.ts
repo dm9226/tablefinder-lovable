@@ -682,6 +682,26 @@ User query: "${query}"`;
   const parsed = JSON.parse(toolCall.function.arguments) as SearchParams;
   parsed.country = ((parsed as any).country || "us").toLowerCase().trim();
   if (parsed.country !== "gb") parsed.country = "us"; // Only us and gb supported
+
+  // ─── Deterministic UK city safety net ───
+  // The AI parser occasionally misclassifies well-known UK cities as country="us".
+  // If the parsed city matches a major UK city AND no US state was provided,
+  // force country="gb". This prevents the disambiguation error against US homonyms
+  // (e.g. London, KY / London, OH).
+  const UK_MAJOR_CITIES = new Set([
+    "london", "manchester", "edinburgh", "birmingham", "liverpool", "glasgow",
+    "bristol", "leeds", "sheffield", "oxford", "cambridge", "brighton",
+    "cardiff", "belfast", "newcastle", "nottingham", "bath", "york",
+    "southampton", "portsmouth", "leicester", "coventry", "reading", "aberdeen",
+    "dundee", "swansea", "norwich", "exeter", "bournemouth", "plymouth",
+  ]);
+  const cityLowerForUK = ((parsed as any).city || "").trim().toLowerCase();
+  const stateRawForUK = ((parsed as any).state || "").trim();
+  const looksLikeUSState = /^[A-Z]{2}$/.test(stateRawForUK) && stateRawForUK !== "UK";
+  if (parsed.country === "us" && UK_MAJOR_CITIES.has(cityLowerForUK) && !looksLikeUSState) {
+    console.log(`UK city safety net: reclassifying "${parsed.city}" as country="gb" (was "us")`);
+    parsed.country = "gb";
+  }
   
   // Normalize cuisineType and dishKeyword
   parsed.cuisineType = (parsed.cuisineType || "").trim().toLowerCase();

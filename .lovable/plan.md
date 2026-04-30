@@ -1,55 +1,49 @@
-## Problem
+# Comprehensive Verification Test
 
-Yelp candidates are missing `distanceMiles` because the search edge function still treats Yelp as if it came from the Fusion API (which provided distance directly). Since we moved Yelp discovery to Firecrawl/snippet scraping, Yelp results are pushed with `distanceMiles: null` and three separate code paths refuse to fill it in.
+Run all three existing Deno test suites against the deployed `search` edge function and analyze the results against TableFinder's core spec.
 
-## Fix
+## What will be tested
 
-Edit `supabase/functions/search/index.ts` in three places to remove the obsolete Yelp exclusions so Yelp goes through the same geocoding and distance-stamping pipeline as Resy and OpenTable.
+The project already has three comprehensive test suites in `supabase/functions/search/`:
 
-### 1. Single-shot Nominatim geocoder (line ~2225)
-Remove the early-return that skips Yelp. The stale comment ("Yelp has API-provided distance") is no longer true.
+1. **`index.test.ts`** — US queries across cities/cuisines/meal types (Resy, OpenTable, Yelp mix)
+2. **`uk.test.ts`** — UK queries (London/Manchester) validating `gb` country, `opentable.co.uk`, Yelp `en_GB`
+3. **`link-verify.test.ts`** — For each result, validates:
+   - **URL parameter correctness** — date, party size, time present in proper platform format (Resy `date`/`seats`/`time`, OpenTable `dateTime`/`covers`, Yelp `date`/`covers`/`time`)
+   - **Reachability** — HTTP fetch of each booking URL
+   - **Slot accuracy** — re-scrapes URL via Firecrawl and confirms ≥50% of returned time slots actually appear on the live page
 
-```ts
-// BEFORE
-async function geocodeOne(r: Restaurant): Promise<void> {
-  if (r.platform === "yelp") return; // Yelp has API-provided distance
-  if (r.distanceMiles != null) return;
+## Spec compliance checks
 
-// AFTER
-async function geocodeOne(r: Restaurant): Promise<void> {
-  if (r.distanceMiles != null) return;
-```
+Against the project rules in memory + custom instructions, the analysis will report:
 
-### 2. Batched geocoder candidate filter (line ~2298)
-Include Yelp in the geocoding batch.
+| Spec rule | How verified |
+|---|---|
+| Every result must have verified availability | link-verify slot accuracy + index.test slot assertions |
+| Verification = scraping actual booking URL | link-verify rescrape pass |
+| Never return based on URL pattern alone | Slot-match ratio per result |
+| Deep links pre-populate date/time/party | URL parameter validator |
+| Meal-type → typical hours | uk.test + index.test brunch/breakfast cases |
+| US & UK only | uk.test (gb) + index.test (us) |
+| Distance returned for results | Inspect distanceMiles in responses |
+| Yelp/Resy/OpenTable all represented | Platform mix per query in reports |
+| Performance under 120s global cap | Per-query elapsed time |
 
-```ts
-// BEFORE
-const toGeocode = results.filter(r => r.platform !== "yelp");
+## Execution steps
 
-// AFTER
-const toGeocode = results.filter(r => r.distanceMiles == null);
-```
+1. Run `index.test.ts` (US suite) via `supabase--test_edge_functions` with timeout 300s
+2. Run `uk.test.ts` (UK suite) with timeout 300s
+3. Run `link-verify.test.ts` (link/slot integrity) with timeout 300s
+4. Pull recent edge function logs to confirm no 120s timeouts and that distance enrichment ran
+5. Produce a consolidated pass/fail report broken down by spec rule, with any failing restaurants/queries called out and a recommendation list for follow-ups
 
-### 3. Extended-search AI-coord fallback (line ~260)
-Drop the Yelp guard so AI-provided coordinates can also stamp distance for Yelp, matching the behavior already in the initial flow at line ~448.
+## Deliverable
 
-```ts
-// BEFORE
-if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" ...
+A single summary in chat with:
+- Pass/fail counts per suite
+- Per-spec-rule compliance table
+- Any specific restaurants that failed slot verification or URL param checks
+- Performance observations (slowest query, average wave time)
+- Recommended next fixes (if any)
 
-// AFTER
-if (r.distanceMiles == null && typeof e.lat === "number" ...
-```
-
-### 4. Address-extraction guard (line ~2676 area)
-Check whether `r.platform !== "yelp" && !r._address` is also blocking Yelp from getting an address fallback used by the geocoder. If yes, remove that Yelp exclusion as well so Yelp pages can contribute an address when available. (Yelp business pages typically expose a street address in markdown.)
-
-## Expected result
-
-After redeploying the `search` function, Yelp results will be geocoded via the same Nominatim → AI-coord cascade used by Resy/OpenTable. They'll show real mileage in the UI and sort by distance alongside the other platforms, so nearby Yelp picks float to the top instead of being buried at the bottom with no distance.
-
-## Files touched
-- `supabase/functions/search/index.ts`
-
-No frontend changes needed; the existing sort in `src/pages/Index.tsx` already handles Yelp results once `distanceMiles` is populated.
+No code changes will be made by this task — it is read-only verification.
