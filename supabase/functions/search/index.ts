@@ -2475,9 +2475,9 @@ function selectCandidatesForVerification(
   };
 
   // Proportional allocation: distribute slots based on candidate volume per platform.
-  // OpenTable is currently frequently blocked/408ing, so keep a hard cap on it.
+  // OpenTable uses stealth proxy — allow more candidates since some will still fail.
   const total = candidates.length || 1;
-  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 6, yelp: 10 };
+  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 10, yelp: 10 };
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
@@ -2644,11 +2644,11 @@ async function verifyAvailability(
             url: r.platformUrl,
             formats: ["markdown", "html"],
             onlyMainContent: false,
-            waitFor: 5000,
-            timeout: 15000,
-            proxy: "enhanced",
+            actions: [{ type: "wait", milliseconds: 5000 }],
+            timeout: 25000,
+            proxy: "stealth",
           } : scrapePayload;
-          const primaryTimeout = isOT ? 20_000 : 15_000;
+          const primaryTimeout = isOT ? 30_000 : 15_000;
           const retryTimeout = isOT ? 15_000 : 12_000;
           await acquireFcSlot();
           let resp: Response;
@@ -2701,8 +2701,25 @@ async function verifyAvailability(
           releaseFcSlot();
 
           if (resp.status === 408) {
-            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping`);
-            return null;
+            if (isOT) {
+              console.log(`Scrape 408 for ${r.name} [${r.platform}] — retrying once`);
+              if (!(globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS)) {
+                await new Promise(res => setTimeout(res, 500));
+                const retryResp = await doScrape(retryTimeout, { ...otPayload, timeout: retryTimeout - 2000 });
+                if (!("aborted" in retryResp) && retryResp.ok) {
+                  resp = retryResp;
+                } else {
+                  console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}] — skipping`);
+                  return null;
+                }
+              } else {
+                console.log(`⏱ Skipping 408 retry for ${r.name} — global deadline exceeded`);
+                return null;
+              }
+            } else {
+              console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping`);
+              return null;
+            }
           }
 
           if (!resp.ok) {

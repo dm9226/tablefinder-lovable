@@ -172,6 +172,13 @@ const Index = () => {
     }
   }, [remainingCandidates, lastParams, lastQuery, coords]);
 
+  // Auto-trigger extended search when hasMore is true
+  useEffect(() => {
+    if (hasMore && !isExtending && !isLoading && remainingCandidates.length > 0) {
+      handleExtendedSearch();
+    }
+  }, [hasMore, isExtending, isLoading, remainingCandidates, handleExtendedSearch]);
+
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
       <Helmet>
