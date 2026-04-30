@@ -3374,6 +3374,8 @@ async function verifyAvailability(
             
             r.timeSlots = top5.map(t => ({ time: t.time }));
             console.log(`✓ Verified ${r.name} [opentable] — ${top5.length} slots in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}): ${top5.map(t => t.time).join(", ")} | ${Date.now() - otVerifyStart}ms`);
+            diagCounts.opentable.success++;
+            otConsecutiveFailures = 0; // reset on success
             return r;
           } else {
             console.log(`✗ ${r.name} [opentable] — found ${foundTimes.length} slots but none in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}). Found: ${foundTimes.map(t => t.time).join(", ")} | ${Date.now() - otVerifyStart}ms`);
@@ -3524,6 +3526,7 @@ async function verifyAvailability(
 
         r.timeSlots = matchingTimes.map((t) => ({ time: t.time }));
         console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} ${mealLabel} slots (${windowStart/60|0}:${(windowStart%60).toString().padStart(2,"0")}–${windowEnd/60|0}:${(windowEnd%60).toString().padStart(2,"0")}): ${matchingTimes.map(t => t.time).join(", ")}`);
+        diagCounts[r.platform].success++;
         return r;
       }
 
