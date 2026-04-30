@@ -2516,6 +2516,9 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
+  // Global elapsed-time guard: skip candidates if we're nearing the 150s edge function limit
+  const VERIFY_DEADLINE_MS = 105_000; // stop starting new scrapes after 105s elapsed
+
   // Steel.dev concurrency limiter (hobby tier: be conservative)
   let steelActiveCount = 0;
   const steelQueue: (() => void)[] = [];
@@ -2555,6 +2558,12 @@ async function verifyAvailability(
   // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
      try {
+       // Check global elapsed time before starting this candidate
+       if (globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS) {
+         console.log(`⏱ Skipping ${r.name} [${r.platform}] — global deadline exceeded (${Math.round((Date.now() - globalStartTime)/1000)}s)`);
+         return null;
+       }
+
        const isYelp = r.platform === "yelp";
 
       const isResy = r.platform === "resy";
@@ -2669,6 +2678,12 @@ async function verifyAvailability(
             if ("aborted" in attempt) {
               timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
               console.log(`Scrape timeout (${primaryTimeout/1000}s) for ${r.name} [${r.platform}] — retrying once`);
+              // Skip retry if we're near the global deadline
+              if (globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS) {
+                console.log(`⏱ Skipping retry for ${r.name} — global deadline exceeded`);
+                releaseFcSlot();
+                return null;
+              }
               await new Promise(res => setTimeout(res, 300));
               attempt = await doScrape(retryTimeout, { ...otPayload, timeout: retryTimeout - 2000 });
               if ("aborted" in attempt) {
