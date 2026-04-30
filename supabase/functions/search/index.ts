@@ -214,7 +214,7 @@ serve(async (req) => {
 
       // Verify a smaller balanced slice for extended searches so blocked OT candidates
       // cannot dominate the follow-up request budget.
-      const toVerify = selectCandidatesForVerification((incomingCandidates as Restaurant[]), 12);
+     const toVerify = selectCandidatesForVerification((incomingCandidates as Restaurant[]), 12, params);
       const selectedIds = new Set(toVerify.map(r => r.name + r.platform));
       const leftover = (incomingCandidates as Restaurant[]).filter(c => !selectedIds.has(c.name + c.platform));
 
@@ -380,7 +380,7 @@ serve(async (req) => {
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
     const maxCandidates = isVagueQuery ? 24 : 30;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
-    const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
+    const selected = selectCandidatesForVerification(allCandidates, maxCandidates, params);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
@@ -1540,6 +1540,8 @@ function cleanName(title: string | undefined, url: string, platform: string): st
       .replace(/\s+reservation(s)?.*$/i, "")
       .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "") // trailing "- Atlanta, GA" or "- Buckhead"
       .replace(/\s*-\s*(Updated|Restaurant)\s.*$/i, "") // "- Updated 2026" or "- Restaurant Name"
+      .replace(/\s*[-–—]+\s*$/i, "")  // trailing dashes/hyphens
+      .replace(/\s*[,;:]+\s*$/i, "")   // trailing punctuation
       .trim();
     if (cleaned.length > 1) return cleaned;
   }
@@ -2439,7 +2441,7 @@ ${list}`,
 // Clean transient fields before returning results
 function cleanTransientFields(results: Restaurant[]): Restaurant[] {
   return results.map(r => {
-    const { _address, _addressCity, _yelpCrossplatformGuess, _yelpCategories, _yelpSearchPageVerified, _yelpSearchVerified, _xplatMarkdown, _xplatHtml, _xplatMeta, ...clean } = r as any;
+    const { _address, _addressCity, _yelpCrossplatformGuess, _yelpCategories, _yelpSearchPageVerified, _yelpSearchVerified, _xplatMarkdown, _xplatHtml, _xplatMeta, _deferredCuisineTokens, _deferredIsDishSearch, ...clean } = r as any;
     return clean;
   });
 }
@@ -2463,9 +2465,65 @@ const NO_AVAILABILITY_SIGNALS = [
   "temporarily unavailable",
 ];
 
+// ─── Pre-verification relevance scoring ───
+// Ranks candidates by name/URL relevance to search cuisine BEFORE expensive scraping.
+// Obvious mismatches (Thai restaurant for "sushi") get sorted to the end so they're
+// only checked if budget remains.
+const CUISINE_NAME_INDICATORS: Record<string, string[]> = {
+  sushi: ["sushi", "japanese", "omakase", "ramen", "izakaya", "hibachi", "teppanyaki", "poke", "yakitori", "tempura", "udon", "sashimi", "maki", "nigiri", "robata"],
+  japanese: ["sushi", "japanese", "omakase", "ramen", "izakaya", "hibachi", "teppanyaki", "yakitori", "tempura", "udon", "robata"],
+  italian: ["italian", "pizza", "pasta", "trattoria", "ristorante", "osteria", "pizzeria"],
+  mexican: ["mexican", "taco", "taqueria", "cantina", "burrito", "enchilada"],
+  thai: ["thai", "pad thai", "tom yum", "bangkok"],
+  chinese: ["chinese", "dim sum", "szechuan", "sichuan", "cantonese", "wok", "dumpling"],
+  indian: ["indian", "curry", "tandoori", "masala", "biryani", "naan"],
+  korean: ["korean", "bbq", "bibimbap", "kimchi", "bulgogi"],
+  seafood: ["seafood", "fish", "oyster", "crab", "lobster", "shrimp", "clam"],
+  steak: ["steak", "steakhouse", "chophouse", "prime", "wagyu", "filet"],
+  french: ["french", "bistro", "brasserie", "crêpe", "patisserie"],
+  mediterranean: ["mediterranean", "greek", "hummus", "falafel", "kebab"],
+};
+
+// Negative indicators — if the restaurant name contains these AND the cuisine is NOT this type,
+// it's likely a mismatch (e.g., "Paya Thai" when searching for sushi)
+const NEGATIVE_CUISINE_INDICATORS: Record<string, string[]> = {
+  thai: ["thai", "bangkok", "pad thai"],
+  vietnamese: ["vietnamese", "pho", "banh mi", "viet"],
+  indian: ["indian", "curry house", "tandoori", "masala"],
+  mexican: ["mexican", "taqueria", "cantina"],
+  ethiopian: ["ethiopian", "habesha"],
+};
+
+function scoreNameRelevance(name: string, url: string, cuisine: string, cuisineType: string, dishKeyword: string): number {
+  const lower = `${name} ${url}`.toLowerCase();
+  const searchTerms = [cuisine, cuisineType, dishKeyword].filter(Boolean).map(s => s.toLowerCase());
+  if (searchTerms.length === 0) return 0; // no cuisine filter = all relevant
+  
+  // Check for positive indicators
+  let score = 0;
+  for (const term of searchTerms) {
+    const indicators = CUISINE_NAME_INDICATORS[term] || [term];
+    for (const ind of indicators) {
+      if (lower.includes(ind)) { score += 2; break; }
+    }
+  }
+  
+  // Check for negative indicators (penalize obvious mismatches)
+  const primaryCuisine = (cuisineType || cuisine || "").toLowerCase();
+  for (const [negCuisine, negTerms] of Object.entries(NEGATIVE_CUISINE_INDICATORS)) {
+    if (primaryCuisine.includes(negCuisine)) continue; // this IS the searched cuisine
+    for (const neg of negTerms) {
+      if (lower.includes(neg)) { score -= 3; break; }
+    }
+  }
+  
+  return score;
+}
+
 function selectCandidatesForVerification(
   candidates: Restaurant[],
-  maxCandidates: number
+  maxCandidates: number,
+  params?: SearchParams
 ): Restaurant[] {
   const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp"];
   const buckets = {
@@ -2477,7 +2535,18 @@ function selectCandidatesForVerification(
   // Proportional allocation: distribute slots based on candidate volume per platform.
   // OpenTable uses stealth proxy — allow more candidates since some will still fail.
   const total = candidates.length || 1;
-  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 10, yelp: 10 };
+  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 8, yelp: 10 };
+  // Pre-verification relevance sorting: rank candidates by name/URL relevance so
+  // obvious matches get verified first and mismatches only get checked if budget remains
+  if (params) {
+    for (const platform of platformOrder) {
+      buckets[platform] = buckets[platform]
+        .map(c => ({ c, score: scoreNameRelevance(c.name, c.platformUrl, params.cuisine || "", params.cuisineType || "", params.dishKeyword || "") }))
+        .sort((a, b) => b.score - a.score)
+        .map(x => x.c);
+    }
+  }
+
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
@@ -2542,7 +2611,7 @@ async function verifyAvailability(
   // one-time retry on timeout = no more lost nearby venues.
   let fcActiveCount = 0;
   const fcQueue: (() => void)[] = [];
-  const FC_MAX_CONCURRENT = 6;
+  const FC_MAX_CONCURRENT = 4;
   const acquireFcSlot = (): Promise<void> => {
     if (fcActiveCount < FC_MAX_CONCURRENT) { fcActiveCount++; return Promise.resolve(); }
     return new Promise<void>(resolve => fcQueue.push(resolve));
@@ -2554,6 +2623,15 @@ async function verifyAvailability(
   };
   // Per-provider timeout counters for diagnostics
   const timeoutCounts: Record<string, number> = { resy: 0, opentable: 0, yelp: 0 };
+  // Per-provider success/fail/skip counters for comprehensive diagnostics
+  const diagCounts: Record<string, { success: number; failed: number; blocked: number; timeout: number; noSlots: number; irrelevant: number; skipped: number }> = {
+    resy: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
+    opentable: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
+    yelp: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
+  };
+  // OT failure-aware budget: if consecutive OT failures exceed threshold, skip remaining
+  let otConsecutiveFailures = 0;
+  const OT_MAX_CONSECUTIVE_FAILURES = 4;
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
@@ -2561,13 +2639,20 @@ async function verifyAvailability(
        // Check global elapsed time before starting this candidate
        if (globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS) {
          console.log(`⏱ Skipping ${r.name} [${r.platform}] — global deadline exceeded (${Math.round((Date.now() - globalStartTime)/1000)}s)`);
+         diagCounts[r.platform].skipped++;
          return null;
        }
 
        const isYelp = r.platform === "yelp";
-
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
+
+      // OT failure-aware budget: skip if too many consecutive failures
+      if (isOT && otConsecutiveFailures >= OT_MAX_CONSECUTIVE_FAILURES) {
+        console.log(`⏱ Skipping ${r.name} [opentable] — ${otConsecutiveFailures} consecutive OT failures, preserving budget`);
+        diagCounts.opentable.skipped++;
+        return null;
+      }
 
       // ── YELP: Firecrawl reservation-page scrape ──
       let yelpSteelHtml = "";
@@ -2637,107 +2722,136 @@ async function verifyAvailability(
         };
 
       if (!isYelp) {
-        {
-          // ── Resy & OT: Use Firecrawl ──
-          // OT: use actions-based scraping with enhanced proxy for anti-bot bypass
-          const otPayload = isOT ? {
-            url: r.platformUrl,
-            formats: ["markdown", "html"],
-            onlyMainContent: false,
-            actions: [{ type: "wait", milliseconds: 5000 }],
-            timeout: 25000,
-            proxy: "stealth",
-          } : scrapePayload;
-          const primaryTimeout = isOT ? 30_000 : 15_000;
-          const retryTimeout = isOT ? 15_000 : 12_000;
-          await acquireFcSlot();
-          let resp: Response;
-          const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
-            const scrapeAbort = new AbortController();
-            const scrapeTimer = setTimeout(() => scrapeAbort.abort(), timeoutMs);
-            try {
-              const fcResp = await fetch(`${FIRECRAWL_API}/scrape`, {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${firecrawlKey}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify(payload),
-                signal: scrapeAbort.signal,
-              });
-              clearTimeout(scrapeTimer);
-              return fcResp;
-            } catch (err: any) {
-              clearTimeout(scrapeTimer);
-              if (err.name === "AbortError") return { aborted: true };
-              throw err;
-            }
-          };
+        // ── Resy & OT: Firecrawl scrape with cascade for OT ──
+        const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
+          const scrapeAbort = new AbortController();
+          const scrapeTimer = setTimeout(() => scrapeAbort.abort(), timeoutMs);
           try {
-            let attempt = await doScrape(primaryTimeout, otPayload);
-            if ("aborted" in attempt) {
-              timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
-              console.log(`Scrape timeout (${primaryTimeout/1000}s) for ${r.name} [${r.platform}] — retrying once`);
-              // Skip retry if we're near the global deadline
-              if (globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS) {
-                console.log(`⏱ Skipping retry for ${r.name} — global deadline exceeded`);
-                releaseFcSlot();
-                return null;
-              }
-              await new Promise(res => setTimeout(res, 300));
-              attempt = await doScrape(retryTimeout, { ...otPayload, timeout: retryTimeout - 2000 });
-              if ("aborted" in attempt) {
-                console.log(`Scrape timeout (${retryTimeout/1000}s retry) for ${r.name} [${r.platform}] — giving up`);
-                releaseFcSlot();
-                return null;
-              }
-            }
-            resp = attempt;
-          } catch (fetchErr: any) {
-            releaseFcSlot();
-            console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
-            return null;
+            const fcResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${firecrawlKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(payload),
+              signal: scrapeAbort.signal,
+            });
+            clearTimeout(scrapeTimer);
+            return fcResp;
+          } catch (err: any) {
+            clearTimeout(scrapeTimer);
+            if (err.name === "AbortError") return { aborted: true };
+            throw err;
           }
-          releaseFcSlot();
+        };
 
-          if (resp.status === 408) {
-            if (isOT) {
-              console.log(`Scrape 408 for ${r.name} [${r.platform}] — retrying once`);
-              if (!(globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS)) {
-                await new Promise(res => setTimeout(res, 500));
-                const retryResp = await doScrape(retryTimeout, { ...otPayload, timeout: retryTimeout - 2000 });
-                if (!("aborted" in retryResp) && retryResp.ok) {
-                  resp = retryResp;
-                } else {
-                  console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}] — skipping`);
-                  return null;
-                }
-              } else {
-                console.log(`⏱ Skipping 408 retry for ${r.name} — global deadline exceeded`);
+        // OT cascade: Strategy A (light, no proxy), then Strategy B (stealth) if A fails
+        // Resy: single light scrape (Resy doesn't block)
+        const lightPayload: Record<string, unknown> = {
+          url: r.platformUrl,
+          formats: isOT ? ["markdown", "html"] : ["markdown"],
+          onlyMainContent: false,
+        };
+        const stealthPayload: Record<string, unknown> = {
+          url: r.platformUrl,
+          formats: ["markdown", "html"],
+          onlyMainContent: false,
+          actions: [{ type: "wait", milliseconds: 3000 }],
+          timeout: 15000,
+          proxy: "stealth",
+        };
+
+        await acquireFcSlot();
+        let resp: Response | null = null;
+        let usedStealth = false;
+
+        try {
+          // Strategy A: Light scrape (fast, no browser rendering)
+          const lightTimeout = isOT ? 12_000 : 15_000;
+          let attempt = await doScrape(lightTimeout, lightPayload);
+          
+          if ("aborted" in attempt) {
+            timeoutCounts[r.platform]++;
+            // For OT: try stealth as fallback
+            if (isOT && !(globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS)) {
+              console.log(`  ${r.name} [opentable] light scrape timeout — trying stealth`);
+              attempt = await doScrape(20_000, stealthPayload);
+              usedStealth = true;
+              if ("aborted" in attempt) {
+                console.log(`  ${r.name} [opentable] stealth also timed out — skipping`);
+                diagCounts.opentable.timeout++;
+                otConsecutiveFailures++;
+                releaseFcSlot();
                 return null;
               }
             } else {
-              console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping`);
+              console.log(`Scrape timeout for ${r.name} [${r.platform}] — skipping`);
+              diagCounts[r.platform].timeout++;
+              if (isOT) otConsecutiveFailures++;
+              releaseFcSlot();
               return null;
             }
           }
-
-          if (!resp.ok) {
+          
+          resp = attempt as Response;
+          
+          // Handle 408 or non-OK: for OT, try stealth fallback if we haven't already
+          if ((resp.status === 408 || !resp.ok) && isOT && !usedStealth) {
+            const errStatus = resp.status;
+            await resp.text().catch(() => {}); // consume body
+            if (!(globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS)) {
+              console.log(`  ${r.name} [opentable] light scrape failed (${errStatus}) — trying stealth`);
+              await new Promise(res => setTimeout(res, 300));
+              const stealthAttempt = await doScrape(25_000, stealthPayload);
+              usedStealth = true;
+              if ("aborted" in stealthAttempt) {
+                console.log(`  ${r.name} [opentable] stealth timed out — skipping`);
+                diagCounts.opentable.timeout++;
+                otConsecutiveFailures++;
+                releaseFcSlot();
+                return null;
+              }
+              resp = stealthAttempt;
+            } else {
+              console.log(`⏱ Skipping stealth fallback for ${r.name} — global deadline exceeded`);
+              diagCounts.opentable.blocked++;
+              otConsecutiveFailures++;
+              releaseFcSlot();
+              return null;
+            }
+          }
+          
+          // Non-OT failures (Resy)
+          if (resp.status === 408 || !resp.ok) {
             const errBody = await resp.text().catch(() => "(no body)");
             console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
+            diagCounts[r.platform].failed++;
+            if (isOT) otConsecutiveFailures++;
+            releaseFcSlot();
             return null;
           }
-
-          data = await resp.json();
-          markdown = extractFirecrawlMarkdown(data);
-          html = extractFirecrawlHtml(data);
-          links = extractFirecrawlLinks(data);
-          jsonData = data?.data?.extract || data?.extract;
+        } catch (fetchErr: any) {
+          console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+          diagCounts[r.platform].failed++;
+          if (isOT) otConsecutiveFailures++;
+          releaseFcSlot();
+          return null;
         }
+        releaseFcSlot();
+
+        // Reset OT consecutive failure counter on success
+        if (isOT) otConsecutiveFailures = 0;
+
+        data = await resp!.json();
+        markdown = extractFirecrawlMarkdown(data);
+        html = extractFirecrawlHtml(data);
+        links = extractFirecrawlLinks(data);
+        jsonData = data?.data?.extract || data?.extract;
       }
 
       if (!markdown && !html && !jsonData) {
         console.log(`No content for ${r.name} [${r.platform}]`);
+        diagCounts[r.platform].failed++;
         return null;
       }
 
@@ -2980,6 +3094,7 @@ async function verifyAvailability(
             ? `dish="${params.dishKeyword}" OR cuisineType="${params.cuisineType}"`
             : cuisineTokens.join(", ");
           console.log(`✗ ${r.name} [${r.platform}] — failed cuisine relevance (${isDishSearch ? "dish" : "category"}) for: ${label} (checked: ${verifyTokens.join(", ")})`);
+          diagCounts[r.platform].irrelevant++;
           return null;
         }
         } // end non-OT cuisine check
@@ -2989,6 +3104,7 @@ async function verifyAvailability(
       // verify the restaurant page actually mentions it. Zero extra latency — uses already-scraped markdown.
       if (amenityTerms.length > 0 && !checkRelevanceInMarkdown(markdown, amenityTerms)) {
         console.log(`✗ ${r.name} [${r.platform}] — failed relevance check for: ${amenityTerms.join(", ")}`);
+        diagCounts[r.platform].irrelevant++;
         return null;
       }
 
@@ -3259,6 +3375,8 @@ async function verifyAvailability(
             
             r.timeSlots = top5.map(t => ({ time: t.time }));
             console.log(`✓ Verified ${r.name} [opentable] — ${top5.length} slots in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}): ${top5.map(t => t.time).join(", ")} | ${Date.now() - otVerifyStart}ms`);
+            diagCounts.opentable.success++;
+            otConsecutiveFailures = 0; // reset on success
             return r;
           } else {
             console.log(`✗ ${r.name} [opentable] — found ${foundTimes.length} slots but none in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}). Found: ${foundTimes.map(t => t.time).join(", ")} | ${Date.now() - otVerifyStart}ms`);
@@ -3371,6 +3489,7 @@ async function verifyAvailability(
 
       if (isYelp && foundTimes.length === 0) {
         console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after Firecrawl extraction`);
+        diagCounts.yelp.noSlots++;
         return null;
       }
 
@@ -3409,6 +3528,7 @@ async function verifyAvailability(
 
         r.timeSlots = matchingTimes.map((t) => ({ time: t.time }));
         console.log(`✓ Verified ${r.name} [${r.platform}] — ${matchingTimes.length} ${mealLabel} slots (${windowStart/60|0}:${(windowStart%60).toString().padStart(2,"0")}–${windowEnd/60|0}:${(windowEnd%60).toString().padStart(2,"0")}): ${matchingTimes.map(t => t.time).join(", ")}`);
+        diagCounts[r.platform].success++;
         return r;
       }
 
@@ -3418,6 +3538,7 @@ async function verifyAvailability(
       // If real slots exist but are outside window, or parser found nothing, reject.
       if (isOT && foundTimes.length === 0) {
         console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback) | selectSection=${markdown.toLowerCase().includes("select a time")}, mdLen=${markdown.length}, blocked=${markdown.length < 200 || /access denied/i.test(markdown)}`);
+        diagCounts.opentable.noSlots++;
         return null;
       }
 
@@ -3425,6 +3546,7 @@ async function verifyAvailability(
         console.log(`✗ ${r.name} [${r.platform}] — found ${foundTimes.length} slots but none in ${mealLabel} window (found: ${foundTimes.map(t => t.time).join(", ")})`);
       } else {
         console.log(`No time slots for ${r.name} [${r.platform}]`);
+        diagCounts[r.platform].noSlots++;
       }
       return null;
     } catch (err) {
@@ -3444,6 +3566,14 @@ async function verifyAvailability(
     .join(", ");
   if (timeoutSummary) {
     console.log(`[VERIFY] Scrape timeouts — ${timeoutSummary} (of ${totalCands} total candidates)`);
+  }
+  // Comprehensive per-provider diagnostics
+  for (const p of ["resy", "opentable", "yelp"] as const) {
+    const d = diagCounts[p];
+    const total = platformCands[p] || 0;
+    if (total > 0) {
+      console.log(`[DIAG] ${p}: ${total} candidates → ${d.success} verified, ${d.failed} failed, ${d.blocked} blocked, ${d.timeout} timeout, ${d.noSlots} noSlots, ${d.irrelevant} irrelevant, ${d.skipped} skipped`);
+    }
   }
 
   return checked.filter(Boolean) as Restaurant[];
