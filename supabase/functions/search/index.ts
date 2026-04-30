@@ -2644,9 +2644,8 @@ async function verifyAvailability(
             url: r.platformUrl,
             formats: ["markdown", "html"],
             onlyMainContent: false,
-            waitFor: 5000,
-            timeout: 15000,
-            proxy: "enhanced",
+            actions: [{ type: "wait", milliseconds: 5000 }],
+            timeout: 20000,
           } : scrapePayload;
           const primaryTimeout = isOT ? 20_000 : 15_000;
           const retryTimeout = isOT ? 15_000 : 12_000;
@@ -2701,8 +2700,25 @@ async function verifyAvailability(
           releaseFcSlot();
 
           if (resp.status === 408) {
-            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping`);
-            return null;
+            if (isOT) {
+              console.log(`Scrape 408 for ${r.name} [${r.platform}] — retrying once`);
+              if (!(globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS)) {
+                await new Promise(res => setTimeout(res, 500));
+                const retryResp = await doScrape(retryTimeout, { ...otPayload, timeout: retryTimeout - 2000 });
+                if (!("aborted" in retryResp) && retryResp.ok) {
+                  resp = retryResp;
+                } else {
+                  console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}] — skipping`);
+                  return null;
+                }
+              } else {
+                console.log(`⏱ Skipping 408 retry for ${r.name} — global deadline exceeded`);
+                return null;
+              }
+            } else {
+              console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping`);
+              return null;
+            }
           }
 
           if (!resp.ok) {
