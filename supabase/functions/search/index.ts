@@ -2463,9 +2463,65 @@ const NO_AVAILABILITY_SIGNALS = [
   "temporarily unavailable",
 ];
 
+// ─── Pre-verification relevance scoring ───
+// Ranks candidates by name/URL relevance to search cuisine BEFORE expensive scraping.
+// Obvious mismatches (Thai restaurant for "sushi") get sorted to the end so they're
+// only checked if budget remains.
+const CUISINE_NAME_INDICATORS: Record<string, string[]> = {
+  sushi: ["sushi", "japanese", "omakase", "ramen", "izakaya", "hibachi", "teppanyaki", "poke", "yakitori", "tempura", "udon", "sashimi", "maki", "nigiri", "robata"],
+  japanese: ["sushi", "japanese", "omakase", "ramen", "izakaya", "hibachi", "teppanyaki", "yakitori", "tempura", "udon", "robata"],
+  italian: ["italian", "pizza", "pasta", "trattoria", "ristorante", "osteria", "pizzeria"],
+  mexican: ["mexican", "taco", "taqueria", "cantina", "burrito", "enchilada"],
+  thai: ["thai", "pad thai", "tom yum", "bangkok"],
+  chinese: ["chinese", "dim sum", "szechuan", "sichuan", "cantonese", "wok", "dumpling"],
+  indian: ["indian", "curry", "tandoori", "masala", "biryani", "naan"],
+  korean: ["korean", "bbq", "bibimbap", "kimchi", "bulgogi"],
+  seafood: ["seafood", "fish", "oyster", "crab", "lobster", "shrimp", "clam"],
+  steak: ["steak", "steakhouse", "chophouse", "prime", "wagyu", "filet"],
+  french: ["french", "bistro", "brasserie", "crêpe", "patisserie"],
+  mediterranean: ["mediterranean", "greek", "hummus", "falafel", "kebab"],
+};
+
+// Negative indicators — if the restaurant name contains these AND the cuisine is NOT this type,
+// it's likely a mismatch (e.g., "Paya Thai" when searching for sushi)
+const NEGATIVE_CUISINE_INDICATORS: Record<string, string[]> = {
+  thai: ["thai", "bangkok", "pad thai"],
+  vietnamese: ["vietnamese", "pho", "banh mi", "viet"],
+  indian: ["indian", "curry house", "tandoori", "masala"],
+  mexican: ["mexican", "taqueria", "cantina"],
+  ethiopian: ["ethiopian", "habesha"],
+};
+
+function scoreNameRelevance(name: string, url: string, cuisine: string, cuisineType: string, dishKeyword: string): number {
+  const lower = `${name} ${url}`.toLowerCase();
+  const searchTerms = [cuisine, cuisineType, dishKeyword].filter(Boolean).map(s => s.toLowerCase());
+  if (searchTerms.length === 0) return 0; // no cuisine filter = all relevant
+  
+  // Check for positive indicators
+  let score = 0;
+  for (const term of searchTerms) {
+    const indicators = CUISINE_NAME_INDICATORS[term] || [term];
+    for (const ind of indicators) {
+      if (lower.includes(ind)) { score += 2; break; }
+    }
+  }
+  
+  // Check for negative indicators (penalize obvious mismatches)
+  const primaryCuisine = (cuisineType || cuisine || "").toLowerCase();
+  for (const [negCuisine, negTerms] of Object.entries(NEGATIVE_CUISINE_INDICATORS)) {
+    if (primaryCuisine.includes(negCuisine)) continue; // this IS the searched cuisine
+    for (const neg of negTerms) {
+      if (lower.includes(neg)) { score -= 3; break; }
+    }
+  }
+  
+  return score;
+}
+
 function selectCandidatesForVerification(
   candidates: Restaurant[],
-  maxCandidates: number
+  maxCandidates: number,
+  params?: SearchParams
 ): Restaurant[] {
   const platformOrder: Array<Restaurant["platform"]> = ["resy", "opentable", "yelp"];
   const buckets = {
@@ -2478,9 +2534,15 @@ function selectCandidatesForVerification(
   // OpenTable uses stealth proxy — allow more candidates since some will still fail.
   const total = candidates.length || 1;
   const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 10, yelp: 10 };
-  // Pre-verification relevance filter: reject obvious mismatches before spending scrape budget
-  for (const platform of platformOrder) {
-    buckets[platform] = preFilterByRelevance(buckets[platform], candidates[0] ? (candidates as any) : []);
+  // Pre-verification relevance sorting: rank candidates by name/URL relevance so
+  // obvious matches get verified first and mismatches only get checked if budget remains
+  if (params) {
+    for (const platform of platformOrder) {
+      buckets[platform] = buckets[platform]
+        .map(c => ({ c, score: scoreNameRelevance(c.name, c.platformUrl, params.cuisine || "", params.cuisineType || "", params.dishKeyword || "") }))
+        .sort((a, b) => b.score - a.score)
+        .map(x => x.c);
+    }
   }
 
   const quotas: Record<string, number> = {};
@@ -2510,15 +2572,6 @@ function selectCandidatesForVerification(
   }
 
   return selected;
-}
-
-// ─── Pre-verification relevance filter ───
-// Check candidate name/URL/title for basic relevance to search cuisine BEFORE expensive scraping.
-// This avoids spending scrape budget on candidates that are obviously wrong (e.g. Thai restaurant for "sushi" query).
-function preFilterByRelevance(candidates: Restaurant[], _all: Restaurant[]): Restaurant[] {
-  // This is called per-platform bucket — each candidate has a cuisine from the search params.
-  // We can't check page content (haven't scraped yet), but we CAN check the name/URL slug.
-  return candidates; // Filtering is done in the main flow with access to params
 }
 
 async function verifyAvailability(
