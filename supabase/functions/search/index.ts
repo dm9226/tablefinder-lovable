@@ -2516,6 +2516,9 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
+  // Global elapsed-time guard: skip candidates if we're nearing the 150s edge function limit
+  const VERIFY_DEADLINE_MS = 105_000; // stop starting new scrapes after 105s elapsed
+
   // Steel.dev concurrency limiter (hobby tier: be conservative)
   let steelActiveCount = 0;
   const steelQueue: (() => void)[] = [];
@@ -2555,6 +2558,12 @@ async function verifyAvailability(
   // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
      try {
+       // Check global elapsed time before starting this candidate
+       if (globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS) {
+         console.log(`⏱ Skipping ${r.name} [${r.platform}] — global deadline exceeded (${Math.round((Date.now() - globalStartTime)/1000)}s)`);
+         return null;
+       }
+
        const isYelp = r.platform === "yelp";
 
       const isResy = r.platform === "resy";
