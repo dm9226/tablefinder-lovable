@@ -2081,18 +2081,18 @@ async function verifyAvailability(
     if (next) { steelActiveCount++; next(); }
   };
 
-  // Run scrapes in batches of 6 to avoid overwhelming Firecrawl (prevents mass timeouts)
-  const BATCH_SIZE = 6;
+  // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts)
+  const BATCH_SIZE = 4;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Early exit: if we already have enough verified results, stop scraping
     const verifiedSoFar = allChecked.filter(Boolean).length;
-    if (verifiedSoFar >= 10) {
+    if (verifiedSoFar >= 8) {
       console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
       break;
     }
-    // Time guard: stop if we've used more than 85s of the global budget
-    if (globalStartTime && (Date.now() - globalStartTime) > 85_000) {
+    // Time guard: stop if we've used more than 50s of the global budget
+    if (globalStartTime && (Date.now() - globalStartTime) > 50_000) {
       console.log(`Time guard: ${Math.round((Date.now() - globalStartTime) / 1000)}s elapsed, stopping verification with ${verifiedSoFar} results`);
       break;
     }
