@@ -2630,10 +2630,10 @@ async function verifyAvailability(
       if (!isYelp) {
         {
           // ── Resy & OT: Use Firecrawl ──
-          // OT needs longer waitFor (8s) for JS booking widget to render
-          const otPayload = isOT ? { ...scrapePayload, waitFor: 8000 } : scrapePayload;
-          const primaryTimeout = isOT ? 20_000 : 15_000;
-          const retryTimeout = isOT ? 15_000 : 12_000;
+          // OT needs waitFor for JS booking widget to render
+          const otPayload = isOT ? { ...scrapePayload, waitFor: 5000 } : scrapePayload;
+          const primaryTimeout = isOT ? 25_000 : 15_000;
+          const retryTimeout = isOT ? 20_000 : 12_000;
           await acquireFcSlot();
           let resp: Response;
           const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
