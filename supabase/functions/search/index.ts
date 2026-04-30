@@ -1440,235 +1440,86 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Scrape Yelp search results via Steel.dev stealth browser (Firecrawl can't bypass DataDome)
-    const steelApiKey = Deno.env.get("STEEL_API_KEY");
-    if (!steelApiKey) {
-      console.log("Yelp discovery skipped: STEEL_API_KEY not configured");
+    // Use Yelp Fusion API for discovery (Steel.dev hobby tier can't bypass DataDome)
+    const yelpApiKey = Deno.env.get("YELP_API_KEY");
+    if (!yelpApiKey) {
+      console.log("Yelp discovery skipped: YELP_API_KEY not configured");
       return [];
     }
 
-    let markdown = "";
-    let links: string[] = [];
-    let steelSessionId: string | null = null;
-
-      console.log("[YELP_STEEL] Starting Steel.dev discovery session...");
+    console.log("[YELP_FUSION] Starting Yelp Fusion API discovery...");
+    
+    // Build Fusion API request
+    const fusionUrl = new URL("https://api.yelp.com/v3/businesses/search");
+    fusionUrl.searchParams.set("term", searchTerm);
+    fusionUrl.searchParams.set("location", yelpLocation);
+    fusionUrl.searchParams.set("limit", "20");
+    fusionUrl.searchParams.set("sort_by", "best_match");
+    // Filter for restaurants with reservations
+    fusionUrl.searchParams.set("categories", "restaurants");
+    if (params.lat && params.lng) {
+      fusionUrl.searchParams.set("latitude", String(params.lat));
+      fusionUrl.searchParams.set("longitude", String(params.lng));
+    }
+    
+    let fusionBusinesses: any[] = [];
     try {
-      // 1. Create Steel session with proxy + captcha solving
-      const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
-        method: "POST",
+      const fusionResp = await fetch(fusionUrl.toString(), {
         headers: {
-          "steel-api-key": steelApiKey,
-          "Content-Type": "application/json",
+          "Authorization": `Bearer ${yelpApiKey}`,
+          "Accept": "application/json",
         },
-        body: JSON.stringify({
-          useProxy: false,
-          solveCaptcha: false,
-        }),
       });
-      if (!sessionResp.ok) {
-        const errText = await sessionResp.text().catch(() => "");
-        console.log(`Yelp discovery Steel session failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
+      if (!fusionResp.ok) {
+        const errText = await fusionResp.text().catch(() => "");
+        console.log(`[YELP_FUSION] API error (${fusionResp.status}): ${errText.slice(0, 300)}`);
         return [];
       }
-      const sessionData = await sessionResp.json();
-      steelSessionId = sessionData.id;
-      if (!steelSessionId) {
-        console.log("Yelp discovery Steel session missing id");
-        return [];
-      }
-      console.log(`[YELP_STEEL] Session created: ${steelSessionId}`);
-
-      // 2. Connect via CDP WebSocket
-      const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
-      const ws = new WebSocket(connectUrl);
-      let cdpId = 1;
-      const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
-      let cdpSessionId: string | null = null;
-
-      const cdpSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
-        return new Promise((resolve, reject) => {
-          const id = cdpId++;
-          pending.set(id, { resolve, reject });
-          const msg: Record<string, unknown> = { id, method, params };
-          if (cdpSessionId) msg.sessionId = cdpSessionId;
-          ws.send(JSON.stringify(msg));
-          setTimeout(() => {
-            if (pending.has(id)) {
-              pending.delete(id);
-              reject(new Error(`CDP timeout: ${method}`));
-            }
-          }, 30000);
-        });
-      };
-
-      await new Promise<void>((resolve, reject) => {
-        ws.onopen = () => resolve();
-        ws.onerror = (e) => reject(e);
-        setTimeout(() => reject(new Error("WS connect timeout")), 15000);
-      });
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(typeof event.data === "string" ? event.data : "{}");
-          if (msg.id && pending.has(msg.id)) {
-            const p = pending.get(msg.id)!;
-            pending.delete(msg.id);
-            if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
-            else p.resolve(msg.result);
-          }
-        } catch (_) {}
-      };
-
-      // 3. Create target, attach, navigate
-      const targetResult = await cdpSend("Target.createTarget", { url: "about:blank" });
-      const targetId = targetResult?.targetId;
-      if (!targetId) throw new Error("Failed to create browser target");
-
-      const attachResult = await cdpSend("Target.attachToTarget", { targetId, flatten: true });
-      cdpSessionId = attachResult?.sessionId;
-      if (!cdpSessionId) throw new Error("Failed to attach to target");
-
-      await cdpSend("Page.enable");
-      await cdpSend("Runtime.enable");
-      await cdpSend("Page.navigate", { url: yelpSearchUrl.toString() });
-
-      // Wait for page to render
-      await new Promise(resolve => setTimeout(resolve, 8000));
-
-      // 4. Scroll down to load more results
-      for (let i = 0; i < 3; i++) {
-        await cdpSend("Runtime.evaluate", {
-          expression: `window.scrollBy(0, 1500); 'scrolled-${i}'`,
-          returnByValue: true,
-        });
-        await new Promise(resolve => setTimeout(resolve, 1500));
-      }
-
-      // 5. Extract page text content and all links
-      const extractResult = await cdpSend("Runtime.evaluate", {
-        expression: `
-          (function() {
-            const anchors = Array.from(document.querySelectorAll('a[href]'));
-            const hrefs = anchors.map(a => a.href).filter(h => h.includes('yelp.com'));
-            const text = document.body.innerText || document.body.textContent || '';
-            return JSON.stringify({ text: text, links: hrefs });
-          })()
-        `,
-        returnByValue: true,
-      });
-
-      const extracted = JSON.parse(extractResult?.result?.value || '{"text":"","links":[]}');
-      markdown = extracted.text || "";
-      links = extracted.links || [];
-
-      // Close WebSocket
-      try { ws.close(); } catch (_) {}
-
-      console.log(`Yelp Steel discovery: links=${links.length}, markdown=${markdown.length} chars`);
-      console.log(`[DEBUG] Yelp Steel discovery text (first 1500 chars):\n${markdown.slice(0, 1500)}`);
-    } catch (steelErr: any) {
-      console.log(`Yelp discovery Steel error: ${steelErr.message || steelErr}`);
-    } finally {
-      // Release Steel session
-      if (steelSessionId) {
-        try {
-          await fetch(`https://api.steel.dev/v1/sessions/${steelSessionId}/release`, {
-            method: "POST",
-            headers: { "steel-api-key": steelApiKey! },
-          });
-        } catch (_) {}
-      }
+      const fusionData = await fusionResp.json();
+      fusionBusinesses = fusionData.businesses || [];
+      console.log(`[YELP_FUSION] Found ${fusionBusinesses.length} businesses`);
+    } catch (fusionErr: any) {
+      console.log(`[YELP_FUSION] Error: ${fusionErr.message || fusionErr}`);
+      return [];
     }
 
-    // Parse restaurants from markdown using regex patterns
-    // Yelp markdown typically has restaurant names as bold or header text followed by ratings, categories, and time slots
-    const extracted = parseYelpMarkdownResults(markdown);
-    console.log(`Yelp markdown parsed ${extracted.length} restaurants`);
-
-    // Build markdown-based time slot map (already done during parsing)
-    const markdownTimesMap = new Map<string, string[]>();
-    for (const rest of extracted) {
-      if (rest.availableTimes.length > 0) {
-        markdownTimesMap.set(rest.name, rest.availableTimes);
-      }
-    }
-
-    // Build alias map from links for URL construction
-    const reservationLinkMap = new Map<string, string>();
-    const bizLinkMap = new Map<string, string>();
-    for (const link of links) {
-      const alias = extractYelpAliasFromUrl(link);
-      if (!alias) continue;
-      if (/\/reservations\//i.test(link)) {
-        if (!reservationLinkMap.has(alias)) reservationLinkMap.set(alias, link);
-      } else if (/\/biz\//i.test(link)) {
-        if (!bizLinkMap.has(alias)) bizLinkMap.set(alias, link);
-      }
-    }
-
-    // Match extracted restaurants to URLs
+    // Convert Fusion API businesses to Restaurant candidates
     const results: Restaurant[] = [];
-    for (const rest of extracted) {
-      let alias: string | null = null;
-      let reservationUrl: string | null = null;
-      let bizUrl: string | null = null;
-
-      if (rest.reservationUrl) {
-        alias = extractYelpAliasFromUrl(rest.reservationUrl);
-        reservationUrl = rest.reservationUrl;
+    for (const biz of fusionBusinesses) {
+      // Check if business supports reservations via transactions field
+      const hasReservation = biz.transactions?.includes("restaurant_reservation");
+      
+      const alias = biz.alias || biz.id;
+      const categories = (biz.categories || []).map((c: any) => c.title).join(", ");
+      const categoryAliases = (biz.categories || []).map((c: any) => c.alias).join(" ");
+      
+      // Build reservation URL
+      const reservationUrl = `https://www.yelp.com/reservations/${alias}`;
+      const distMiles = biz.distance ? +(biz.distance / 1609.34).toFixed(1) : null;
+      
+      // Only include businesses that support reservations
+      if (!hasReservation) {
+        continue;
       }
-      if (rest.businessUrl) {
-        alias = alias || extractYelpAliasFromUrl(rest.businessUrl);
-        bizUrl = rest.businessUrl;
-      }
-
-      if (!alias) {
-        const normalizedName = rest.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-        for (const [a] of reservationLinkMap) {
-          if (a.includes(normalizedName) || normalizedName.includes(a.split("-").slice(0, -1).join("-"))) {
-            alias = a;
-            break;
-          }
-        }
-        if (!alias) {
-          for (const [a] of bizLinkMap) {
-            if (a.includes(normalizedName) || normalizedName.includes(a.split("-").slice(0, -1).join("-"))) {
-              alias = a;
-              break;
-            }
-          }
-        }
-      }
-
-      if (!alias) {
-        alias = rest.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      }
-
-      reservationUrl = reservationUrl || reservationLinkMap.get(alias) || null;
-      bizUrl = bizUrl || bizLinkMap.get(alias) || null;
-      const bestUrl = reservationUrl || (bizUrl ? bizUrl.replace("/biz/", "/reservations/") : `https://www.yelp.com/reservations/${alias}`);
-
-      // Use times from parsing
-      const allTimes = rest.availableTimes;
-
+      
       results.push({
         id: `yelp-${alias}`,
-        name: rest.name,
-        cuisine: rest.cuisineCategories.length > 0 ? rest.cuisineCategories.join(", ") : (params.cuisine || "Restaurant"),
-        neighborhood: rest.neighborhood || params.city,
-        rating: rest.rating,
-        reviewCount: typeof (rest as any).review_count === "number" ? (rest as any).review_count : undefined,
-        priceRange: rest.priceRange,
-        imageUrl: undefined,
+        name: biz.name,
+        cuisine: categories || (params.cuisine || "Restaurant"),
+        neighborhood: biz.location?.city || params.city,
+        rating: biz.rating,
+        reviewCount: biz.review_count,
+        priceRange: biz.price,
+        imageUrl: biz.image_url,
         platform: "yelp" as const,
-        platformUrl: buildYelpAvailabilityUrl(bestUrl, params),
-        timeSlots: allTimes.map(time => ({ time })),
-        distanceMiles: null,
-        _yelpCategories: rest.cuisineCategories.join(" ").toLowerCase() || alias.replace(/-/g, " "),
+        platformUrl: buildYelpAvailabilityUrl(reservationUrl, params),
+        timeSlots: [], // Will be populated during verification
+        distanceMiles: distMiles,
+        _yelpCategories: categoryAliases || alias.replace(/-/g, " "),
       });
     }
 
-    console.log(`Yelp extract candidates: ${results.length}, with slots: ${results.filter(r => r.timeSlots.length > 0).length}`);
+    console.log(`[YELP_FUSION] Candidates with reservations: ${results.length}`);
     return results;
   } catch (err) {
     console.error("Yelp scrape error:", err);
