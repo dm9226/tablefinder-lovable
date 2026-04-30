@@ -2605,7 +2605,7 @@ async function verifyAvailability(
         // Acquire Firecrawl slot (cap concurrency to avoid contention timeouts).
         await acquireFcSlot();
         let resp: Response;
-        const doScrape = async (timeoutMs: number): Promise<Response | { aborted: true }> => {
+        const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
           const scrapeAbort = new AbortController();
           const scrapeTimer = setTimeout(() => scrapeAbort.abort(), timeoutMs);
           try {
@@ -2615,7 +2615,7 @@ async function verifyAvailability(
                 Authorization: `Bearer ${firecrawlKey}`,
                 "Content-Type": "application/json",
               },
-              body: JSON.stringify(scrapePayload),
+              body: JSON.stringify(payload),
               signal: scrapeAbort.signal,
             });
             clearTimeout(scrapeTimer);
@@ -2627,15 +2627,14 @@ async function verifyAvailability(
           }
         };
         try {
-          let attempt = await doScrape(35_000);
+          let attempt = await doScrape(15_000, scrapePayload);
           if ("aborted" in attempt) {
             timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
-            console.log(`Scrape timeout (35s) for ${r.name} [${r.platform}] — retrying once`);
-            // Brief stagger so Firecrawl recovers, then retry
-            await new Promise(res => setTimeout(res, 500));
-            attempt = await doScrape(30_000);
+            console.log(`Scrape timeout (15s) for ${r.name} [${r.platform}] — retrying once`);
+            await new Promise(res => setTimeout(res, 300));
+            attempt = await doScrape(12_000, { ...scrapePayload, timeout: 10000 });
             if ("aborted" in attempt) {
-              console.log(`Scrape timeout (30s retry) for ${r.name} [${r.platform}] — giving up`);
+              console.log(`Scrape timeout (12s retry) for ${r.name} [${r.platform}] — giving up`);
               releaseFcSlot();
               return null;
             }
@@ -2649,25 +2648,8 @@ async function verifyAvailability(
         releaseFcSlot();
 
         if (resp.status === 408) {
-          console.log(`Scrape timeout (408) for ${r.name} [${r.platform}], retrying once...`);
-          const retryAbort = new AbortController();
-          const retryTimer = setTimeout(() => retryAbort.abort(), 20_000);
-          try {
-            resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${firecrawlKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ ...scrapePayload, timeout: 15000 }),
-              signal: retryAbort.signal,
-            });
-          } catch (retryFetchErr: any) {
-            clearTimeout(retryTimer);
-            console.log(`Scrape 408 retry failed for ${r.name} [${r.platform}]: ${retryFetchErr.name === "AbortError" ? "timeout" : retryFetchErr}`);
-            return null;
-          }
-          clearTimeout(retryTimer);
+          console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
+          return null;
         }
 
         if (!resp.ok) {
