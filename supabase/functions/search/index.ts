@@ -2455,22 +2455,22 @@ function selectCandidatesForVerification(
     yelp: candidates.filter((c) => c.platform === "yelp"),
   };
 
-  // Proportional allocation: distribute slots based on candidate volume per platform
+  // Proportional allocation: distribute slots based on candidate volume per platform.
+  // OpenTable is currently frequently blocked/408ing, so keep a hard cap on it.
   const total = candidates.length || 1;
+  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 3, yelp: 10 };
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
     const raw = Math.round((buckets[platform].length / total) * maxCandidates);
-    // Cap quota to actual bucket size; Yelp capped at 10 due to waitFor latency cost
-    const platformCap = platform === "yelp" ? Math.min(raw, 10) : platform === "opentable" ? Math.min(raw, 5) : raw;
-    quotas[platform] = Math.min(platformCap, buckets[platform].length);
+    quotas[platform] = Math.min(raw, hardCaps[platform], buckets[platform].length);
     assigned += quotas[platform];
   }
   // Distribute any remaining slots (due to rounding or capped buckets) round-robin
   let remaining = maxCandidates - assigned;
   for (const platform of platformOrder) {
     if (remaining <= 0) break;
-    const canAdd = buckets[platform].length - quotas[platform];
+    const canAdd = Math.min(buckets[platform].length, hardCaps[platform]) - quotas[platform];
     if (canAdd > 0) {
       const add = Math.min(canAdd, remaining);
       quotas[platform] += add;
