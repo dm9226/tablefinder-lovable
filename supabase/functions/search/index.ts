@@ -166,10 +166,51 @@ interface ApiKeys {
   _startTime?: number;
 }
 
+// Shared concurrency pools — created once in the main handler and passed to all
+// verifyAvailability calls so that Resy, OT, and Yelp share a single global cap.
+interface ConcurrencyPools {
+  acquireFast: () => Promise<void>;
+  releaseFast: () => void;
+  acquireOt: () => Promise<void>;
+  releaseOt: () => void;
+}
+
+function createConcurrencyPools(): ConcurrencyPools {
+  // Fast pool (Resy + Yelp): lightweight scrapes, higher concurrency
+  let fastActive = 0;
+  const fastQueue: (() => void)[] = [];
+  const FAST_MAX = 5;
+  // OT pool: stealth proxy scrapes are slow (20s+), cap low
+  let otActive = 0;
+  const otQueue: (() => void)[] = [];
+  const OT_MAX = 2;
+
+  return {
+    acquireFast: () => {
+      if (fastActive < FAST_MAX) { fastActive++; return Promise.resolve(); }
+      return new Promise<void>(resolve => fastQueue.push(resolve));
+    },
+    releaseFast: () => {
+      fastActive--;
+      const next = fastQueue.shift();
+      if (next) { fastActive++; next(); }
+    },
+    acquireOt: () => {
+      if (otActive < OT_MAX) { otActive++; return Promise.resolve(); }
+      return new Promise<void>(resolve => otQueue.push(resolve));
+    },
+    releaseOt: () => {
+      otActive--;
+      const next = otQueue.shift();
+      if (next) { otActive++; next(); }
+    },
+  };
+}
+
 interface ProviderAdapter {
   platform: "resy" | "opentable" | "yelp";
   discover(params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
-  verify(candidates: Restaurant[], params: SearchParams, keys: ApiKeys, amenityTerms: string[]): Promise<Restaurant[]>;
+  verify(candidates: Restaurant[], params: SearchParams, keys: ApiKeys, amenityTerms: string[], pools: ConcurrencyPools): Promise<Restaurant[]>;
 }
 
 // Caching removed — all searches are fresh
