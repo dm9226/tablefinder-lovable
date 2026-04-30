@@ -214,7 +214,7 @@ serve(async (req) => {
 
       // Verify a smaller balanced slice for extended searches so blocked OT candidates
       // cannot dominate the follow-up request budget.
-      const toVerify = selectCandidatesForVerification((incomingCandidates as Restaurant[]), 12);
+     const toVerify = selectCandidatesForVerification((incomingCandidates as Restaurant[]), 12, params);
       const selectedIds = new Set(toVerify.map(r => r.name + r.platform));
       const leftover = (incomingCandidates as Restaurant[]).filter(c => !selectedIds.has(c.name + c.platform));
 
@@ -380,7 +380,7 @@ serve(async (req) => {
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
     const maxCandidates = isVagueQuery ? 24 : 30;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
-    const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
+    const selected = selectCandidatesForVerification(allCandidates, maxCandidates, params);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
     console.log(`Verifying (capped): total=${selected.length}, ${Object.entries(selectedCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
