@@ -2698,6 +2698,7 @@ async function verifyAvailability(
       let data: any = null;
 
       if (isYelp) {
+        await acquireFastSlot();
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 15_000);
         let yelpResp: Response;
@@ -2719,6 +2720,7 @@ async function verifyAvailability(
         } catch (fetchErr: any) {
           clearTimeout(scrapeTimer);
           console.log(`✗ ${r.name} [yelp] — Firecrawl fetch error: ${fetchErr.name === "AbortError" ? "timeout" : fetchErr}`);
+          releaseFastSlot();
           return null;
         }
         clearTimeout(scrapeTimer);
@@ -2726,8 +2728,10 @@ async function verifyAvailability(
         if (!yelpResp.ok) {
           const errBody = await yelpResp.text().catch(() => "");
           console.log(`✗ ${r.name} [yelp] — Firecrawl scrape failed (${yelpResp.status}): ${errBody.slice(0, 300)}`);
+          releaseFastSlot();
           return null;
         }
+        releaseFastSlot();
 
         const yelpData = await yelpResp.json();
         const yelpMarkdown = extractFirecrawlMarkdown(yelpData);
