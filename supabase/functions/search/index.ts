@@ -2611,7 +2611,7 @@ async function verifyAvailability(
   // one-time retry on timeout = no more lost nearby venues.
   let fcActiveCount = 0;
   const fcQueue: (() => void)[] = [];
-  const FC_MAX_CONCURRENT = 4;
+  const FC_MAX_CONCURRENT = 6;
   const acquireFcSlot = (): Promise<void> => {
     if (fcActiveCount < FC_MAX_CONCURRENT) { fcActiveCount++; return Promise.resolve(); }
     return new Promise<void>(resolve => fcQueue.push(resolve));
@@ -2629,9 +2629,8 @@ async function verifyAvailability(
     opentable: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
     yelp: { success: 0, failed: 0, blocked: 0, timeout: 0, noSlots: 0, irrelevant: 0, skipped: 0 },
   };
-  // OT failure-aware budget: if consecutive OT failures exceed threshold, skip remaining
+  // OT consecutive failure counter — diagnostic only, not a hard gate
   let otConsecutiveFailures = 0;
-  const OT_MAX_CONSECUTIVE_FAILURES = 4;
 
   // Run ALL scrapes in parallel (Firecrawl handles concurrency, Steel is rate-limited)
   const checked = await Promise.all(candidates.map(async (r) => {
@@ -2646,13 +2645,6 @@ async function verifyAvailability(
        const isYelp = r.platform === "yelp";
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
-
-      // OT failure-aware budget: skip if too many consecutive failures
-      if (isOT && otConsecutiveFailures >= OT_MAX_CONSECUTIVE_FAILURES) {
-        console.log(`⏱ Skipping ${r.name} [opentable] — ${otConsecutiveFailures} consecutive OT failures, preserving budget`);
-        diagCounts.opentable.skipped++;
-        return null;
-      }
 
       // ── YELP: Firecrawl reservation-page scrape ──
       let yelpSteelHtml = "";
@@ -2711,16 +2703,6 @@ async function verifyAvailability(
 
       // ── Non-Yelp: Firecrawl scrape (Resy / OpenTable) ──
       // OT gets both markdown + HTML so the HTML slot parser can run as fallback
-      const scrapePayload: Record<string, unknown> = isOT ? {
-          url: r.platformUrl,
-          formats: ["markdown", "html"],
-          onlyMainContent: false,
-        } : {
-          url: r.platformUrl,
-          formats: ["markdown"],
-          onlyMainContent: false,
-        };
-
       if (!isYelp) {
         // ── Resy & OT: Firecrawl scrape with cascade for OT ──
         const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
@@ -2745,83 +2727,41 @@ async function verifyAvailability(
           }
         };
 
-        // OT cascade: Strategy A (light, no proxy), then Strategy B (stealth) if A fails
-        // Resy: single light scrape (Resy doesn't block)
-        const lightPayload: Record<string, unknown> = {
-          url: r.platformUrl,
-          formats: isOT ? ["markdown", "html"] : ["markdown"],
-          onlyMainContent: false,
-        };
-        const stealthPayload: Record<string, unknown> = {
+        // OT: single direct stealth scrape. Akamai blocks all non-proxy attempts so a
+        // light-first cascade only wastes time budget. Resy needs no proxy.
+        const otPayload: Record<string, unknown> = {
           url: r.platformUrl,
           formats: ["markdown", "html"],
           onlyMainContent: false,
-          actions: [{ type: "wait", milliseconds: 3000 }],
-          timeout: 15000,
+          actions: [{ type: "wait", milliseconds: 5000 }],
+          timeout: 25000,
           proxy: "stealth",
+        };
+        const resyPayload: Record<string, unknown> = {
+          url: r.platformUrl,
+          formats: ["markdown"],
+          onlyMainContent: false,
         };
 
         await acquireFcSlot();
         let resp: Response | null = null;
-        let usedStealth = false;
 
         try {
-          // Strategy A: Light scrape (fast, no browser rendering)
-          const lightTimeout = isOT ? 12_000 : 15_000;
-          let attempt = await doScrape(lightTimeout, lightPayload);
-          
+          const scrapePayloadFinal = isOT ? otPayload : resyPayload;
+          const clientTimeout = isOT ? 30_000 : 15_000;
+          const attempt = await doScrape(clientTimeout, scrapePayloadFinal);
+
           if ("aborted" in attempt) {
             timeoutCounts[r.platform]++;
-            // For OT: try stealth as fallback
-            if (isOT && !(globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS)) {
-              console.log(`  ${r.name} [opentable] light scrape timeout — trying stealth`);
-              attempt = await doScrape(20_000, stealthPayload);
-              usedStealth = true;
-              if ("aborted" in attempt) {
-                console.log(`  ${r.name} [opentable] stealth also timed out — skipping`);
-                diagCounts.opentable.timeout++;
-                otConsecutiveFailures++;
-                releaseFcSlot();
-                return null;
-              }
-            } else {
-              console.log(`Scrape timeout for ${r.name} [${r.platform}] — skipping`);
-              diagCounts[r.platform].timeout++;
-              if (isOT) otConsecutiveFailures++;
-              releaseFcSlot();
-              return null;
-            }
+            diagCounts[r.platform].timeout++;
+            if (isOT) otConsecutiveFailures++;
+            console.log(`Scrape timeout for ${r.name} [${r.platform}]`);
+            releaseFcSlot();
+            return null;
           }
-          
+
           resp = attempt as Response;
-          
-          // Handle 408 or non-OK: for OT, try stealth fallback if we haven't already
-          if ((resp.status === 408 || !resp.ok) && isOT && !usedStealth) {
-            const errStatus = resp.status;
-            await resp.text().catch(() => {}); // consume body
-            if (!(globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS)) {
-              console.log(`  ${r.name} [opentable] light scrape failed (${errStatus}) — trying stealth`);
-              await new Promise(res => setTimeout(res, 300));
-              const stealthAttempt = await doScrape(25_000, stealthPayload);
-              usedStealth = true;
-              if ("aborted" in stealthAttempt) {
-                console.log(`  ${r.name} [opentable] stealth timed out — skipping`);
-                diagCounts.opentable.timeout++;
-                otConsecutiveFailures++;
-                releaseFcSlot();
-                return null;
-              }
-              resp = stealthAttempt;
-            } else {
-              console.log(`⏱ Skipping stealth fallback for ${r.name} — global deadline exceeded`);
-              diagCounts.opentable.blocked++;
-              otConsecutiveFailures++;
-              releaseFcSlot();
-              return null;
-            }
-          }
-          
-          // Non-OT failures (Resy)
+
           if (resp.status === 408 || !resp.ok) {
             const errBody = await resp.text().catch(() => "(no body)");
             console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
@@ -2839,7 +2779,7 @@ async function verifyAvailability(
         }
         releaseFcSlot();
 
-        // Reset OT consecutive failure counter on success
+        // Diagnostic only — reset on success
         if (isOT) otConsecutiveFailures = 0;
 
         data = await resp!.json();
