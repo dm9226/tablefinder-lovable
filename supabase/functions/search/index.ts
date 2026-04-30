@@ -263,7 +263,7 @@ serve(async (req) => {
       let verified = (await Promise.all(
         adapters.map(a => a.verify(
           toVerify.filter((c: Restaurant) => c.platform === a.platform),
-          params, keys, amenityTerms
+          params, keys, amenityTerms, pools
         ))
       )).flat();
       console.log(`[EXTENDED] Verified: ${verified.length}/${toVerify.length}`);
