@@ -2621,6 +2621,7 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: ["markdown", "html"],
           onlyMainContent: false,
+          waitFor: 5000,
         } : {
           url: r.platformUrl,
           formats: ["markdown"],
@@ -2653,14 +2654,9 @@ async function verifyAvailability(
           }
         };
         try {
-          let attempt = await doScrape(isOT ? 8_000 : 15_000, scrapePayload);
+          let attempt = await doScrape(15_000, scrapePayload);
           if ("aborted" in attempt) {
             timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
-            if (isOT) {
-              console.log(`Scrape timeout (8s) for ${r.name} [opentable] — skipping OT candidate`);
-              releaseFcSlot();
-              return null;
-            }
             console.log(`Scrape timeout (15s) for ${r.name} [${r.platform}] — retrying once`);
             await new Promise(res => setTimeout(res, 300));
             attempt = await doScrape(12_000, { ...scrapePayload, timeout: 10000 });
