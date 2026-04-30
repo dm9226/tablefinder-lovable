@@ -2849,6 +2849,7 @@ async function verifyAvailability(
       }
       
       if (verifyTokens.length > 0) {
+        const isDishSearch = !!params.dishKeyword;
         // DEFER cuisine check for OpenTable — OT page scrapes are often too thin
         // to contain cuisine keywords. Check AFTER slot parsing instead.
         if (isOT) {
@@ -2858,7 +2859,6 @@ async function verifyAvailability(
         } else {
         const restaurantName = (r.name || "").toLowerCase();
         const pageText = `${lower} ${restaurantName}`;
-        const isDishSearch = !!params.dishKeyword;
 
         const tokenMatches = (text: string, token: string): boolean => {
           if (text.includes(token)) return true;
