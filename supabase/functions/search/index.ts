@@ -3488,6 +3488,7 @@ async function verifyAvailability(
 
       if (isYelp && foundTimes.length === 0) {
         console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after Firecrawl extraction`);
+        diagCounts.yelp.noSlots++;
         return null;
       }
 
@@ -3536,6 +3537,7 @@ async function verifyAvailability(
       // If real slots exist but are outside window, or parser found nothing, reject.
       if (isOT && foundTimes.length === 0) {
         console.log(`✗ ${r.name} [opentable] — no parseable time slots found, rejecting (no fabricated fallback) | selectSection=${markdown.toLowerCase().includes("select a time")}, mdLen=${markdown.length}, blocked=${markdown.length < 200 || /access denied/i.test(markdown)}`);
+        diagCounts.opentable.noSlots++;
         return null;
       }
 
@@ -3543,6 +3545,7 @@ async function verifyAvailability(
         console.log(`✗ ${r.name} [${r.platform}] — found ${foundTimes.length} slots but none in ${mealLabel} window (found: ${foundTimes.map(t => t.time).join(", ")})`);
       } else {
         console.log(`No time slots for ${r.name} [${r.platform}]`);
+        diagCounts[r.platform].noSlots++;
       }
       return null;
     } catch (err) {
