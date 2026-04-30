@@ -2327,7 +2327,7 @@ async function verifyAvailability(
       } else {
         // Firecrawl for Resy/OT
         const scrapeAbort = new AbortController();
-        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 18_000);
+        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 16_000);
         let resp: Response;
         try {
           resp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -2342,7 +2342,7 @@ async function verifyAvailability(
         } catch (fetchErr: any) {
           clearTimeout(scrapeTimer);
           if (fetchErr.name === "AbortError") {
-            console.log(`Scrape timeout (18s abort) for ${r.name} [${r.platform}]`);
+            console.log(`Scrape timeout (16s abort) for ${r.name} [${r.platform}]`);
           } else {
             console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
           }
