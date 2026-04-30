@@ -421,14 +421,19 @@ serve(async (req) => {
     }
 
     const t3 = Date.now();
-    // Cap geocoding to 8s max
+    // Cap geocoding to 6s max
     const geocodePromise = Promise.race([
       geocodeVerifiedResults(verified, params),
-      new Promise<void>(resolve => setTimeout(resolve, 8_000)),
+      new Promise<void>(resolve => setTimeout(resolve, 6_000)),
     ]);
-    const enrichmentPromise = skipEnrichment
+    // Cap enrichment to 6s max as well
+    const rawEnrichmentPromise = skipEnrichment
       ? Promise.resolve(new Map<number, any>())
       : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
+    const enrichmentPromise = Promise.race([
+      rawEnrichmentPromise,
+      new Promise<Map<number, any>>(resolve => setTimeout(() => resolve(new Map()), 6_000)),
+    ]);
 
     const [, enrichmentMap] = await Promise.all([
       geocodePromise,
@@ -2648,11 +2653,11 @@ async function verifyAvailability(
           }
         };
         try {
-          let attempt = await doScrape(isOT ? 18_000 : 15_000, scrapePayload);
+          let attempt = await doScrape(isOT ? 8_000 : 15_000, scrapePayload);
           if ("aborted" in attempt) {
             timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
             if (isOT) {
-              console.log(`Scrape timeout (18s) for ${r.name} [opentable] — skipping OT candidate`);
+              console.log(`Scrape timeout (8s) for ${r.name} [opentable] — skipping OT candidate`);
               releaseFcSlot();
               return null;
             }
