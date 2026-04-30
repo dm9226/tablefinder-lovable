@@ -24,13 +24,6 @@ const Index = () => {
   const [lastParams, setLastParams] = useState<any>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Auto-trigger extended search when hasMore is true
-  useEffect(() => {
-    if (hasMore && !isExtending && !isLoading && remainingCandidates.length > 0) {
-      handleExtendedSearch();
-    }
-  }, [hasMore, isExtending, isLoading, remainingCandidates, handleExtendedSearch]);
-
   const requestLocation = useCallback(() => {
     if (!navigator.geolocation) {
       setLocationLoading(false);
@@ -178,6 +171,13 @@ const Index = () => {
       setIsExtending(false);
     }
   }, [remainingCandidates, lastParams, lastQuery, coords]);
+
+  // Auto-trigger extended search when hasMore is true
+  useEffect(() => {
+    if (hasMore && !isExtending && !isLoading && remainingCandidates.length > 0) {
+      handleExtendedSearch();
+    }
+  }, [hasMore, isExtending, isLoading, remainingCandidates, handleExtendedSearch]);
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
