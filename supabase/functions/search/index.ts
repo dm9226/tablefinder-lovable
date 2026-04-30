@@ -2611,7 +2611,7 @@ async function verifyAvailability(
   // one-time retry on timeout = no more lost nearby venues.
   let fcActiveCount = 0;
   const fcQueue: (() => void)[] = [];
-  const FC_MAX_CONCURRENT = 6;
+  const FC_MAX_CONCURRENT = 4;
   const acquireFcSlot = (): Promise<void> => {
     if (fcActiveCount < FC_MAX_CONCURRENT) { fcActiveCount++; return Promise.resolve(); }
     return new Promise<void>(resolve => fcQueue.push(resolve));
@@ -2751,14 +2751,13 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          ...(isOT ? { waitFor: 3000 } : {}),
         };
         const stealthPayload: Record<string, unknown> = {
           url: r.platformUrl,
           formats: ["markdown", "html"],
           onlyMainContent: false,
-          actions: [{ type: "wait", milliseconds: 5000 }],
-          timeout: 20000,
+          actions: [{ type: "wait", milliseconds: 3000 }],
+          timeout: 15000,
           proxy: "stealth",
         };
 
@@ -2768,7 +2767,7 @@ async function verifyAvailability(
 
         try {
           // Strategy A: Light scrape (fast, no browser rendering)
-          const lightTimeout = isOT ? 15_000 : 15_000;
+          const lightTimeout = isOT ? 12_000 : 15_000;
           let attempt = await doScrape(lightTimeout, lightPayload);
           
           if ("aborted" in attempt) {
@@ -2776,7 +2775,7 @@ async function verifyAvailability(
             // For OT: try stealth as fallback
             if (isOT && !(globalStartTime && (Date.now() - globalStartTime) > VERIFY_DEADLINE_MS)) {
               console.log(`  ${r.name} [opentable] light scrape timeout — trying stealth`);
-              attempt = await doScrape(25_000, stealthPayload);
+              attempt = await doScrape(20_000, stealthPayload);
               usedStealth = true;
               if ("aborted" in attempt) {
                 console.log(`  ${r.name} [opentable] stealth also timed out — skipping`);
