@@ -238,6 +238,7 @@ serve(async (req) => {
 
     const keys: ApiKeys = { firecrawlKey: FIRECRAWL_API_KEY, aiKey: LOVABLE_API_KEY, _startTime: startTime };
     const adapters: ProviderAdapter[] = [resyAdapter, opentableAdapter, yelpAdapter];
+    const pools = createConcurrencyPools();
 
     // ─── Extended Search Mode ───
     // Skips discovery and parsing; verifies remaining candidates from a previous search
