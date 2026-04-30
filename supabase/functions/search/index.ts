@@ -2605,38 +2605,38 @@ async function verifyAvailability(
     if (next) { steelActiveCount++; next(); }
   };
 
-  // Firecrawl concurrency limiter for non-Yelp (Resy/OpenTable) scrapes.
-  // Keep total concurrency at 6, but isolate slow OT stealth scrapes so they
-  // cannot starve faster Resy verification requests.
-  const FC_MAX_CONCURRENT = 6;
-  const FC_OT_MAX_CONCURRENT = 2;
-  const FC_FAST_MAX_CONCURRENT = FC_MAX_CONCURRENT - FC_OT_MAX_CONCURRENT;
-  let fcFastActiveCount = 0;
-  let fcOtActiveCount = 0;
-  const fcFastQueue: (() => void)[] = [];
-  const fcOtQueue: (() => void)[] = [];
-  const acquireFcSlot = (platform: Restaurant["platform"]): Promise<void> => {
-    const isOtSlot = platform === "opentable";
-    const activeCount = isOtSlot ? fcOtActiveCount : fcFastActiveCount;
-    const maxConcurrent = isOtSlot ? FC_OT_MAX_CONCURRENT : FC_FAST_MAX_CONCURRENT;
-    if (activeCount < maxConcurrent) {
-      if (isOtSlot) fcOtActiveCount++; else fcFastActiveCount++;
-      return Promise.resolve();
-    }
-    return new Promise<void>(resolve => (isOtSlot ? fcOtQueue : fcFastQueue).push(resolve));
+  // OT pool: stealth scrapes are slow (25-30s each), cap low so they don't
+  // starve Resy/Yelp. Resy+Yelp pool: fast scrapes, higher concurrency.
+  let otFcActiveCount = 0;
+  const otFcQueue: (() => void)[] = [];
+  const OT_FC_MAX_CONCURRENT = 3;
+  const acquireOtFcSlot = (): Promise<void> => {
+    if (otFcActiveCount < OT_FC_MAX_CONCURRENT) { otFcActiveCount++; return Promise.resolve(); }
+    return new Promise<void>(resolve => otFcQueue.push(resolve));
   };
-  const releaseFcSlot = (platform: Restaurant["platform"]) => {
-    const isOtSlot = platform === "opentable";
-    if (isOtSlot) {
-      fcOtActiveCount--;
-      const next = fcOtQueue.shift();
-      if (next) { fcOtActiveCount++; next(); }
-    } else {
-      fcFastActiveCount--;
-      const next = fcFastQueue.shift();
-      if (next) { fcFastActiveCount++; next(); }
-    }
+  const releaseOtFcSlot = () => {
+    otFcActiveCount--;
+    const next = otFcQueue.shift();
+    if (next) { otFcActiveCount++; next(); }
   };
+
+  let fastFcActiveCount = 0;
+  const fastFcQueue: (() => void)[] = [];
+  const FAST_FC_MAX_CONCURRENT = 6;
+  const acquireFastFcSlot = (): Promise<void> => {
+    if (fastFcActiveCount < FAST_FC_MAX_CONCURRENT) { fastFcActiveCount++; return Promise.resolve(); }
+    return new Promise<void>(resolve => fastFcQueue.push(resolve));
+  };
+  const releaseFastFcSlot = () => {
+    fastFcActiveCount--;
+    const next = fastFcQueue.shift();
+    if (next) { fastFcActiveCount++; next(); }
+  };
+
+  // Compatibility shims so Yelp path (which calls acquireFcSlot/releaseFcSlot)
+  // routes to the fast pool without needing changes below.
+  const acquireFcSlot = acquireFastFcSlot;
+  const releaseFcSlot = releaseFastFcSlot;
   // Per-provider timeout counters for diagnostics
   const timeoutCounts: Record<string, number> = { resy: 0, opentable: 0, yelp: 0 };
   // Per-provider success/fail/skip counters for comprehensive diagnostics
@@ -2759,7 +2759,11 @@ async function verifyAvailability(
           onlyMainContent: false,
         };
 
-        await acquireFcSlot(r.platform);
+        if (isOT) {
+          await acquireOtFcSlot();
+        } else {
+          await acquireFastFcSlot();
+        }
         let resp: Response | null = null;
 
         try {
@@ -2772,28 +2776,60 @@ async function verifyAvailability(
             diagCounts[r.platform].timeout++;
             if (isOT) otConsecutiveFailures++;
             console.log(`Scrape timeout for ${r.name} [${r.platform}]`);
-            releaseFcSlot(r.platform);
+            if (isOT) { releaseOtFcSlot(); } else { releaseFastFcSlot(); }
             return null;
           }
 
           resp = attempt as Response;
 
           if (resp.status === 408 || !resp.ok) {
-            const errBody = await resp.text().catch(() => "(no body)");
-            console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
-            diagCounts[r.platform].failed++;
-            if (isOT) otConsecutiveFailures++;
-            releaseFcSlot(r.platform);
-            return null;
+            if (isOT) {
+              // Single retry with "enhanced" proxy on stealth proxy failure
+              const errStatus = resp.status;
+              await resp.text().catch(() => {});
+              console.log(`  ${r.name} [opentable] stealth failed (${errStatus}) — retrying with enhanced proxy`);
+              const enhancedPayload: Record<string, unknown> = {
+                url: r.platformUrl,
+                formats: ["markdown", "html"],
+                onlyMainContent: false,
+                actions: [{ type: "wait", milliseconds: 5000 }],
+                timeout: 25000,
+                proxy: "enhanced",
+              };
+              const retryAttempt = await doScrape(30_000, enhancedPayload);
+              if ("aborted" in retryAttempt) {
+                console.log(`  ${r.name} [opentable] enhanced retry timed out — skipping`);
+                diagCounts.opentable.timeout++;
+                otConsecutiveFailures++;
+                releaseOtFcSlot();
+                return null;
+              }
+              const retryResp = retryAttempt as Response;
+              if (!retryResp.ok) {
+                const retryErr = await retryResp.text().catch(() => "(no body)");
+                console.log(`  ${r.name} [opentable] enhanced retry also failed (${retryResp.status}): ${retryErr.slice(0, 200)}`);
+                diagCounts.opentable.failed++;
+                otConsecutiveFailures++;
+                releaseOtFcSlot();
+                return null;
+              }
+              resp = retryResp;
+            } else {
+              const errBody = await resp.text().catch(() => "(no body)");
+              console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
+              diagCounts[r.platform].failed++;
+              releaseFastFcSlot();
+              return null;
+            }
           }
         } catch (fetchErr: any) {
           console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
           diagCounts[r.platform].failed++;
           if (isOT) otConsecutiveFailures++;
-          releaseFcSlot(r.platform);
+          if (isOT) { releaseOtFcSlot(); } else { releaseFastFcSlot(); }
           return null;
         }
-        releaseFcSlot(r.platform);
+        if (isOT) { releaseOtFcSlot(); } else { releaseFastFcSlot(); }
 
         // Diagnostic only — reset on success
         if (isOT) otConsecutiveFailures = 0;
