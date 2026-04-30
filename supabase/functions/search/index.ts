@@ -2637,7 +2637,7 @@ async function verifyAvailability(
             onlyMainContent: false,
             waitFor: 5000,
             timeout: 15000,
-            proxy: "enhanced",
+            proxy: "auto",
           } : scrapePayload;
           const primaryTimeout = isOT ? 20_000 : 15_000;
           const retryTimeout = isOT ? 15_000 : 12_000;
