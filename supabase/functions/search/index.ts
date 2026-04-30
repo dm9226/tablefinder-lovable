@@ -431,12 +431,22 @@ serve(async (req) => {
     const remainingAfterSelection = allCandidates.filter(c => !selectedIds.has(c.name + c.platform));
 
     const t2 = Date.now();
-    let verified = (await Promise.all(
-      adapters.map(a => a.verify(
-        selected.filter(c => c.platform === a.platform),
-        params, keys, amenityTerms
-      ))
-    )).flat();
+    // Phase 1: Verify Resy first (fast, high success rate, clean Firecrawl bandwidth)
+    const resyCandidates = selected.filter(c => c.platform === "resy");
+    const otCandidates = selected.filter(c => c.platform === "opentable");
+    const yelpCandidates = selected.filter(c => c.platform === "yelp");
+
+    const resyResults = await resyAdapter.verify(resyCandidates, params, keys, amenityTerms, pools);
+    console.log(`[PHASE1] Resy verified: ${resyResults.length}/${resyCandidates.length} (${Date.now() - t2}ms)`);
+
+    // Phase 2: OT + Yelp in parallel (heavier scrapes, share remaining bandwidth)
+    const [otResults, yelpResults] = await Promise.all([
+      opentableAdapter.verify(otCandidates, params, keys, amenityTerms, pools),
+      yelpAdapter.verify(yelpCandidates, params, keys, amenityTerms, pools),
+    ]);
+    console.log(`[PHASE2] OT: ${otResults.length}/${otCandidates.length}, Yelp: ${yelpResults.length}/${yelpCandidates.length} (${Date.now() - t2}ms)`);
+
+    let verified = [...resyResults, ...otResults, ...yelpResults];
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
