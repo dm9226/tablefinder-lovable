@@ -2628,48 +2628,12 @@ async function verifyAvailability(
         };
 
       if (!isYelp) {
-        if (isOT) {
-          // ── OT: Use Steel browser API (Firecrawl is blocked by OT anti-bot) ──
-          const steelKey = Deno.env.get("STEEL_API_KEY");
-          if (!steelKey) {
-            console.log(`✗ ${r.name} [opentable] — STEEL_API_KEY not set, skipping`);
-            return null;
-          }
-          const steelAbort = new AbortController();
-          const steelTimer = setTimeout(() => steelAbort.abort(), 15_000);
-          try {
-            const steelResp = await fetch("https://api.steel.dev/v1/scrape", {
-              method: "POST",
-              headers: {
-                "steel-api-key": steelKey,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ url: r.platformUrl, wait_for: 5000 }),
-              signal: steelAbort.signal,
-            });
-            clearTimeout(steelTimer);
-            if (!steelResp.ok) {
-              const errBody = await steelResp.text().catch(() => "");
-              console.log(`✗ ${r.name} [opentable] — Steel scrape failed (${steelResp.status}): ${errBody.slice(0, 300)}`);
-              return null;
-            }
-            const steelData = await steelResp.json();
-            // Steel returns content.html, content.markdown, content.cleaned_html
-            html = steelData?.content?.html || steelData?.content?.cleaned_html || "";
-            markdown = steelData?.content?.markdown || "";
-            console.log(`  ${r.name} [opentable] Steel scrape: mdLen=${markdown.length}, htmlLen=${html.length}`);
-          } catch (err: any) {
-            clearTimeout(steelTimer);
-            if (err.name === "AbortError") {
-              timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
-              console.log(`✗ ${r.name} [opentable] — Steel timeout (15s), skipping`);
-            } else {
-              console.log(`✗ ${r.name} [opentable] — Steel error: ${err}`);
-            }
-            return null;
-          }
-        } else {
-          // ── Resy: Use Firecrawl (works reliably) ──
+        {
+          // ── Resy & OT: Use Firecrawl ──
+          // OT needs waitFor for JS booking widget to render
+          const otPayload = isOT ? { ...scrapePayload, waitFor: 5000 } : scrapePayload;
+          const primaryTimeout = isOT ? 25_000 : 15_000;
+          const retryTimeout = isOT ? 20_000 : 12_000;
           await acquireFcSlot();
           let resp: Response;
           const doScrape = async (timeoutMs: number, payload: Record<string, unknown>): Promise<Response | { aborted: true }> => {
@@ -2694,14 +2658,14 @@ async function verifyAvailability(
             }
           };
           try {
-            let attempt = await doScrape(15_000, scrapePayload);
+            let attempt = await doScrape(primaryTimeout, otPayload);
             if ("aborted" in attempt) {
               timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
-              console.log(`Scrape timeout (15s) for ${r.name} [${r.platform}] — retrying once`);
+              console.log(`Scrape timeout (${primaryTimeout/1000}s) for ${r.name} [${r.platform}] — retrying once`);
               await new Promise(res => setTimeout(res, 300));
-              attempt = await doScrape(12_000, { ...scrapePayload, timeout: 10000 });
+              attempt = await doScrape(retryTimeout, { ...otPayload, timeout: retryTimeout - 2000 });
               if ("aborted" in attempt) {
-                console.log(`Scrape timeout (12s retry) for ${r.name} [${r.platform}] — giving up`);
+                console.log(`Scrape timeout (${retryTimeout/1000}s retry) for ${r.name} [${r.platform}] — giving up`);
                 releaseFcSlot();
                 return null;
               }
