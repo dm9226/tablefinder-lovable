@@ -303,7 +303,9 @@ serve(async (req) => {
     // ─── Normal Search Flow ───
 
     // Step 1: Parse user query (always fresh)
+    const t0 = Date.now();
     const params = await parseQuery(query, lat, lng, location, LOVABLE_API_KEY);
+    console.log(`[TIMING] parseQuery: ${Date.now() - t0}ms`);
     // Preserve the user's actual browser coords separately — parseQuery overwrites
     // params.lat/lng with the geocoded *city centroid*, which is wrong for distance ranking.
     if (typeof lat === "number" && typeof lng === "number") {
@@ -331,6 +333,7 @@ serve(async (req) => {
     console.log("Parsed params:", JSON.stringify(params));
 
     // Step 2: Discover candidates from all platforms via adapters
+    const t1 = Date.now();
 
     // Detect amenity/experience keywords BEFORE discovery so we can add them to search queries
     const amenityTerms = extractAmenityTerms(params.cuisine || "", query);
@@ -360,6 +363,7 @@ serve(async (req) => {
     }
 
     const allCandidates = dedupeByName(discovered.flat());
+    console.log(`[TIMING] discovery: ${Date.now() - t1}ms`);
 
     // Log counts per platform
     const platformCounts = adapters.map((a, i) => `${a.platform}: ${discovered[i].length}`);
@@ -384,6 +388,7 @@ serve(async (req) => {
     const selectedIds = new Set(selected.map(r => r.name + r.platform));
     const remainingAfterSelection = allCandidates.filter(c => !selectedIds.has(c.name + c.platform));
 
+    const t2 = Date.now();
     let verified = (await Promise.all(
       adapters.map(a => a.verify(
         selected.filter(c => c.platform === a.platform),
@@ -393,6 +398,7 @@ serve(async (req) => {
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
+    console.log(`[TIMING] verification: ${Date.now() - t2}ms`);
 
     // Yelp fallback no longer needed — Yelp candidates are pre-verified from search page
 
@@ -407,21 +413,28 @@ serve(async (req) => {
     }
 
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
-    // If we're past 110s, skip enrichment to ensure we return in time
+    // Time-budget: skip enrichment if already past 30s to keep first response fast
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 110_000;
+    const skipEnrichment = elapsed > 30_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
 
-    const enrichmentPromise = skipEnrichment 
-      ? Promise.resolve(new Map<number, any>()) 
+    const t3 = Date.now();
+    // Cap geocoding to 8s max
+    const geocodePromise = Promise.race([
+      geocodeVerifiedResults(verified, params),
+      new Promise<void>(resolve => setTimeout(resolve, 8_000)),
+    ]);
+    const enrichmentPromise = skipEnrichment
+      ? Promise.resolve(new Map<number, any>())
       : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
 
     const [, enrichmentMap] = await Promise.all([
-      geocodeVerifiedResults(verified, params),
+      geocodePromise,
       enrichmentPromise,
     ]);
+    console.log(`[TIMING] geocode+enrich: ${Date.now() - t3}ms`);
 
     // Merge AI enrichment onto the geocoded originals (preserves distanceMiles)
     // Distance is measured from the USER's coords when available, falling back to city centroid.
@@ -460,6 +473,7 @@ serve(async (req) => {
     }
     const geocodedCount = verified.filter(r => r.distanceMiles != null).length;
     console.log(`Final geocoding: ${geocodedCount}/${verified.length} restaurants have distances`);
+    console.log(`[TIMING] total: ${Date.now() - startTime}ms`);
 
     // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
@@ -2458,7 +2472,7 @@ function selectCandidatesForVerification(
   // Proportional allocation: distribute slots based on candidate volume per platform.
   // OpenTable is currently frequently blocked/408ing, so keep a hard cap on it.
   const total = candidates.length || 1;
-  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 3, yelp: 10 };
+  const hardCaps: Record<Restaurant["platform"], number> = { resy: maxCandidates, opentable: 6, yelp: 10 };
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
@@ -2552,7 +2566,7 @@ async function verifyAvailability(
 
       if (isYelp) {
         const scrapeAbort = new AbortController();
-        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 25_000);
+        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 15_000);
         let yelpResp: Response;
         try {
           yelpResp = await fetch(`${FIRECRAWL_API}/scrape`, {
@@ -2597,7 +2611,12 @@ async function verifyAvailability(
       }
 
       // ── Non-Yelp: Firecrawl scrape (Resy / OpenTable) ──
-      const scrapePayload: Record<string, unknown> = {
+      // OT gets both markdown + HTML so the HTML slot parser can run as fallback
+      const scrapePayload: Record<string, unknown> = isOT ? {
+          url: r.platformUrl,
+          formats: ["markdown", "html"],
+          onlyMainContent: false,
+        } : {
           url: r.platformUrl,
           formats: ["markdown"],
           onlyMainContent: false,
@@ -2629,11 +2648,11 @@ async function verifyAvailability(
           }
         };
         try {
-          let attempt = await doScrape(isOT ? 6_000 : 15_000, scrapePayload);
+          let attempt = await doScrape(isOT ? 12_000 : 15_000, scrapePayload);
           if ("aborted" in attempt) {
             timeoutCounts[r.platform] = (timeoutCounts[r.platform] || 0) + 1;
             if (isOT) {
-              console.log(`Scrape timeout (6s) for ${r.name} [opentable] — skipping OT candidate`);
+              console.log(`Scrape timeout (12s) for ${r.name} [opentable] — skipping OT candidate`);
               releaseFcSlot();
               return null;
             }
@@ -2830,6 +2849,13 @@ async function verifyAvailability(
       }
       
       if (verifyTokens.length > 0) {
+        // DEFER cuisine check for OpenTable — OT page scrapes are often too thin
+        // to contain cuisine keywords. Check AFTER slot parsing instead.
+        if (isOT) {
+          // Store tokens for post-slot cuisine check
+          (r as any)._deferredCuisineTokens = verifyTokens;
+          (r as any)._deferredIsDishSearch = isDishSearch;
+        } else {
         const restaurantName = (r.name || "").toLowerCase();
         const pageText = `${lower} ${restaurantName}`;
         const isDishSearch = !!params.dishKeyword;
@@ -2911,6 +2937,7 @@ async function verifyAvailability(
           console.log(`✗ ${r.name} [${r.platform}] — failed cuisine relevance (${isDishSearch ? "dish" : "category"}) for: ${label} (checked: ${verifyTokens.join(", ")})`);
           return null;
         }
+        } // end non-OT cuisine check
       }
 
       // RELEVANCE CHECK: If user searched for an amenity (rooftop, patio, etc.),
@@ -3127,7 +3154,18 @@ async function verifyAvailability(
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from md: ${foundTimes.map(t=>t.time).join(", ")}`);
         }
         
-        // If no OT-specific slots found, strip dropdown noise and fall through to generic regex
+        // Second pass: try HTML parser if markdown had no slots
+        if (foundTimes.length === 0 && html) {
+          const htmlSlots = parseOTSlotsFromHTML(html);
+          for (const s of htmlSlots) {
+            if (!seenTimes.has(s.time)) { seenTimes.add(s.time); foundTimes.push(s); }
+          }
+          if (foundTimes.length > 0) {
+            console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times from HTML: ${foundTimes.map(t=>t.time).join(", ")}`);
+          }
+        }
+        
+        // If still no OT-specific slots found, strip dropdown noise and fall through to generic regex
         if (foundTimes.length === 0) {
           const lines = bookingMarkdown.split("\n");
           const cleanedLines = lines.filter(line => {
@@ -3148,9 +3186,34 @@ async function verifyAvailability(
           if (otFiltered.length > 0) {
             otFiltered.sort((a, b) => Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes));
             const top5 = otFiltered.slice(0, 5).sort((a, b) => a.minutes - b.minutes);
+            
+            // Deferred cuisine check for OT: now that we have real slots, apply cuisine filter
+            const deferredTokens = (r as any)._deferredCuisineTokens as string[] | undefined;
+            if (deferredTokens && deferredTokens.length > 0) {
+              const otName = (r.name || "").toLowerCase();
+              const otPageText = `${lower} ${otName}`;
+              const otIsDish = (r as any)._deferredIsDishSearch as boolean;
+              // Relaxed check for OT: name match OR any token in page OR just accept if OT page is thin
+              const otHasMatch = deferredTokens.some(token => {
+                if (otPageText.includes(token)) return true;
+                const singular = token.endsWith("s") ? token.slice(0, -1) : null;
+                if (singular && otPageText.includes(singular)) return true;
+                const plural = !token.endsWith("s") ? token + "s" : null;
+                if (plural && otPageText.includes(plural)) return true;
+                return false;
+              });
+              // If page is very thin (< 1000 chars), trust the discovery query's relevance
+              if (!otHasMatch && mdLen > 1000) {
+                console.log(`✗ ${r.name} [opentable] — deferred cuisine check failed (${deferredTokens.join(", ")}), ${Date.now() - otVerifyStart}ms`);
+                return null;
+              }
+              if (!otHasMatch) {
+                console.log(`  ${r.name} [opentable]: thin page (${mdLen} chars), trusting discovery relevance`);
+              }
+            }
+            
             r.timeSlots = top5.map(t => ({ time: t.time }));
-            console.log(`✓ Verified ${r.name} [opentable] — ${top5.length} slots in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}): ${top5.map(t => t.time).join(", ")}`);
-            console.log(`  [OT_DIAG] ${r.name}: ${Date.now() - otVerifyStart}ms verify time`);
+            console.log(`✓ Verified ${r.name} [opentable] — ${top5.length} slots in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}): ${top5.map(t => t.time).join(", ")} | ${Date.now() - otVerifyStart}ms`);
             return r;
           } else {
             console.log(`✗ ${r.name} [opentable] — found ${foundTimes.length} slots but none in OT window (${Math.floor(otWindowStart/60)}:${(otWindowStart%60).toString().padStart(2,"0")}–${Math.floor(otWindowEnd/60)}:${(otWindowEnd%60).toString().padStart(2,"0")}). Found: ${foundTimes.map(t => t.time).join(", ")} | ${Date.now() - otVerifyStart}ms`);
