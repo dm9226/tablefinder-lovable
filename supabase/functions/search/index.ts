@@ -2633,12 +2633,13 @@ async function verifyAvailability(
   params: SearchParams,
   firecrawlKey: string,
   amenityTerms: string[] = [],
-  globalStartTime?: number
+  globalStartTime?: number,
+  pools?: ConcurrencyPools
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
   // Global elapsed-time guard: skip candidates if we're nearing the 150s edge function limit
-  const VERIFY_DEADLINE_MS = 105_000; // stop starting new scrapes after 105s elapsed
+  const VERIFY_DEADLINE_MS = 70_000; // stop starting new scrapes after 70s elapsed
 
   // Steel.dev concurrency limiter (hobby tier: be conservative)
   let steelActiveCount = 0;
@@ -2657,38 +2658,11 @@ async function verifyAvailability(
     if (next) { steelActiveCount++; next(); }
   };
 
-  // OT pool: stealth scrapes are slow (25-30s each), cap low so they don't
-  // starve Resy/Yelp. Resy+Yelp pool: fast scrapes, higher concurrency.
-  let otFcActiveCount = 0;
-  const otFcQueue: (() => void)[] = [];
-  const OT_FC_MAX_CONCURRENT = 3;
-  const acquireOtFcSlot = (): Promise<void> => {
-    if (otFcActiveCount < OT_FC_MAX_CONCURRENT) { otFcActiveCount++; return Promise.resolve(); }
-    return new Promise<void>(resolve => otFcQueue.push(resolve));
-  };
-  const releaseOtFcSlot = () => {
-    otFcActiveCount--;
-    const next = otFcQueue.shift();
-    if (next) { otFcActiveCount++; next(); }
-  };
-
-  let fastFcActiveCount = 0;
-  const fastFcQueue: (() => void)[] = [];
-  const FAST_FC_MAX_CONCURRENT = 6;
-  const acquireFastFcSlot = (): Promise<void> => {
-    if (fastFcActiveCount < FAST_FC_MAX_CONCURRENT) { fastFcActiveCount++; return Promise.resolve(); }
-    return new Promise<void>(resolve => fastFcQueue.push(resolve));
-  };
-  const releaseFastFcSlot = () => {
-    fastFcActiveCount--;
-    const next = fastFcQueue.shift();
-    if (next) { fastFcActiveCount++; next(); }
-  };
-
-  // Compatibility shims so Yelp path (which calls acquireFcSlot/releaseFcSlot)
-  // routes to the fast pool without needing changes below.
-  const acquireFcSlot = acquireFastFcSlot;
-  const releaseFcSlot = releaseFastFcSlot;
+  // Use global shared pools (passed from handler) or create local fallback
+  const acquireFastSlot = pools?.acquireFast ?? (() => Promise.resolve());
+  const releaseFastSlot = pools?.releaseFast ?? (() => {});
+  const acquireOtSlot = pools?.acquireOt ?? (() => Promise.resolve());
+  const releaseOtSlot = pools?.releaseOt ?? (() => {});
   // Per-provider timeout counters for diagnostics
   const timeoutCounts: Record<string, number> = { resy: 0, opentable: 0, yelp: 0 };
   // Per-provider success/fail/skip counters for comprehensive diagnostics
