@@ -176,6 +176,7 @@ interface Restaurant {
   _yelpCategories?: string; // transient: Yelp API category text for cuisine relevance bypass
   _yelpCrossplatformGuess?: boolean; // transient: true if URL was guessed from name (not from link)
   _yelpSearchVerified?: boolean; // transient: true if time slots came from Yelp search results page (skip individual verification)
+  _softVerified?: boolean; // surfaced from discovery without booking-page scrape (Yelp DataDome fallback)
 }
 
 // ─── Provider Adapter Interface ───
