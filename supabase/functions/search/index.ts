@@ -598,6 +598,9 @@ serve(async (req) => {
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
+  })();
+
+  return await Promise.race([work, hardCeilingResponse]);
 });
 
 // ─── Query parsing ───
