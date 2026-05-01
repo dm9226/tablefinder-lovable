@@ -389,10 +389,23 @@ serve(async (req) => {
     const resyCands = selected.filter(c => c.platform === "resy");
     const otCands   = selected.filter(c => c.platform === "opentable");
     const yelpCands = selected.filter(c => c.platform === "yelp");
+    // Wrap each lane in a hard deadline — if a lane hangs (e.g. all retries
+    // pending past the cutoff), return whatever it has accumulated rather
+    // than letting it block the response. Resolves to [] on deadline.
+    const laneDeadline = (lane: Promise<Restaurant[]>, ms: number, label: string) =>
+      Promise.race([
+        lane,
+        new Promise<Restaurant[]>((resolve) =>
+          setTimeout(() => {
+            console.warn(`[${label}] hard deadline ${ms}ms hit — returning empty`);
+            resolve([]);
+          }, ms),
+        ),
+      ]);
     const laneResults = await Promise.all([
-      verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy"),
-      verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable"),
-      verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp"),
+      laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy"),     22_000, "resy"),
+      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable"), 26_000, "opentable"),
+      laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp"),     22_000, "yelp"),
     ]);
     let verified = ([] as Restaurant[]).concat(...laneResults);
     const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
