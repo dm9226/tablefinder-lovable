@@ -1,45 +1,45 @@
+# Auto-extended search with distance-sorted merge
 
-## Problem
+When the initial search returns and `hasMore` is true, automatically kick off the extended search in the background and slot any new results into the existing list ordered by distance (instead of appending them at the bottom behind a "Find more results" button).
 
-Yelp results currently render without a distance value. The pipeline assumes Yelp distance comes from the Yelp API, so geocoding and AI-coordinate fallbacks all skip Yelp:
+## Behavior
 
-- `geocodeVerifiedResults` (line 1919): `if (r.platform === "yelp") return;`
-- AI-enrichment lat/lng fallback (lines 316, 555): `r.platform !== "yelp"` guard
-- Stats logging (lines 566-568) excludes Yelp from "non-Yelp" denominator
+- Initial search renders as it does today.
+- As soon as results are shown, if `hasMore` is true, fire the extended search automatically (no user click).
+- Show a subtle "Searching for more…" indicator at the bottom of the list while the auto-extend runs (reuse existing `isExtending` UI).
+- When extended results return, merge them with the existing list, dedupe, then re-sort the entire combined list by `distanceMiles` ascending (nulls last), with rating as the tiebreaker — same ordering rule the edge function already uses.
+- Hide the manual "Find more results" button (no longer needed). If the auto-extend fails, fall back silently — no toast spam.
+- Only auto-extend once per search to avoid loops, even if the extended response itself returns `hasMore: true`.
+- A new search (or cancel) cancels any in-flight auto-extend.
 
-Since Yelp candidates are now soft-verified from discovery (DataDome blocks per-page scrapes), there is no API-supplied distance — so the field stays null and the UI shows nothing.
+## Files to change
 
-## Fix
+### `src/pages/Index.tsx`
+- Add a `useEffect` that watches `hasMore`, `remainingCandidates`, `lastParams`, and `isLoading`. When `!isLoading && hasMore && remainingCandidates.length > 0 && !isExtending` and we haven't auto-extended for this search yet, call `handleExtendedSearch()`.
+- Track `autoExtendedFor` (e.g. a ref keyed off the `lastQuery` + timestamp of the initial search) so each search auto-extends at most once.
+- In `handleExtendedSearch`, replace the append-only merge with a merge-then-sort:
+  - Combine `prev` + `newResults`.
+  - Dedupe by `${name}|${platform}` (keep the first occurrence — initial results win, since they're already enriched).
+  - Sort by `distanceMiles ?? Infinity` asc, tiebreak by `(rating ?? 0)` desc.
+- Remove the success/info toasts for the auto path (keep silent). Keep error handling silent on auto-extend; only surface errors if the user manually triggered it (n/a once button is removed, so just swallow).
+- Reset the auto-extend guard inside `handleSearch` and `cancelSearch`.
+- Wire an AbortController (or reuse `abortRef`) so a new search aborts the in-flight extend.
 
-Allow distance computation for Yelp via the same name-based geocoding + AI-coordinate fallback used for Resy/OpenTable, but only when the Yelp result has no distance yet (preserves any future API-provided value).
+### `src/components/ResultsGrid.tsx`
+- Remove the "Find more results" button block.
+- Keep the `isExtending` spinner row (now serves as the auto-extend indicator).
+- Optionally drop the now-unused `hasMore` and `onExtendSearch` props, or leave them in place as no-ops to avoid wider refactors. Prefer removing for cleanliness.
 
-### Changes in `supabase/functions/search/index.ts`
+### `supabase/functions/search/index.ts`
+No changes. The extended endpoint already returns geocoded, distance-bearing results, and the client-side resort handles ordering.
 
-1. **`geocodeVerifiedResults` (line 1919)** — remove the blanket Yelp skip. Replace:
-   ```ts
-   if (r.platform === "yelp") return; // Yelp has API-provided distance
-   if (r.distanceMiles != null) return;
-   ```
-   with:
-   ```ts
-   if (r.distanceMiles != null) return; // Already has distance (e.g. Yelp API)
-   ```
-   Yelp soft-verified entries will then get geocoded by name + city like every other platform.
+## Edge cases
 
-2. **AI-enrichment lat/lng fallback (lines 316 and 555)** — drop the `r.platform !== "yelp"` clause so that if Gemini returns coordinates for a Yelp restaurant, we use them as a fallback when Nominatim fails.
+- If the extended response returns 0 new results: do nothing, leave the list as-is.
+- If the user starts a new search while auto-extend is running: `abortRef.current?.abort()` plus the new search resetting state already prevents stale results from being merged (guard with a captured `controller.signal.aborted` check before `setResults`).
+- Soft-verified Yelp entries with `distanceMiles == null` will sort to the end, which matches current behavior.
 
-3. **Stats logging (lines 566-568)** — update the diagnostic to count all platforms instead of "non-Yelp", since Yelp is now part of the geocoded set.
+## Out of scope
 
-4. **Distance sort/cap (lines 337-343, 575-581)** — already uses `r.distanceMiles ?? 9999` and applies uniformly, so no change required; Yelp will now naturally participate.
-
-### Why this is safe
-
-- Soft-verified Yelp entries already carry `name`, `city`, and (sometimes) `_address` from the Yelp search-page markdown, which is exactly what the existing geocoding helper expects.
-- Geocoding has a 200-mile sanity cap (line 1947) that discards bogus matches, so a wrong Nominatim hit won't pollute results.
-- Geocoding runs inside an 8s `Promise.race` budget, so adding ~3 Yelp items to the queue won't materially affect latency.
-- If both Nominatim and AI fail, `distanceMiles` stays null and the UI behaves exactly as it does today — no regression.
-
-### Out of scope
-
-- No UI changes (`RestaurantCard` already renders `distanceMiles` when present).
-- No changes to the soft-verify gating, time-slot logic, or Yelp discovery path.
+- No animation/transition on the re-sort (results just snap into the new order).
+- No additional rounds of auto-extension beyond the first.
