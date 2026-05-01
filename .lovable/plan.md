@@ -1,152 +1,81 @@
-I agree with your assessment: the current implementation is not close enough to useful. The recent “make it faster” changes treated the symptom by cutting timeouts and candidate counts, but that also made OpenTable nearly impossible to verify and reduced Resy/Yelp coverage. The fix needs to step back from the current scrape-everything-synchronously pipeline.
+You are right: the requirements are clear, and the current implementation is not meeting them. The fix should not be another timeout tweak. The product must return only verified, bookable tables for the requested date/time/party size, across Resy/OpenTable/Yelp, fast enough to be useful.
 
-## What is actually going wrong
+What I found:
+- Discovery is fine: the last run found 45 deduped candidates: 13 Resy, 15 OpenTable, 17 Yelp.
+- Verification is broken: only 2/22 selected candidates verified.
+- Most losses are Firecrawl 408s across all providers, including Resy. That means the current architecture is bottlenecked on slow dynamic page scraping.
+- OpenTable direct page scraping is now consistently hitting Akamai/challenge/timeout behavior, so relying on rendered OpenTable pages is not a stable product foundation.
+- Resy can be made much faster via its public venue lookup and availability endpoints instead of rendered page scraping. I confirmed the public venue endpoint returns venue IDs, address, cuisine, lat/lng, and metadata quickly.
+- The current verification runs each provider independently with batch size 6, so it can launch 18 heavy scrapes at once. That likely worsens Firecrawl timeouts and burns the response budget.
 
-1. **OpenTable regressed because we removed the behavior that made it work**
-   - Earlier OpenTable worked when it had enough render time and dual extraction from both `markdown` and `html`.
-   - The current code now gives OpenTable only ~9s Firecrawl timeout and `waitFor: 1500ms`.
-   - Live logs show OpenTable discovery is fine, but verification is almost all Firecrawl `408` timeouts:
-     - `THE CHASTAIN`, `Le Bon Nosh`, `Ray's in the City`, `The Americano`, etc.
-   - So OT is not “not found”; it is being discovered and then killed by the new timeout budget.
+Plan to make this work:
 
-2. **The initial search returns too few results because the cap is now too low and too brittle**
-   - Last live run selected only 12 candidates: `resy=6`, `opentable=3`, `yelp=3`.
-   - It returned only 2 results because 10/12 verification attempts failed/timed out.
-   - Extended search later found 5 more Resy results from candidates that were already discovered, proving the issue is candidate selection/verification budget, not supply.
+1. Replace Resy verification with a direct API fast path
+- Extract Resy location slug and venue slug from the candidate URL.
+- Call Resy's public venue endpoint to get the venue ID, exact address, neighborhood, cuisine, and coordinates.
+- Use Resy's availability endpoint as the primary source of real time slots for the requested date and party size.
+- Parse only actual availability slots, filter to the strict ±2 hour window, and return at most the top 5 slots.
+- Keep Firecrawl as a fallback only if the direct Resy endpoint fails for a specific venue.
+- This should make Resy verification sub-second to low-single-digit seconds instead of 14–17s scrapes.
 
-3. **Resy is still using the wrong primary verifier**
-   - Resy is still verified through Firecrawl page scraping.
-   - That is slower and more fragile than using Resy’s direct availability endpoint as the primary path.
-   - Logs show multiple Resy `408`s, while the same remaining Resy pool later yielded valid results.
+2. Stop treating OpenTable rendered scraping as the only verification path
+- Implement an OpenTable direct verification path before Firecrawl:
+  - Extract the OpenTable restaurant slug from `/r/...` URLs.
+  - Resolve restaurant metadata/restaurant ID from OpenTable page/search data where available.
+  - Call OpenTable’s availability API route with requested date/time/party size and restaurant ID when resolvable.
+  - Parse actual timeslots from the availability response only; do not fabricate fallback times.
+- Keep page scraping as a fallback, but only for a small number of candidates and with stricter anti-bot detection:
+  - If the response is an Akamai/challenge page, fail fast instead of waiting 20s.
+  - If the page has no actual `Select a time`/timeslot markers, fail fast.
+- If direct OpenTable availability cannot be resolved for a candidate, it should not block Resy/Yelp from returning.
 
-4. **The current “Find more results” flow hides a core product failure**
-   - It is useful as a secondary feature, but initial search must return enough useful results.
-   - Right now “hasMore=true” often means “we discovered many valid candidates but didn’t verify them effectively.”
+3. Rebuild verification scheduling so one provider cannot stall the whole search
+- Do not call `resy.verify`, `opentable.verify`, and `yelp.verify` as three independent scrape storms.
+- Use a central scheduler with provider lanes:
+  - Resy direct lane first/highest quota because it is fastest after the API fast path.
+  - OpenTable direct lane next; fallback scrape only for a few candidates.
+  - Yelp lane with capped scrape concurrency.
+- Enforce global concurrency limits for heavy scraping, not per-provider batch size 6.
+- Return as soon as there are enough verified results, but only after each provider had a real chance to contribute.
 
-## Plan
+4. Fix Yelp result loss without weakening verification
+- Keep Yelp verification content-based: actual reservation time markers must exist.
+- Remove the overly punitive “only 1 slot means operating hours” rule where the surrounding content clearly indicates a reservation widget/time button.
+- Continue rejecting operating-hours tables and generic hours; acceptance must require booking context near the time.
+- Reduce Yelp scrape volume so it does not consume provider budget.
 
-### 1. Restore OpenTable’s reliable verification path instead of starving it
+5. Tighten relevance checks so verified candidates are not incorrectly discarded
+- For OpenTable, use metadata/category fields and visible cuisine labels before rejecting by keyword frequency.
+- For Resy, use the `type` field from venue metadata in addition to page text.
+- Keep strictness for cuisine/amenity relevance, but stop rejecting real Italian/seafood/etc. restaurants just because the scrape text did not repeat the token enough.
 
-In `supabase/functions/search/index.ts`:
+6. Return useful results progressively from the backend response
+- Target first response under ~20–30s with a solid verified batch, not 2 results after long waits.
+- Include provider diagnostics in logs: discovered, selected, direct-verified, scrape-verified, rejected-no-slots, rejected-relevance, timeout.
+- Keep `hasMore` and extended search, but extended search should use the same direct/provider-lane verification instead of another scrape storm.
 
-- Restore OpenTable scrape settings closer to the last known working approach:
-  - `formats: ["markdown", "html"]`
-  - `waitFor: 5000` for OpenTable
-  - a longer OT-specific scrape timeout/abort budget, around 18–22s
-- Keep OpenTable verification limited in the initial pass so it does not block the whole search:
-  - initial OT quota: 2–3 restaurants
-  - extended OT quota can be larger
-- Keep the existing HTML parser and markdown parser, but strengthen it so OT returns only concrete slot times from “Select a time”/booking widget content.
-- Do not fabricate OT results if slots are not present.
+7. Validate with real deployed function calls and update tests
+- Test representative searches:
+  - `Italian tonight for 2` in Atlanta
+  - `Steakhouse tonight for 4` in Chicago
+  - `Seafood tonight for 2` in Miami
+  - one UK OpenTable-heavy query
+- Confirm every returned result has:
+  - non-empty `timeSlots`
+  - times within ±2h
+  - date/party/time prepopulated in deep link
+  - provider distribution where data is actually available
+- Update the edge tests to assert minimum useful result counts and provider diagnostics, not just URL parameter shape.
 
-Expected effect: OpenTable should return again for OT-heavy searches, but only a small number is attempted initially so one slow OT run cannot stall everything.
+Technical notes:
+- The main implementation target is `supabase/functions/search/index.ts`.
+- No database migration is needed.
+- No roles/auth changes are needed.
+- I will not modify the generated Supabase client/types files.
+- I will preserve the hard rule: no result is returned unless availability is verified for the requested date/time/party size.
 
-### 2. Add a direct Resy availability fast path
-
-Add a Resy-specific verifier before Firecrawl scraping:
-
-- Extract the Resy city slug and venue slug from candidate URLs.
-- Use a direct Resy availability request as the primary verification method for each candidate.
-- Parse real available slots from the API response.
-- Filter to the strict ±2 hour window for the requested time.
-- Build the same deep-linked Resy URL with `date`, `seats`, and `time` params.
-- Use Firecrawl Resy page scraping only as fallback if the direct path fails or cannot identify the venue.
-
-Expected effect: Resy should stop burning the Firecrawl budget and should return multiple valid results quickly.
-
-### 3. Change initial verification from provider-wide waiting to staged fast lanes
-
-Current code waits for all provider adapter verifications to finish. Replace that with staged verification:
-
-```text
-Discovery all providers
-  ↓
-Stage A: fast Resy direct availability + quick Yelp/OT attempts
-  ↓ return if enough results
-Stage B: limited OpenTable render scrape + limited Yelp scrape
-  ↓ return by hard deadline
-Remaining candidates preserved for Find More
-```
-
-Implementation details:
-
-- Use a hard initial response target around 18–25s.
-- Return as soon as either:
-  - at least 6 verified results exist, or
-  - the deadline is reached with whatever verified results exist.
-- Do not let OpenTable or Yelp prevent already-verified Resy results from returning.
-- Preserve all unverified candidates in `remainingCandidates`.
-
-Expected effect: the user sees useful initial results instead of waiting for every slow scrape.
-
-### 4. Stop over-pruning initial candidates
-
-Adjust candidate allocation:
-
-- For vague broad searches, do not cap at only 12 total; use staged quotas instead.
-- Initial target:
-  - Resy: up to 8–10 direct-fast candidates
-  - OpenTable: 2–3 render candidates
-  - Yelp: 2–3 render candidates
-- Extended search:
-  - verify remaining candidates in balanced chunks, not first 18 in the raw list.
-
-Expected effect: no more “1 Resy / 1 Yelp” when the system already discovered dozens of candidates.
-
-### 5. Make extended search provider-balanced
-
-The current extended search takes the next 18 candidates in list order. That can over-focus on one provider.
-
-Update extended mode to use the same provider-balanced selector, with different quotas:
-
-- Resy first if direct API is fast.
-- OpenTable with a smaller but real render budget.
-- Yelp capped to avoid consuming the entire run.
-
-Expected effect: “Find more results” adds a useful mix instead of random leftovers.
-
-### 6. Add clear provider diagnostics to every response/log
-
-Add structured logs for:
-
-- discovered counts by provider
-- selected counts by provider
-- verified counts by provider
-- timeout counts by provider
-- final counts by provider
-- elapsed time by phase
-
-Optionally include a non-user-facing `debug` object in function output only during tests/logging, not in the UI.
-
-Expected effect: the next time a provider is missing, we can immediately see whether it was discovery, verification, relevance filtering, distance filtering, or timeout.
-
-### 7. Validate against real searches after implementation
-
-Run live backend tests for:
-
-- `dinner tonight for 2 in Atlanta, GA`
-- `Italian tonight for 2 in Atlanta, GA`
-- `steakhouse tonight for 4 in Chicago`
-- `sushi tonight for 2 in New York`
-- one Yelp-native reservation search in Atlanta/Miami
-
-Success criteria:
-
-- Initial search returns materially faster than the prior 37s behavior.
-- Initial result count is useful, not 1–2, when candidates exist.
-- Resy returns multiple results when availability exists.
-- OpenTable appears again on OT-heavy searches.
-- Yelp remains included but cannot dominate verification time.
-- Every returned result still has verified availability and booking deep-link params.
-
-## Files to change
-
-- `supabase/functions/search/index.ts`
-  - provider-specific verification paths
-  - Resy direct availability verifier
-  - OpenTable render budget restoration
-  - staged/early-return verification orchestration
-  - provider-balanced extended search
-  - diagnostics
-
-No frontend changes are required unless we decide to expose provider diagnostics in the UI, which I do not recommend for users right now.
+Expected outcome:
+- Resy results should come back reliably again because they will not depend primarily on rendered page scraping.
+- OpenTable should work via direct availability where possible; when Akamai blocks rendered pages, those candidates fail quickly rather than freezing the whole search.
+- Yelp should contribute when actual reservation slots are found, but should not dominate or starve other providers.
+- The search should become functionally useful instead of returning 1–2 results after expensive, fragile scraping.
