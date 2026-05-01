@@ -202,9 +202,18 @@ serve(async (req) => {
       const params = extendedParams as SearchParams;
       const amenityTerms = extractAmenityTerms(params.cuisine || "", query || "");
 
-      // Verify up to 18 remaining candidates
-      const toVerify = (incomingCandidates as Restaurant[]).slice(0, 18);
-      const leftover = (incomingCandidates as Restaurant[]).slice(18);
+      // Provider-balanced selection of remaining candidates so extended search returns
+      // a useful mix of platforms instead of whichever 18 happen to come first in the
+      // raw pool (typically dominated by Yelp).
+      const EXTENDED_BUDGET = 18;
+      const toVerify = selectCandidatesForVerification(
+        incomingCandidates as Restaurant[],
+        EXTENDED_BUDGET,
+      );
+      const verifyKeys = new Set(toVerify.map((r) => r.name + r.platform));
+      const leftover = (incomingCandidates as Restaurant[]).filter(
+        (c) => !verifyKeys.has(c.name + c.platform),
+      );
 
       let verified = (await Promise.all(
         adapters.map(a => a.verify(
@@ -216,7 +225,7 @@ serve(async (req) => {
 
       // Geocoding + enrichment (same as main flow)
       const elapsed = Date.now() - startTime;
-      const skipEnrichment = elapsed > 24_000;
+      const skipEnrichment = elapsed > 38_000;
       const enrichmentPromise: Promise<Map<number, any>> = skipEnrichment
         ? Promise.resolve(new Map<number, any>())
         : Promise.race([
@@ -331,12 +340,12 @@ serve(async (req) => {
       console.log(`[DISCOVERY] ${platform} (${urls.length}): ${urls.join(" | ")}`);
     }
 
-    // Step 3: Select candidates with round-robin balance, then verify per-adapter
-    // Use fewer candidates for vague queries to avoid timeouts
+    // Step 3: Select candidates with provider-specific quotas, then verify per-adapter.
+    // Bigger budget so Resy can be over-allocated (it's the most reliable provider) while
+    // OT/Yelp still get a real shot. Initial verification has a hard wall-time deadline below,
+    // so we don't actually pay for all of these unless they verify quickly.
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    // Lowered from 24 → 16 to keep the request inside ~25s and stop Yelp from
-    // starving Resy/OpenTable's verification slots.
-    const maxCandidates = isVagueQuery ? 12 : 16;
+    const maxCandidates = isVagueQuery ? 18 : 22;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -368,13 +377,11 @@ serve(async (req) => {
       }
     }
 
-    // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
-    // If we're past 110s, skip enrichment to ensure we return in time
+    // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency).
+    // Skip AI enrichment if verification burned most of our budget; verified results
+    // are still returned, just without AI-derived descriptions/vibe tags/coordinates.
     const elapsed = Date.now() - startTime;
-    // Skip AI enrichment if verification already burned most of our budget.
-    // Verified results are still returned; they just lack AI-derived
-    // descriptions/vibe tags/AI coordinates.
-    const skipEnrichment = elapsed > 24_000;
+    const skipEnrichment = elapsed > 38_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
@@ -1979,14 +1986,15 @@ function selectCandidatesForVerification(
     yelp: candidates.filter((c) => c.platform === "yelp"),
   };
 
-  // Fixed-cap allocation: prioritise Resy (most reliable/fast), keep OT and Yelp
-  // small so a slow provider can't consume the verification budget.
-  // Initial caps for a 16-total budget: Resy 8 / OpenTable 4 / Yelp 4.
-  // Caps scale proportionally if maxCandidates differs.
+  // Fixed-cap allocation. Resy is the most reliable single-page scrape, OT renders
+  // slow JS widgets, Yelp is fragile. Skew Resy heavy but keep meaningful OT/Yelp
+  // quotas so each provider has a real shot at returning. The verification stage
+  // uses a wall-time deadline + early-return after 6 verified, so over-allocating
+  // is safe — we just don't burn the budget when results come back fast.
   const baseCaps: Record<string, number> = {
-    resy: Math.round((8 / 16) * maxCandidates),
-    opentable: Math.round((4 / 16) * maxCandidates),
-    yelp: Math.round((4 / 16) * maxCandidates),
+    resy: Math.round((10 / 22) * maxCandidates),
+    opentable: Math.round((6 / 22) * maxCandidates),
+    yelp: Math.round((6 / 22) * maxCandidates),
   };
   const quotas: Record<string, number> = {};
   let assigned = 0;
@@ -2026,19 +2034,21 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
-  // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts)
-  const BATCH_SIZE = 4;
+    // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts).
+  // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
+  const BATCH_SIZE = 6;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Early exit: if we already have enough verified results, stop scraping
     const verifiedSoFar = allChecked.filter(Boolean).length;
-    if (verifiedSoFar >= 5) {
+    if (verifiedSoFar >= 6) {
       console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
       break;
     }
-    // Time guard: stop if we've used more than 22s of the global budget,
-    // so we still have time for geocoding/enrichment and return < 30s.
-    if (globalStartTime && (Date.now() - globalStartTime) > 22_000) {
+    // Time guard: stop if we've used more than 35s of the global budget so we still
+    // have time for geocoding/enrichment and return well under the 60s edge limit.
+    // OT renders take 12–18s, so this gives 1–2 OT batches a real shot.
+    if (globalStartTime && (Date.now() - globalStartTime) > 35_000) {
       console.log(`Time guard: ${Math.round((Date.now() - globalStartTime) / 1000)}s elapsed, stopping verification with ${verifiedSoFar} results`);
       break;
     }
@@ -2052,14 +2062,22 @@ async function verifyAvailability(
       const isOT = r.platform === "opentable";
 
       // ── Firecrawl scrape (Resy / OpenTable / Yelp) ──
+      // Per-provider settings:
+      // - OpenTable: needs full JS render to expose "Select a time" widget; use
+      //   markdown+html dual extraction with longer waitFor and timeout.
+      // - Yelp: moderate JS render needed for reservation widget.
+      // - Resy: server-rendered, fast — short wait, short timeout.
       const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          // Tighter Firecrawl-side timeout so 408s come back fast and we
-          // don't waste verification budget on slow renders.
-          timeout: 9000,
-          ...((isOT || isYelp) && { waitFor: 1500 }),
+          // Firecrawl-side timeout. Resy pages render their availability widget
+          // client-side so they need a real budget too — earlier 9–10s caused mass
+          // 408s. OT widgets are heaviest and need a small JS settle period.
+          timeout: isOT ? 20000 : isYelp ? 15000 : 14000,
+          ...(isOT && { waitFor: 4000 }),
+          ...(isYelp && { waitFor: 2500 }),
+          ...(!isOT && !isYelp && { waitFor: 1500 }),
         };
 
       let markdown = "";
@@ -2069,9 +2087,14 @@ async function verifyAvailability(
       let data: any = null;
 
       {
-        // Firecrawl for all platforms (Resy/OT/Yelp)
+        // Firecrawl for all platforms (Resy/OT/Yelp). Wrap with our own AbortController
+        // so we can cancel the fetch if Firecrawl's own timeout doesn't fire fast enough.
+        // OT pages need ~18s to render JS widgets; Resy/Yelp are faster.
         const scrapeAbort = new AbortController();
-        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 11_000);
+        const scrapeTimer = setTimeout(
+          () => scrapeAbort.abort(),
+          isOT ? 24_000 : isYelp ? 18_000 : 17_000,
+        );
         let resp: Response;
         try {
           resp = await fetch(`${FIRECRAWL_API}/scrape`, {
