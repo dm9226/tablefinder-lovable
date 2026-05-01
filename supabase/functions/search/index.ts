@@ -2147,7 +2147,7 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(
           () => scrapeAbort.abort(),
-          isOT ? 20_000 : isYelp ? 14_000 : 14_000,
+          isOT ? 24_000 : isYelp ? 14_000 : 14_000,
         );
         // Acquire a slot on the global Firecrawl semaphore before firing the request.
         // This prevents the parallel lanes from saturating Firecrawl with too many
