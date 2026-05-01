@@ -2106,7 +2106,7 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(
           () => scrapeAbort.abort(),
-          isOT ? 24_000 : isYelp ? 18_000 : 17_000,
+          isOT ? 16_000 : isYelp ? 18_000 : 17_000,
         );
         let resp: Response;
         try {
