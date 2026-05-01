@@ -329,7 +329,9 @@ serve(async (req) => {
     // Step 3: Select candidates with round-robin balance, then verify per-adapter
     // Use fewer candidates for vague queries to avoid timeouts
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 18 : 24;
+    // Lowered from 24 → 16 to keep the request inside ~25s and stop Yelp from
+    // starving Resy/OpenTable's verification slots.
+    const maxCandidates = isVagueQuery ? 12 : 16;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
