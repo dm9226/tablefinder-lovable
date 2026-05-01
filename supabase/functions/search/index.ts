@@ -368,13 +368,11 @@ serve(async (req) => {
       }
     }
 
-    // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
-    // If we're past 110s, skip enrichment to ensure we return in time
+    // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency).
+    // Skip AI enrichment if verification burned most of our budget; verified results
+    // are still returned, just without AI-derived descriptions/vibe tags/coordinates.
     const elapsed = Date.now() - startTime;
-    // Skip AI enrichment if verification already burned most of our budget.
-    // Verified results are still returned; they just lack AI-derived
-    // descriptions/vibe tags/AI coordinates.
-    const skipEnrichment = elapsed > 24_000;
+    const skipEnrichment = elapsed > 38_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
