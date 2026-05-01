@@ -206,6 +206,8 @@ serve(async (req) => {
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
+  let timeoutFallbackBody: Record<string, unknown> | null = null;
+  let hardCeilingTimer: ReturnType<typeof setTimeout>;
 
   // Hard wall-clock ceiling on the entire handler. Many downstream fetches
   // (Lovable AI, Nominatim, Firecrawl search/retry, enrichment) do not yet
@@ -214,16 +216,19 @@ serve(async (req) => {
   // 36s = global deadline (33s) + 3s grace for in-flight cleanup.
   const HANDLER_HARD_CEILING_MS = 42_000;
   const hardCeilingResponse = new Promise<Response>((resolve) => {
-    setTimeout(() => {
-      console.error(`[HARD_CEILING] handler exceeded ${HANDLER_HARD_CEILING_MS}ms — returning empty results`);
+    hardCeilingTimer = setTimeout(() => {
+      globalAbort.abort();
+      clearTimeout(globalTimer);
+      const body = timeoutFallbackBody ?? {
+        results: [],
+        params: {},
+        cached: false,
+        hasMore: false,
+        error: "Search took too long. Please try a more specific query (city + cuisine + time).",
+      };
+      console.error(`[HARD_CEILING] handler exceeded ${HANDLER_HARD_CEILING_MS}ms — returning ${Array.isArray(body.results) ? body.results.length : 0} fallback results`);
       resolve(new Response(
-        JSON.stringify({
-          results: [],
-          params: {},
-          cached: false,
-          hasMore: false,
-          error: "Search took too long. Please try a more specific query (city + cuisine + time).",
-        }),
+        JSON.stringify(body),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       ));
     }, HANDLER_HARD_CEILING_MS);
