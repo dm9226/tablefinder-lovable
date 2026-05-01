@@ -199,8 +199,9 @@ serve(async (req) => {
   }
 
   // Global timeout: hard ceiling on initial response so the UI never hangs.
-  // Verification stops at the lane budget (see verifyAvailability) well before this.
-  const GLOBAL_TIMEOUT_MS = 38_000;
+  // Lane budgets cap verification at 22s (Resy/Yelp) / 28s (OT). Add a 4s
+  // enrichment window + small buffer = 33s.
+  const GLOBAL_TIMEOUT_MS = 33_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
@@ -388,10 +389,31 @@ serve(async (req) => {
     const resyCands = selected.filter(c => c.platform === "resy");
     const otCands   = selected.filter(c => c.platform === "opentable");
     const yelpCands = selected.filter(c => c.platform === "yelp");
+    // Wrap each lane in a hard deadline — if a lane hangs (e.g. retries
+    // pending past the cutoff), return whatever it has accumulated rather
+    // than letting it block the response.
+    const resyAccum: Restaurant[] = [];
+    const otAccum: Restaurant[] = [];
+    const yelpAccum: Restaurant[] = [];
+    const laneDeadline = (
+      lane: Promise<Restaurant[]>,
+      accum: Restaurant[],
+      ms: number,
+      label: string,
+    ) =>
+      Promise.race([
+        lane,
+        new Promise<Restaurant[]>((resolve) =>
+          setTimeout(() => {
+            console.warn(`[${label}] hard deadline ${ms}ms hit — returning ${accum.length} accumulated`);
+            resolve([...accum]);
+          }, ms),
+        ),
+      ]);
     const laneResults = await Promise.all([
-      verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy"),
-      verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable"),
-      verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp"),
+      laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 22_000, "resy"),
+      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   26_000, "opentable"),
+      laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 22_000, "yelp"),
     ]);
     let verified = ([] as Restaurant[]).concat(...laneResults);
     const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
@@ -413,24 +435,26 @@ serve(async (req) => {
     }
 
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency).
-    // Skip AI enrichment if verification burned most of our budget; verified results
-    // are still returned, just without AI-derived descriptions/vibe tags/coordinates.
+    // Enrichment is NEVER skipped — without it, results have no description/rating/
+    // vibe tags AND lose their AI-coordinate distance fallback. Even if verification
+    // overran, we still spend up to 4s enriching the (small) returned set.
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 32_000;
-    if (skipEnrichment) {
-      console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
+    if (elapsed > 28_000) {
+      console.warn(`Verification overran (${elapsed}ms) — running enrichment anyway with tight budget`);
     }
 
-    // Hard cap enrichment so it cannot stall the response past ~5s.
-    const enrichmentPromise: Promise<Map<number, any>> = skipEnrichment
+    // Hard cap enrichment so it cannot stall the response past ~6s. Gemini
+    // 2.5-flash needs ~3-5s for ~10 restaurants; 4s was too tight and
+    // consistently timed out, leaving cards bare.
+    const enrichmentPromise: Promise<Map<number, any>> = verified.length === 0
       ? Promise.resolve(new Map<number, any>())
       : Promise.race([
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-              console.warn("AI enrichment timed out at 4s — returning without enrichment");
+              console.warn("AI enrichment timed out at 6s — returning without enrichment");
               resolve(new Map<number, any>());
-            }, 4_000),
+            }, 6_000),
           ),
         ]);
 
@@ -2080,7 +2104,8 @@ async function verifyAvailability(
   firecrawlKey: string,
   amenityTerms: string[] = [],
   globalStartTime?: number,
-  laneLabel?: "resy" | "opentable" | "yelp"
+  laneLabel?: "resy" | "opentable" | "yelp",
+  accumulator?: Restaurant[]
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
@@ -2092,8 +2117,9 @@ async function verifyAvailability(
   // Lane-aware verified-target: each lane stops scraping once it has enough wins.
   const LANE_TARGET = laneLabel === "opentable" ? 4 : laneLabel === "yelp" ? 3 : 6;
   // Strict wall-clock budget per lane. Lanes run in parallel; this cap is what
-  // keeps the total search under the global ceiling.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 28_000 : 22_000;
+  // keeps the total search under the global ceiling. Tightened so enrichment
+  // has a real ~6s window inside the 33s global ceiling.
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 24_000 : 20_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Lane-local early exit: stop once this lane has hit its useful target.
@@ -2179,11 +2205,48 @@ async function verifyAvailability(
         }
         clearTimeout(scrapeTimer);
 
-        // No retry on 408 — the long retry path was the main source of 60-120s
-        // hangs. Accept the loss; the lane budget moves us on to the next batch.
+        // 408 from Firecrawl = their scrape worker timed out, not that the page
+        // is broken. A single fast retry recovers most of these without blowing
+        // the lane budget. We only retry if we still have ≥10s of wall-clock
+        // budget left, and we use a tighter timeout on the retry.
         if (resp.status === 408) {
-          console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
-          return null;
+          const elapsedSinceStart = globalStartTime ? Date.now() - globalStartTime : 0;
+          const wallBudgetLeftMs = (laneLabel === "opentable" ? 24_000 : 20_000) - elapsedSinceStart;
+          if (wallBudgetLeftMs < 10_000) {
+            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (only ${wallBudgetLeftMs}ms budget left)`);
+            return null;
+          }
+          console.log(`Scrape 408 for ${r.name} [${r.platform}] — retrying once`);
+          const retryAbort = new AbortController();
+          const retryTimer = setTimeout(() => retryAbort.abort(), isOT ? 12_000 : 8_000);
+          await acquireFirecrawlSlot();
+          try {
+            try {
+              resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${firecrawlKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  ...scrapePayload,
+                  timeout: isOT ? 12000 : 8000,
+                }),
+                signal: retryAbort.signal,
+              });
+            } catch (retryErr: any) {
+              clearTimeout(retryTimer);
+              console.log(`Scrape retry failed for ${r.name} [${r.platform}]: ${retryErr?.name || retryErr}`);
+              return null;
+            }
+          } finally {
+            releaseFirecrawlSlot();
+          }
+          clearTimeout(retryTimer);
+          if (resp.status === 408 || !resp.ok) {
+            console.log(`Scrape retry got ${resp.status} for ${r.name} [${r.platform}] — giving up`);
+            return null;
+          }
         }
 
         if (!resp.ok) {
@@ -2861,6 +2924,12 @@ async function verifyAvailability(
     }
     }));
     allChecked.push(...batchResults);
+    // Stream verified results into the shared accumulator so a lane-deadline
+    // race outside this function can return what's already verified instead
+    // of dropping everything when the lane runs over.
+    if (accumulator) {
+      for (const v of batchResults) if (v) accumulator.push(v);
+    }
   }
 
   return allChecked.filter(Boolean) as Restaurant[];
