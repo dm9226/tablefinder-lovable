@@ -202,9 +202,18 @@ serve(async (req) => {
       const params = extendedParams as SearchParams;
       const amenityTerms = extractAmenityTerms(params.cuisine || "", query || "");
 
-      // Verify up to 18 remaining candidates
-      const toVerify = (incomingCandidates as Restaurant[]).slice(0, 18);
-      const leftover = (incomingCandidates as Restaurant[]).slice(18);
+      // Provider-balanced selection of remaining candidates so extended search returns
+      // a useful mix of platforms instead of whichever 18 happen to come first in the
+      // raw pool (typically dominated by Yelp).
+      const EXTENDED_BUDGET = 18;
+      const toVerify = selectCandidatesForVerification(
+        incomingCandidates as Restaurant[],
+        EXTENDED_BUDGET,
+      );
+      const verifyKeys = new Set(toVerify.map((r) => r.name + r.platform));
+      const leftover = (incomingCandidates as Restaurant[]).filter(
+        (c) => !verifyKeys.has(c.name + c.platform),
+      );
 
       let verified = (await Promise.all(
         adapters.map(a => a.verify(
