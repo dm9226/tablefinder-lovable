@@ -524,7 +524,7 @@ serve(async (req) => {
 
     // If global timeout fired, return empty results gracefully
     if (globalAbort.signal.aborted) {
-      console.error("Global timeout reached (120s) — returning empty results");
+      console.error(`Global timeout reached (${GLOBAL_TIMEOUT_MS}ms) — returning empty results`);
       return new Response(
         JSON.stringify({ results: [], params: {}, cached: false, error: "Search timed out. Please try a more specific query." }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
