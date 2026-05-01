@@ -10,6 +10,28 @@ const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
 // Yelp discovery now uses Firecrawl scraping instead of the Fusion API
 
+// ─── Global Firecrawl scrape concurrency limiter ───
+// Lanes run in parallel (Resy + OT + Yelp), so without this cap we'd fire
+// up to ~13 simultaneous scrape requests at Firecrawl, which immediately
+// triggers a wave of 408 timeouts. Hold total in-flight scrapes to a sane
+// number so each request gets enough resources to actually complete.
+const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 5;
+let _firecrawlInFlight = 0;
+const _firecrawlWaiters: Array<() => void> = [];
+async function acquireFirecrawlSlot(): Promise<void> {
+  if (_firecrawlInFlight < FIRECRAWL_MAX_CONCURRENT_SCRAPES) {
+    _firecrawlInFlight++;
+    return;
+  }
+  await new Promise<void>((resolve) => _firecrawlWaiters.push(resolve));
+  _firecrawlInFlight++;
+}
+function releaseFirecrawlSlot(): void {
+  _firecrawlInFlight--;
+  const next = _firecrawlWaiters.shift();
+  if (next) next();
+}
+
 interface SearchParams {
   cuisine: string;
   cuisineType: string;   // broad category: "seafood", "italian", "japanese", ""
@@ -347,7 +369,7 @@ serve(async (req) => {
     // OT/Yelp still get a real shot. Initial verification has a hard wall-time deadline below,
     // so we don't actually pay for all of these unless they verify quickly.
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 18 : 22;
+    const maxCandidates = isVagueQuery ? 20 : 26;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -357,19 +379,20 @@ serve(async (req) => {
     const selectedIds = new Set(selected.map(r => r.name + r.platform));
     const remainingAfterSelection = allCandidates.filter(c => !selectedIds.has(c.name + c.platform));
 
-    // Verify all providers through a SINGLE shared queue so one provider
-    // (especially OpenTable, frequently Akamai-blocked) can't starve the
-    // verification budget for Resy/Yelp. Resy candidates go first because
-    // they verify fastest and most reliably, so the early-exit check fires
-    // on real wins rather than slow OT timeouts.
-    const orderedSelected = [
-      ...selected.filter(c => c.platform === "resy"),
-      ...selected.filter(c => c.platform === "yelp"),
-      ...selected.filter(c => c.platform === "opentable"),
-    ];
-    let verified = await verifyAvailability(
-      orderedSelected, params, keys.firecrawlKey, amenityTerms, keys._startTime,
-    );
+    // Verify each provider in its own parallel lane so a slow/blocked provider
+    // (typically OpenTable) cannot starve the others, and each one gets a real
+    // shot within the global budget.
+    const resyCands = selected.filter(c => c.platform === "resy");
+    const otCands   = selected.filter(c => c.platform === "opentable");
+    const yelpCands = selected.filter(c => c.platform === "yelp");
+    const laneResults = await Promise.all([
+      verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy"),
+      verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable"),
+      verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp"),
+    ]);
+    let verified = ([] as Restaurant[]).concat(...laneResults);
+    const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
+    console.log(`[LANES] verified: resy=${laneCounts.resy}/${resyCands.length}, opentable=${laneCounts.opentable}/${otCands.length}, yelp=${laneCounts.yelp}/${yelpCands.length}`);
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
@@ -390,7 +413,7 @@ serve(async (req) => {
     // Skip AI enrichment if verification burned most of our budget; verified results
     // are still returned, just without AI-derived descriptions/vibe tags/coordinates.
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 38_000;
+    const skipEnrichment = elapsed > 55_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
@@ -2003,10 +2026,14 @@ function selectCandidatesForVerification(
   // Resy is the most reliable scrape, OpenTable is heavily Akamai-protected
   // and frequently 408s, Yelp is moderate. Skew much harder toward Resy and
   // keep OT small so failed OT scrapes can't blow the budget.
+  // Even-ish allocation now that lanes run in parallel — each provider gets a
+  // real shot regardless of how slow another is. Resy still gets a slight edge
+  // because it's the most reliable; OT gets enough headroom to actually verify
+  // a useful number of pages.
   const baseCaps: Record<string, number> = {
-    resy: Math.round((12 / 20) * maxCandidates),
-    opentable: Math.round((4 / 20) * maxCandidates),
-    yelp: Math.round((6 / 20) * maxCandidates),
+    resy: Math.round((9 / 22) * maxCandidates),
+    opentable: Math.round((7 / 22) * maxCandidates),
+    yelp: Math.round((6 / 22) * maxCandidates),
   };
   const quotas: Record<string, number> = {};
   let assigned = 0;
@@ -2042,29 +2069,31 @@ async function verifyAvailability(
   params: SearchParams,
   firecrawlKey: string,
   amenityTerms: string[] = [],
-  globalStartTime?: number
+  globalStartTime?: number,
+  laneLabel?: "resy" | "opentable" | "yelp"
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
     // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts).
   // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
-  // Smaller batches reduce the chance of all 6 parallel scrapes hitting the
-  // same provider's slow path simultaneously. With Resy first in the queue,
-  // these batches now mostly contain Resy candidates that resolve quickly.
-  const BATCH_SIZE = 5;
+  // Lane-aware batching: OT pages take longer to render, so use smaller concurrent
+  // batches to avoid hammering Firecrawl. Resy/Yelp can go wider.
+  const BATCH_SIZE = laneLabel === "opentable" ? 2 : laneLabel === "yelp" ? 3 : 4;
+  // Lane-aware verified-target: each lane stops scraping once it has enough wins.
+  const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 5 : 6;
+  // Lane-aware wall-clock budget. Lanes run in parallel so each one gets the
+  // full budget independently. OT gets the most because its pages are slowest.
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 50_000 : 38_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
-    // Early exit: if we already have enough verified results, stop scraping
+    // Lane-local early exit: stop once this lane has hit its useful target.
     const verifiedSoFar = allChecked.filter(Boolean).length;
-    if (verifiedSoFar >= 8) {
-      console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
+    if (verifiedSoFar >= LANE_TARGET) {
+      console.log(`[${laneLabel || "lane"}] target reached: ${verifiedSoFar}/${LANE_TARGET}, skipping remaining ${candidates.length - batchStart}`);
       break;
     }
-    // Time guard: stop if we've used more than 35s of the global budget so we still
-    // have time for geocoding/enrichment and return well under the 60s edge limit.
-    // OT renders take 12–18s, so this gives 1–2 OT batches a real shot.
-    if (globalStartTime && (Date.now() - globalStartTime) > 35_000) {
-      console.log(`Time guard: ${Math.round((Date.now() - globalStartTime) / 1000)}s elapsed, stopping verification with ${verifiedSoFar} results`);
+    if (globalStartTime && (Date.now() - globalStartTime) > LANE_TIME_BUDGET_MS) {
+      console.log(`[${laneLabel || "lane"}] time budget hit (${Math.round((Date.now() - globalStartTime) / 1000)}s), stopping with ${verifiedSoFar} results`);
       break;
     }
     const batch = candidates.slice(batchStart, batchStart + BATCH_SIZE);
@@ -2090,8 +2119,8 @@ async function verifyAvailability(
           // can run. Pushing the timeout to 20s mostly just wasted budget on
           // pages that were never going to load. Trim it back; we detect
           // challenge HTML below and fail fast on it.
-          timeout: isOT ? 13000 : isYelp ? 15000 : 14000,
-          ...(isOT && { waitFor: 3500 }),
+          timeout: isOT ? 22000 : isYelp ? 15000 : 14000,
+          ...(isOT && { waitFor: 5000 }),
           ...(isYelp && { waitFor: 2500 }),
           ...(!isOT && !isYelp && { waitFor: 1500 }),
         };
@@ -2109,27 +2138,35 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(
           () => scrapeAbort.abort(),
-          isOT ? 16_000 : isYelp ? 18_000 : 17_000,
+          isOT ? 26_000 : isYelp ? 18_000 : 17_000,
         );
+        // Acquire a slot on the global Firecrawl semaphore before firing the request.
+        // This prevents the parallel lanes from saturating Firecrawl with too many
+        // simultaneous scrapes (which immediately produces 408 timeouts).
+        await acquireFirecrawlSlot();
         let resp: Response;
         try {
-          resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${firecrawlKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify(scrapePayload),
-            signal: scrapeAbort.signal,
-          });
-        } catch (fetchErr: any) {
-          clearTimeout(scrapeTimer);
-          if (fetchErr.name === "AbortError") {
-            console.log(`Scrape timeout (16s abort) for ${r.name} [${r.platform}]`);
-          } else {
-            console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+          try {
+            resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${firecrawlKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(scrapePayload),
+              signal: scrapeAbort.signal,
+            });
+          } catch (fetchErr: any) {
+            clearTimeout(scrapeTimer);
+            if (fetchErr.name === "AbortError") {
+              console.log(`Scrape timeout (abort) for ${r.name} [${r.platform}]`);
+            } else {
+              console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+            }
+            return null;
           }
-          return null;
+        } finally {
+          releaseFirecrawlSlot();
         }
         clearTimeout(scrapeTimer);
 
