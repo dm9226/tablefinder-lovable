@@ -2140,25 +2140,33 @@ async function verifyAvailability(
           () => scrapeAbort.abort(),
           isOT ? 26_000 : isYelp ? 18_000 : 17_000,
         );
+        // Acquire a slot on the global Firecrawl semaphore before firing the request.
+        // This prevents the parallel lanes from saturating Firecrawl with too many
+        // simultaneous scrapes (which immediately produces 408 timeouts).
+        await acquireFirecrawlSlot();
         let resp: Response;
         try {
-          resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${firecrawlKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify(scrapePayload),
-            signal: scrapeAbort.signal,
-          });
-        } catch (fetchErr: any) {
-          clearTimeout(scrapeTimer);
-          if (fetchErr.name === "AbortError") {
-            console.log(`Scrape timeout (16s abort) for ${r.name} [${r.platform}]`);
-          } else {
-            console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+          try {
+            resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${firecrawlKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(scrapePayload),
+              signal: scrapeAbort.signal,
+            });
+          } catch (fetchErr: any) {
+            clearTimeout(scrapeTimer);
+            if (fetchErr.name === "AbortError") {
+              console.log(`Scrape timeout (abort) for ${r.name} [${r.platform}]`);
+            } else {
+              console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+            }
+            return null;
           }
-          return null;
+        } finally {
+          releaseFirecrawlSlot();
         }
         clearTimeout(scrapeTimer);
 
