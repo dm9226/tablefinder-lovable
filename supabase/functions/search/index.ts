@@ -530,7 +530,7 @@ serve(async (req) => {
         ]);
 
     const [, enrichmentMap] = await Promise.all([
-      geocodeVerifiedResults(verified, params),
+      geocodeVerifiedResults(verified, params, 8_000),
       enrichmentPromise,
     ]);
 
@@ -1903,7 +1903,7 @@ function toTwelveHourLabel(time24: string): string {
 
 // ─── Batch geocode verified results ───
 
-async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams): Promise<void> {
+async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams, maxMs = 6_000): Promise<void> {
   const cityLat = params.lat || 0;
   const cityLng = params.lng || 0;
   if (!cityLat || !cityLng) {
@@ -1932,7 +1932,10 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
     // Helper to attempt a Nominatim query and apply result
     async function tryGeocode(queryUrl: string, label: string): Promise<boolean> {
       try {
-        const resp = await fetch(queryUrl, { headers: { "User-Agent": "TableFinder/1.0" } });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 2_500);
+        const resp = await fetch(queryUrl, { headers: { "User-Agent": "TableFinder/1.0" }, signal: controller.signal });
+        clearTimeout(timer);
         if (!resp.ok) return false;
         const data = await resp.json();
         if (!data?.[0]) return false;
@@ -2008,7 +2011,10 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
     );
   }
 
-  await Promise.all(geocodePromises);
+  await Promise.race([
+    Promise.all(geocodePromises),
+    new Promise<void>((resolve) => setTimeout(resolve, maxMs)),
+  ]);
   const geocoded = toGeocode.filter(r => r.distanceMiles != null).length;
   console.log(`Geocoded ${geocoded}/${toGeocode.length} restaurants`);
 }
