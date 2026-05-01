@@ -1993,7 +1993,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
     console.log(`  Nominatim miss for ${r.name} — will use AI coordinates`);
   }
 
-  const toGeocode = results.filter(r => r.platform !== "yelp");
+  const toGeocode = results.filter(r => r.distanceMiles == null);
   if (toGeocode.length === 0) return;
 
   console.log(`Geocoding ${toGeocode.length} restaurants via Nominatim...`);
