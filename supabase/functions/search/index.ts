@@ -1979,14 +1979,15 @@ function selectCandidatesForVerification(
     yelp: candidates.filter((c) => c.platform === "yelp"),
   };
 
-  // Fixed-cap allocation: prioritise Resy (most reliable/fast), keep OT and Yelp
-  // small so a slow provider can't consume the verification budget.
-  // Initial caps for a 16-total budget: Resy 8 / OpenTable 4 / Yelp 4.
-  // Caps scale proportionally if maxCandidates differs.
+  // Fixed-cap allocation. Resy is the most reliable single-page scrape, OT renders
+  // slow JS widgets, Yelp is fragile. Skew Resy heavy but keep meaningful OT/Yelp
+  // quotas so each provider has a real shot at returning. The verification stage
+  // uses a wall-time deadline + early-return after 6 verified, so over-allocating
+  // is safe — we just don't burn the budget when results come back fast.
   const baseCaps: Record<string, number> = {
-    resy: Math.round((8 / 16) * maxCandidates),
-    opentable: Math.round((4 / 16) * maxCandidates),
-    yelp: Math.round((4 / 16) * maxCandidates),
+    resy: Math.round((10 / 22) * maxCandidates),
+    opentable: Math.round((6 / 22) * maxCandidates),
+    yelp: Math.round((6 / 22) * maxCandidates),
   };
   const quotas: Record<string, number> = {};
   let assigned = 0;
