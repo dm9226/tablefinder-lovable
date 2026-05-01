@@ -198,8 +198,9 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Global timeout: return partial results before the hard 150s edge function limit
-  const GLOBAL_TIMEOUT_MS = 120_000;
+  // Global timeout: hard ceiling on initial response so the UI never hangs.
+  // Verification stops at the lane budget (see verifyAvailability) well before this.
+  const GLOBAL_TIMEOUT_MS = 32_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
