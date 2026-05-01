@@ -413,7 +413,7 @@ serve(async (req) => {
     // Skip AI enrichment if verification burned most of our budget; verified results
     // are still returned, just without AI-derived descriptions/vibe tags/coordinates.
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 55_000;
+    const skipEnrichment = elapsed > 95_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
