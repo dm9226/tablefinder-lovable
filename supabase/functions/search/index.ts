@@ -280,7 +280,10 @@ serve(async (req) => {
         : Promise.race([
             enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
             new Promise<Map<number, any>>((resolve) =>
-              setTimeout(() => resolve(new Map<number, any>()), 5_000),
+              setTimeout(() => {
+                console.warn("[EXTENDED] AI enrichment timed out at 10s");
+                resolve(new Map<number, any>());
+              }, 10_000),
             ),
           ]);
 
