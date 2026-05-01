@@ -366,14 +366,26 @@ serve(async (req) => {
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
     // If we're past 110s, skip enrichment to ensure we return in time
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 110_000;
+    // Skip AI enrichment if verification already burned most of our budget.
+    // Verified results are still returned; they just lack AI-derived
+    // descriptions/vibe tags/AI coordinates.
+    const skipEnrichment = elapsed > 24_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
 
-    const enrichmentPromise = skipEnrichment 
-      ? Promise.resolve(new Map<number, any>()) 
-      : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
+    // Hard cap enrichment so it cannot stall the response past ~5s.
+    const enrichmentPromise: Promise<Map<number, any>> = skipEnrichment
+      ? Promise.resolve(new Map<number, any>())
+      : Promise.race([
+          enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
+          new Promise<Map<number, any>>((resolve) =>
+            setTimeout(() => {
+              console.warn("AI enrichment timed out at 5s — returning without enrichment");
+              resolve(new Map<number, any>());
+            }, 5_000),
+          ),
+        ]);
 
     const [, enrichmentMap] = await Promise.all([
       geocodeVerifiedResults(verified, params),
