@@ -331,12 +331,12 @@ serve(async (req) => {
       console.log(`[DISCOVERY] ${platform} (${urls.length}): ${urls.join(" | ")}`);
     }
 
-    // Step 3: Select candidates with round-robin balance, then verify per-adapter
-    // Use fewer candidates for vague queries to avoid timeouts
+    // Step 3: Select candidates with provider-specific quotas, then verify per-adapter.
+    // Bigger budget so Resy can be over-allocated (it's the most reliable provider) while
+    // OT/Yelp still get a real shot. Initial verification has a hard wall-time deadline below,
+    // so we don't actually pay for all of these unless they verify quickly.
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    // Lowered from 24 → 16 to keep the request inside ~25s and stop Yelp from
-    // starving Resy/OpenTable's verification slots.
-    const maxCandidates = isVagueQuery ? 12 : 16;
+    const maxCandidates = isVagueQuery ? 18 : 22;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
