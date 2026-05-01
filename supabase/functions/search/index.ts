@@ -2096,7 +2096,8 @@ async function verifyAvailability(
   firecrawlKey: string,
   amenityTerms: string[] = [],
   globalStartTime?: number,
-  laneLabel?: "resy" | "opentable" | "yelp"
+  laneLabel?: "resy" | "opentable" | "yelp",
+  accumulator?: Restaurant[]
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
@@ -2915,6 +2916,12 @@ async function verifyAvailability(
     }
     }));
     allChecked.push(...batchResults);
+    // Stream verified results into the shared accumulator so a lane-deadline
+    // race outside this function can return what's already verified instead
+    // of dropping everything when the lane runs over.
+    if (accumulator) {
+      for (const v of batchResults) if (v) accumulator.push(v);
+    }
   }
 
   return allChecked.filter(Boolean) as Restaurant[];
