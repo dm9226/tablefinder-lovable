@@ -357,19 +357,20 @@ serve(async (req) => {
     const selectedIds = new Set(selected.map(r => r.name + r.platform));
     const remainingAfterSelection = allCandidates.filter(c => !selectedIds.has(c.name + c.platform));
 
-    // Verify all providers through a SINGLE shared queue so one provider
-    // (especially OpenTable, frequently Akamai-blocked) can't starve the
-    // verification budget for Resy/Yelp. Resy candidates go first because
-    // they verify fastest and most reliably, so the early-exit check fires
-    // on real wins rather than slow OT timeouts.
-    const orderedSelected = [
-      ...selected.filter(c => c.platform === "resy"),
-      ...selected.filter(c => c.platform === "yelp"),
-      ...selected.filter(c => c.platform === "opentable"),
-    ];
-    let verified = await verifyAvailability(
-      orderedSelected, params, keys.firecrawlKey, amenityTerms, keys._startTime,
-    );
+    // Verify each provider in its own parallel lane so a slow/blocked provider
+    // (typically OpenTable) cannot starve the others, and each one gets a real
+    // shot within the global budget.
+    const resyCands = selected.filter(c => c.platform === "resy");
+    const otCands   = selected.filter(c => c.platform === "opentable");
+    const yelpCands = selected.filter(c => c.platform === "yelp");
+    const laneResults = await Promise.all([
+      verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy"),
+      verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable"),
+      verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp"),
+    ]);
+    let verified = ([] as Restaurant[]).concat(...laneResults);
+    const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
+    console.log(`[LANES] verified: resy=${laneCounts.resy}/${resyCands.length}, opentable=${laneCounts.opentable}/${otCands.length}, yelp=${laneCounts.yelp}/${yelpCands.length}`);
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
