@@ -207,7 +207,7 @@ serve(async (req) => {
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
   let timeoutFallbackBody: Record<string, unknown> | null = null;
-  let hardCeilingTimer: ReturnType<typeof setTimeout>;
+  let hardCeilingTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Hard wall-clock ceiling on the entire handler. Many downstream fetches
   // (Lovable AI, Nominatim, Firecrawl search/retry, enrichment) do not yet
