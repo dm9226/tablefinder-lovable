@@ -422,16 +422,18 @@ serve(async (req) => {
       console.warn(`Verification overran (${elapsed}ms) — running enrichment anyway with tight budget`);
     }
 
-    // Hard cap enrichment so it cannot stall the response past ~4s.
+    // Hard cap enrichment so it cannot stall the response past ~6s. Gemini
+    // 2.5-flash needs ~3-5s for ~10 restaurants; 4s was too tight and
+    // consistently timed out, leaving cards bare.
     const enrichmentPromise: Promise<Map<number, any>> = verified.length === 0
       ? Promise.resolve(new Map<number, any>())
       : Promise.race([
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-              console.warn("AI enrichment timed out at 4s — returning without enrichment");
+              console.warn("AI enrichment timed out at 6s — returning without enrichment");
               resolve(new Map<number, any>());
-            }, 4_000),
+            }, 6_000),
           ),
         ]);
 
