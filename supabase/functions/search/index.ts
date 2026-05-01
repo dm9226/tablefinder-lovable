@@ -494,6 +494,13 @@ serve(async (req) => {
     clearTimeout(globalTimer);
     const hasMore = remainingAfterSelection.length > 0;
     console.log(`[RESPONSE] ${finalResults.length} results, hasMore=${hasMore} (${remainingAfterSelection.length} remaining candidates)`);
+    {
+      const elapsedMs = Date.now() - startTime;
+      const cand = adapters.map((a, i) => `${a.platform}=${discovered[i]?.length ?? 0}`).join(",");
+      const sel = ["resy","opentable","yelp"].map(p => `${p}=${selected.filter(c=>c.platform===p).length}`).join(",");
+      const ver = ["resy","opentable","yelp"].map(p => `${p}=${verified.filter(c=>c.platform===p).length}`).join(",");
+      console.log(`[SEARCH_SUMMARY] elapsedMs=${elapsedMs} candidates{${cand}} selected{${sel}} verified{${ver}} returned=${finalResults.length} hasMore=${hasMore}`);
+    }
     try {
       const responseBody = JSON.stringify({
         results: finalResults,
