@@ -2171,40 +2171,11 @@ async function verifyAvailability(
         }
         clearTimeout(scrapeTimer);
 
-        // On 408 timeout for OT (stealth scrape), retry once with simpler payload.
-        // For Resy/Yelp the budget doesn't justify a retry.
+        // No retry on 408 — the long retry path was the main source of 60-120s
+        // hangs. Accept the loss; the lane budget moves us on to the next batch.
         if (resp.status === 408) {
-          const errBody408 = await resp.text().catch(() => "(no body)");
-          console.log(`Scrape failed (408) for ${r.name} [${r.platform}]: ${errBody408.slice(0, 200)}`);
-          if (!isOT) return null;
-          console.log(`Retrying OT scrape once for ${r.name}...`);
-          await acquireFirecrawlSlot();
-          const retryAbort = new AbortController();
-          const retryTimer = setTimeout(() => retryAbort.abort(), 50_000);
-          try {
-            try {
-              resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${firecrawlKey}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ ...scrapePayload, waitFor: 4000, timeout: 45000 }),
-                signal: retryAbort.signal,
-              });
-            } catch (retryErr: any) {
-              clearTimeout(retryTimer);
-              console.log(`OT retry failed for ${r.name}: ${retryErr.name === "AbortError" ? "timeout" : retryErr}`);
-              return null;
-            }
-          } finally {
-            releaseFirecrawlSlot();
-          }
-          clearTimeout(retryTimer);
-          if (!resp.ok) {
-            console.log(`OT retry non-OK (${resp.status}) for ${r.name}`);
-            return null;
-          }
+          console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
+          return null;
         }
 
         if (!resp.ok) {
