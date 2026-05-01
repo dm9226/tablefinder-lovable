@@ -1279,8 +1279,8 @@ function isPlatformCandidateUrlValid(
       return false;
     }
 
-    // Yelp candidates from web search are low-confidence by default, keep only reservation pages.
-    return /^\/reservations\/[^/?#]+/i.test(p);
+    // Yelp candidates: accept both /reservations/ and /biz/ URLs (biz will be converted to reservations)
+    return /^\/(?:reservations|biz)\/[^/?#]+/i.test(p);
   } catch {
     return false;
   }
@@ -1301,7 +1301,7 @@ function normalizeCandidates(
         ? addResyParams(canonUrl, params)
         : platform === "opentable"
         ? addOTParams(canonUrl, params)
-        : canonUrl;
+        : addYelpParams(canonUrl, params);
 
       return {
         id: `${platform}-${hashKey(canonUrl)}`,
@@ -1349,9 +1349,12 @@ function extractCanonicalUrl(platform: "resy" | "opentable" | "yelp", raw: strin
       }
       return `https://www.opentable.com${m[0]}`;
     }
-    // Yelp: only reservation pages count as valid booking URLs
-    const resMatch = p.match(/^\/reservations\/[^/?#]+/i);
-    return resMatch ? `https://www.yelp.com${resMatch[0]}` : null;
+    // Yelp: accept both /reservations/ and /biz/ URLs, normalize to /reservations/
+    const yelpResMatch = p.match(/^\/reservations\/([^/?#]+)/i);
+    if (yelpResMatch) return `https://www.yelp.com/reservations/${yelpResMatch[1]}`;
+    const yelpBizMatch = p.match(/^\/biz\/([^/?#]+)/i);
+    if (yelpBizMatch) return `https://www.yelp.com/reservations/${yelpBizMatch[1]}`;
+    return null;
   } catch { return null; }
 }
 
@@ -1372,6 +1375,16 @@ function addOTParams(base: string, p: SearchParams): string {
     const u = new URL(base);
     u.searchParams.set("dateTime", `${p.date}T${p.time}`);
     u.searchParams.set("covers", String(p.partySize));
+    return u.toString();
+  } catch { return base; }
+}
+
+function addYelpParams(base: string, p: SearchParams): string {
+  try {
+    const u = new URL(base);
+    u.searchParams.set("covers", String(p.partySize));
+    u.searchParams.set("date", p.date);
+    u.searchParams.set("time", p.time.replace(":", ""));
     return u.toString();
   } catch { return base; }
 }
@@ -1440,10 +1453,12 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Yelp discovery disabled — Fusion API too expensive, Steel.dev hobby can't bypass DataDome,
-    // Firecrawl blocked by DataDome. No viable free/cheap approach currently available.
-    console.log("Yelp discovery skipped: no viable free discovery method available");
-    return [];
+    // Yelp discovery via Firecrawl search engine queries for /reservations/ pages
+    // This bypasses DataDome since we search Google, not Yelp directly
+    const firecrawlResults = await searchFirecrawl(params, firecrawlKey, "yelp", amenityTerms);
+    const candidates = normalizeCandidates("yelp", firecrawlResults, params);
+    console.log(`Yelp Firecrawl discovery: ${candidates.length} candidates`);
+    return candidates;
   } catch (err) {
     console.error("Yelp scrape error:", err);
     return [];
@@ -1951,9 +1966,8 @@ function selectCandidatesForVerification(
   let assigned = 0;
   for (const platform of platformOrder) {
     const raw = Math.round((buckets[platform].length / total) * maxCandidates);
-    // Cap quota to actual bucket size; Yelp capped at 6 due to waitFor latency cost
-    const platformCap = platform === "yelp" ? Math.min(raw, 6) : raw;
-    quotas[platform] = Math.min(platformCap, buckets[platform].length);
+    // Cap quota to actual bucket size
+    quotas[platform] = Math.min(raw, buckets[platform].length);
     assigned += quotas[platform];
   }
   // Distribute any remaining slots (due to rounding or capped buckets) round-robin
@@ -1987,23 +2001,6 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
-  // Steel.dev concurrency limiter (hobby tier: be conservative)
-  let steelActiveCount = 0;
-  const steelQueue: (() => void)[] = [];
-  const STEEL_MAX_CONCURRENT = 2;
-  const acquireSteelSlot = (): Promise<void> => {
-    if (steelActiveCount < STEEL_MAX_CONCURRENT) {
-      steelActiveCount++;
-      return Promise.resolve();
-    }
-    return new Promise<void>(resolve => steelQueue.push(resolve));
-  };
-  const releaseSteelSlot = () => {
-    steelActiveCount--;
-    const next = steelQueue.shift();
-    if (next) { steelActiveCount++; next(); }
-  };
-
   // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts)
   const BATCH_SIZE = 4;
   const allChecked: (Restaurant | null)[] = [];
@@ -2028,212 +2025,13 @@ async function verifyAvailability(
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
 
-      // ── YELP: Steel.dev stealth browser scrape ──
-      // Firecrawl can't bypass Yelp's DataDome. Use Steel.dev CDP for Yelp.
-      let yelpSteelHtml = "";
-      let yelpHasConcreteSlotEvidence = false;
-       if (isYelp) {
-        await acquireSteelSlot();
-        const steelApiKey = Deno.env.get("STEEL_API_KEY");
-        if (!steelApiKey) {
-          releaseSteelSlot();
-          console.log(`✗ ${r.name} [yelp] — skipped: STEEL_API_KEY not configured`);
-          return null;
-        }
-        try {
-          console.log(`  ${r.name} [yelp] — starting Steel.dev stealth session for: ${r.platformUrl}`);
-          // 1. Create session via Steel REST API
-          const sessionResp = await fetch("https://api.steel.dev/v1/sessions", {
-            method: "POST",
-            headers: {
-              "steel-api-key": steelApiKey,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              useProxy: false,
-              solveCaptcha: false,
-            }),
-          });
-          if (!sessionResp.ok) {
-            const errText = await sessionResp.text().catch(() => "");
-            console.log(`✗ ${r.name} [yelp] — Steel session create failed (${sessionResp.status}): ${errText.slice(0, 300)}`);
-            releaseSteelSlot();
-            return null;
-          }
-          const sessionData = await sessionResp.json();
-          const steelSessionId = sessionData.id;
-          if (!steelSessionId) {
-            console.log(`✗ ${r.name} [yelp] — Steel session missing id`);
-            releaseSteelSlot();
-            return null;
-          }
-
-          // 2. Connect via CDP WebSocket
-          const connectUrl = `wss://connect.steel.dev?apiKey=${steelApiKey}&sessionId=${steelSessionId}`;
-          const ws = new WebSocket(connectUrl);
-          let cdpId = 1;
-          const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
-          let cdpSessionId: string | null = null;
-
-          const cdpSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
-            return new Promise((resolve, reject) => {
-              const id = cdpId++;
-              pending.set(id, { resolve, reject });
-              const msg: Record<string, unknown> = { id, method, params };
-              if (cdpSessionId) msg.sessionId = cdpSessionId;
-              ws.send(JSON.stringify(msg));
-              setTimeout(() => {
-                if (pending.has(id)) {
-                  pending.delete(id);
-                  reject(new Error(`CDP timeout: ${method}`));
-                }
-              }, 30000);
-            });
-          };
-
-          await new Promise<void>((resolve, reject) => {
-            ws.onopen = () => resolve();
-            ws.onerror = (e) => reject(e);
-            setTimeout(() => reject(new Error("WS connect timeout")), 15000);
-          });
-
-          ws.onmessage = (event) => {
-            try {
-              const msg = JSON.parse(typeof event.data === "string" ? event.data : "{}");
-              if (msg.id && pending.has(msg.id)) {
-                const p = pending.get(msg.id)!;
-                pending.delete(msg.id);
-                if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
-                else p.resolve(msg.result);
-              }
-            } catch (_) { /* ignore parse errors */ }
-          };
-
-          // 3. Create a new page target and attach to it with flatten=true
-          const targetResult = await cdpSend("Target.createTarget", { url: "about:blank" });
-          const targetId = targetResult?.targetId;
-          if (!targetId) throw new Error("Failed to create browser target");
-
-          const attachResult = await cdpSend("Target.attachToTarget", { targetId, flatten: true });
-          cdpSessionId = attachResult?.sessionId;
-          if (!cdpSessionId) throw new Error("Failed to attach to target");
-
-          // 4. Navigate to the Yelp reservation URL
-          await cdpSend("Page.enable");
-          await cdpSend("Runtime.enable");
-          await cdpSend("Page.navigate", { url: r.platformUrl });
-
-          // Wait for page load
-          await new Promise(resolve => setTimeout(resolve, 10000));
-
-          // 5. Scroll down to trigger lazy-loaded reservation widget
-          await cdpSend("Runtime.evaluate", {
-            expression: "window.scrollBy(0, 1500); 'scrolled'",
-            returnByValue: true,
-          });
-          await new Promise(resolve => setTimeout(resolve, 3000));
-
-          // Try clicking reservation-related elements
-          const clickResult = await cdpSend("Runtime.evaluate", {
-            expression: `
-              (function() {
-                const btns = document.querySelectorAll('button, a, [role="button"]');
-                for (const b of btns) {
-                  const text = (b.textContent || '').toLowerCase();
-                  if (text.includes('find a table') || text.includes('make a reservation') || text.includes('check availability')) {
-                    b.click();
-                    return 'clicked: ' + text.trim().slice(0, 50);
-                  }
-                }
-                return 'no reservation button found';
-              })()
-            `,
-            returnByValue: true,
-          }).catch(() => ({ result: { value: "click failed" } }));
-          console.log(`  ${r.name} [yelp] click result: ${JSON.stringify(clickResult?.result?.value)}`);
-
-          // Wait for widget to render after click
-          await new Promise(resolve => setTimeout(resolve, 6000));
-
-          // 6. Extract the full page HTML
-          const docResult = await cdpSend("Runtime.evaluate", {
-            expression: "document.documentElement.outerHTML",
-            returnByValue: true,
-          });
-          yelpSteelHtml = docResult?.result?.value || "";
-          console.log(`  ${r.name} [yelp] Steel extracted ${yelpSteelHtml.length} chars of HTML`);
-          console.log(`  [DEBUG] ${r.name} [yelp] Steel HTML (first 2000 chars):\n${yelpSteelHtml.slice(0, 2000)}`);
-
-          // Check final URL (redirect detection)
-          const locationResult = await cdpSend("Runtime.evaluate", {
-            expression: "window.location.href",
-            returnByValue: true,
-          });
-          const finalUrl = locationResult?.result?.value || "";
-
-          // Close session
-          try { ws.close(); } catch (_) {}
-          // Release Steel session via API
-          try {
-            await fetch(`https://api.steel.dev/v1/sessions/${steelSessionId}/release`, {
-              method: "POST",
-              headers: { "steel-api-key": steelApiKey },
-            });
-          } catch (_) {}
-
-          // Check for redirect away from /reservations/
-          if (finalUrl && !finalUrl.includes("/reservations/")) {
-            console.log(`✗ ${r.name} [yelp] — redirected to: ${finalUrl}, skipping`);
-            releaseSteelSlot();
-            return null;
-          }
-
-          // 7. Parse HTML for time slot buttons
-          const timeButtonRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
-          const renderedTimes: string[] = [];
-          let tbMatch;
-          while ((tbMatch = timeButtonRegex.exec(yelpSteelHtml)) !== null) {
-            renderedTimes.push(tbMatch[1].trim());
-          }
-
-          // Also check for standalone time text lines
-          const textContent = yelpSteelHtml.replace(/<[^>]+>/g, "\n");
-          const textLines = textContent.split("\n");
-          let standaloneTimeLines = 0;
-          for (const line of textLines) {
-            if (/^\s*\d{1,2}:\d{2}\s*(AM|PM)\s*$/i.test(line)) standaloneTimeLines++;
-          }
-
-          const reservationKeywords = /(select\s+(a\s+)?time|available\s+times?|find\s+a\s+table|book\s+a\s+table|make\s+a\s+reservation|request\s+a\s+reservation)/i;
-          const hasReservationSection = reservationKeywords.test(yelpSteelHtml);
-
-          yelpHasConcreteSlotEvidence = renderedTimes.length >= 2 || standaloneTimeLines >= 2 || (hasReservationSection && (renderedTimes.length >= 1 || standaloneTimeLines >= 1));
-
-          console.log(`  ${r.name} [yelp] Steel widget check: ${renderedTimes.length} button times, ${standaloneTimeLines} standalone time lines, reservationSection=${hasReservationSection}, evidence=${yelpHasConcreteSlotEvidence}`);
-          if (renderedTimes.length > 0) {
-            console.log(`  ${r.name} [yelp] Steel found times: ${renderedTimes.slice(0, 10).join(", ")}`);
-          }
-
-          if (!yelpHasConcreteSlotEvidence) {
-            console.log(`✗ ${r.name} [yelp] — rejected: Steel stealth browser found no concrete slot evidence`);
-            releaseSteelSlot();
-            return null;
-          }
-          releaseSteelSlot();
-        } catch (steelErr: any) {
-          releaseSteelSlot();
-          console.log(`✗ ${r.name} [yelp] — Steel error: ${steelErr.message || steelErr}`);
-          return null;
-        }
-      }
-
-      // ── Non-Yelp: Firecrawl scrape (Resy / OpenTable) ──
+      // ── Firecrawl scrape (Resy / OpenTable / Yelp) ──
       const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
           timeout: 15000,
-          ...(isOT && { waitFor: 3000 }),
+          ...((isOT || isYelp) && { waitFor: 3000 }),
         };
 
       let markdown = "";
@@ -2242,13 +2040,8 @@ async function verifyAvailability(
       let jsonData: any = null;
       let data: any = null;
 
-      if (isYelp) {
-        // For Yelp, convert Browserbase HTML to pseudo-markdown for downstream parsing
-        const textContent = yelpSteelHtml.replace(/<[^>]+>/g, "\n").replace(/\n{3,}/g, "\n\n");
-        markdown = textContent;
-        html = yelpSteelHtml;
-      } else {
-        // Firecrawl for Resy/OT
+      {
+        // Firecrawl for all platforms (Resy/OT/Yelp)
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 16_000);
         let resp: Response;
@@ -2301,7 +2094,7 @@ async function verifyAvailability(
       // Extract structured data from Firecrawl JSON extraction (if present)
       
       // Extract address from markdown/metadata (all platforms)
-      if (r.platform !== "yelp" && !r._address) {
+      if (!r._address) {
         // Try OG metadata first (OpenTable populates these)
         const meta2 = data?.data?.metadata || data?.metadata;
         const ogStreet = meta2?.["og:street-address"] || meta2?.["street-address"];
@@ -2567,6 +2360,11 @@ async function verifyAvailability(
           if (/\|\s*(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s*\|/i.test(line)) return false;
           // Match "Closed now" or standalone "Closed"
           if (/^\s*\|?\s*Closed\s*(now)?\s*\|?\s*$/i.test(line)) return false;
+          // Strip dropdown lines with many concatenated times (e.g. "12:00 pm12:30 pm1:00 pm...")
+          const timeMatches = line.match(/\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)/g);
+          if (timeMatches && timeMatches.length >= 5) return false;
+          // Strip "N personN people..." dropdown lines
+          if (/\d+\s*person\d+\s*people/i.test(line)) return false;
           return true;
         }).join("\n");
       }
@@ -2614,56 +2412,7 @@ async function verifyAvailability(
         return { time: formatted, minutes: totalMin };
       };
 
-       if (isYelp) {
-        // Extract times from Browserbase HTML — look for time patterns in button/link elements
-        // and standalone time lines from the rendered page
-        const timeRegex = /(\d{1,2}:\d{2}\s*(?:AM|PM))/gi;
-        const allTimesInHtml = (yelpSteelHtml || "").match(timeRegex) || [];
-        
-        // Deduplicate and filter out operating hours patterns
-        // Operating hours typically appear as ranges "5:00 PM - 9:00 PM"
-        // Reservation buttons appear as standalone times
-        const hoursRangeRegex = /\d{1,2}:\d{2}\s*(?:AM|PM)\s*[-–—]\s*\d{1,2}:\d{2}\s*(?:AM|PM)/gi;
-        const hoursRanges = (yelpSteelHtml || "").match(hoursRangeRegex) || [];
-        const hoursTimesSet = new Set<string>();
-        for (const range of hoursRanges) {
-          const rangeMatches = range.match(timeRegex) || [];
-          for (const t of rangeMatches) hoursTimesSet.add(t.trim().toUpperCase());
-        }
 
-        // Use button-context times (from the Browserbase evidence check above)
-        const buttonTimeRegex = /<(?:button|a|span|div)[^>]*>[\s]*(\d{1,2}:\d{2}\s*(?:AM|PM))[\s]*<\/(?:button|a|span|div)>/gi;
-        let btMatch;
-        while ((btMatch = buttonTimeRegex.exec(yelpSteelHtml || "")) !== null) {
-          const rawTime = btMatch[1].trim();
-          if (hoursTimesSet.has(rawTime.toUpperCase())) continue; // skip operating hours times
-          const parsed = parseTimeStr(rawTime);
-          if (parsed && !seenTimes.has(parsed.time)) {
-            seenTimes.add(parsed.time);
-            foundTimes.push(parsed);
-          }
-        }
-
-        // Also check standalone time text lines
-        const textLines = (yelpSteelHtml || "").replace(/<[^>]+>/g, "\n").split("\n");
-        for (const line of textLines) {
-          const trimmed = line.trim();
-          if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(trimmed)) {
-            if (hoursTimesSet.has(trimmed.toUpperCase())) continue;
-            const parsed = parseTimeStr(trimmed);
-            if (parsed && !seenTimes.has(parsed.time)) {
-              seenTimes.add(parsed.time);
-              foundTimes.push(parsed);
-            }
-          }
-        }
-
-        console.log(`  ${r.name} [yelp]: Browserbase extracted times: ${foundTimes.length} — ${foundTimes.map(t => t.time).slice(0, 8).join(", ")}`);
-
-        if (!yelpHasConcreteSlotEvidence) {
-          foundTimes = [];
-        }
-      }
 
       // ── OPENTABLE-SPECIFIC: Parse "Select a time" section ──
       // Helper: parse OT slots from markdown content
@@ -2858,7 +2607,7 @@ async function verifyAvailability(
 
       // ── STRATEGY 1: For Resy, times already extracted from meal section above ──
       // ── STRATEGY 2: Regex on cleaned booking markdown (non-Resy only) ──
-      if (!isResy && !isYelp && foundTimes.length === 0) {
+      if (!isResy && foundTimes.length === 0) {
         let match12;
         while ((match12 = timeSlotRegex12.exec(bookingMarkdown)) !== null) {
           // Context check: skip times near "notify", "sold out", "waitlist"
@@ -2910,10 +2659,10 @@ async function verifyAvailability(
         }
       }
 
-       // Yelp retry not needed — Browserbase already does full stealth rendering with scroll+click+wait
+       // Yelp times extracted from Firecrawl markdown of /reservations/ page
 
       if (isYelp && foundTimes.length === 0) {
-        console.log(`✗ ${r.name} [yelp] — no verified reservation slots found after direct extract + retry`);
+        console.log(`✗ ${r.name} [yelp] — no reservation slots found on /reservations/ page`);
         return null;
       }
 

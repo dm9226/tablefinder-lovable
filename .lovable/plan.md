@@ -1,50 +1,55 @@
+I agree: Yelp needs to remain a hard requirement. I found a viable path that does not use the paid Yelp API and does not rely on blocked direct Yelp search scraping.
 
+Current problem:
+- The deployed search function now returns `yelp: 0` because Yelp discovery is explicitly disabled.
+- Direct Yelp `/search` scraping from backend is blocked by 403/DataDome.
+- However, external indexed search results can surface Yelp `/reservations/...` pages, and those pages expose real reservation slots when fetched through the existing scraping path.
 
-## Diagnose Yelp API: Add Error Logging
+Plan:
 
-### Problem
-The Yelp API is returning 0 candidates, but the code silently swallows non-200 responses at line 1480:
-```typescript
-let businesses = resp.ok ? (await resp.json())?.businesses || [] : [];
-```
-If the API returns 401 (bad key), 403 (revoked), or 429 (rate limited), this line just produces an empty array with no logging.
+1. Re-enable Yelp discovery without the Yelp API
+- Replace the disabled `fetchYelpCandidates()` return path with search-engine discovery for `site:yelp.com/reservations`.
+- Use multiple query variants for recall, e.g.:
+  - `site:yelp.com/reservations {cuisine} {city} {state}`
+  - `site:yelp.com/reservations {dishKeyword} {city} {state}`
+  - parent cuisine fallback for dish searches, e.g. oysters -> seafood, sushi -> Japanese/Sushi Bars
+- Keep `/biz` pages only as secondary hints if needed, but prioritize `/reservations/` URLs because they are directly bookable.
 
-### Root Cause (Most Likely)
-Based on the "stack overflow" hint and historical pattern of Yelp revoking keys, the `YELP_API_KEY` secret is likely expired or invalid. But we can't confirm without seeing the actual HTTP status.
+2. Normalize Yelp candidates correctly
+- Parse search results into `Restaurant` objects with canonical `https://www.yelp.com/reservations/{alias}` URLs.
+- Add Yelp deep-link params: `covers`, `date`, and `time`.
+- Extract name, cuisine, rating, and neighborhood where available from search snippets, but treat this as metadata only.
 
-### Plan
+3. Make Yelp verification strict but fast
+- Do not return Yelp results from discovery alone.
+- Verify every Yelp result by scraping the actual Yelp reservation URL with the requested date/time/party size.
+- Parse concrete slot evidence from the reservation page:
+  - standalone time slots such as `6:30 pm`, `7:00 pm`, etc.
+  - reject generic operating-hour ranges and non-slot text.
+- Filter slots to the existing strict ±2 hour window around the requested time.
+- Return only restaurants with verified matching slots.
 
-**1. Add Yelp API response status logging** (`supabase/functions/search/index.ts`)
+4. Avoid Steel.dev for the common path
+- Keep Steel as an optional fallback only if scraping a Yelp reservation page fails unexpectedly.
+- Do not use Steel for Yelp search-page discovery because the hobby-tier browser path is too slow/blocked.
+- This keeps costs low and preserves the 25–30 second target.
 
-After the initial Yelp fetch (line 1476-1480), log the response status when it's not ok:
+5. Preserve Resy/OpenTable performance
+- Keep the current batched verification and Firecrawl timeout reductions for Resy/OpenTable.
+- Ensure Yelp discovery runs in parallel with Resy and OpenTable discovery and does not block them beyond the discovery cap.
+- Cap Yelp verification candidates to a small number, e.g. 6, so Yelp contributes results without blowing the request budget.
 
-```typescript
-let resp = await fetch(`${YELP_API}/businesses/search?${sp}`, {
-  headers: { Authorization: `Bearer ${yelpKey}` },
-});
+6. Test end-to-end after implementation
+- Deploy the updated search function.
+- Run `oysters in NYC tonight for 2` and inspect logs/results for:
+  - Yelp candidates discovered
+  - Yelp reservation URLs scraped
+  - concrete time slots parsed
+  - final Yelp results returned only after verification
+- Also run `sushi tomorrow night for 2 in NYC` to verify the previous failure case improves while staying near the time cap.
 
-if (!resp.ok) {
-  const errBody = await resp.text().catch(() => "");
-  console.log(`Yelp API error: status=${resp.status}, body=${errBody.slice(0, 300)}`);
-}
-let businesses = resp.ok ? (await resp.json())?.businesses || [] : [];
-```
-
-Also add the same for the broadened search (line 1486-1489).
-
-**2. Add Yelp API key metadata logging**
-
-At the start of the Yelp adapter's discover function, log the key length and prefix/suffix (not the full key):
-
-```typescript
-console.log(`Yelp API key metadata: len=${yelpKey.length}, prefix=${yelpKey.slice(0,4)}, suffix=${yelpKey.slice(-4)}`);
-```
-
-### Expected Outcome
-After deploying, the next search will reveal exactly why Yelp returns 0 — whether it's a 401 (bad key), 403 (revoked), 429 (rate limited), or something else. Once we see the actual error, we can take the right corrective action (e.g., updating the API key).
-
-### Files Modified
-| File | Change |
-|------|--------|
-| `supabase/functions/search/index.ts` | Add error status + body logging for Yelp API calls, add key metadata logging |
-
+Technical notes:
+- This aligns with the hard rule: every returned restaurant must have verified availability from the actual booking URL.
+- It avoids the expensive Yelp API.
+- It avoids blocked direct Yelp `/search` scraping.
+- It uses indexed `/reservations/` pages as discovery seeds, then performs strict first-party reservation-page verification before returning anything.
