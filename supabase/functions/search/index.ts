@@ -2179,11 +2179,48 @@ async function verifyAvailability(
         }
         clearTimeout(scrapeTimer);
 
-        // No retry on 408 — the long retry path was the main source of 60-120s
-        // hangs. Accept the loss; the lane budget moves us on to the next batch.
+        // 408 from Firecrawl = their scrape worker timed out, not that the page
+        // is broken. A single fast retry recovers most of these without blowing
+        // the lane budget. We only retry if we still have ≥10s of wall-clock
+        // budget left, and we use a tighter timeout on the retry.
         if (resp.status === 408) {
-          console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
-          return null;
+          const elapsedSinceStart = Date.now() - startTime;
+          const wallBudgetLeftMs = 28_000 - elapsedSinceStart;
+          if (wallBudgetLeftMs < 10_000) {
+            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (only ${wallBudgetLeftMs}ms budget left)`);
+            return null;
+          }
+          console.log(`Scrape 408 for ${r.name} [${r.platform}] — retrying once`);
+          const retryAbort = new AbortController();
+          const retryTimer = setTimeout(() => retryAbort.abort(), isOT ? 14_000 : 9_000);
+          await acquireFirecrawlSlot();
+          try {
+            try {
+              resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${firecrawlKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  ...scrapePayload,
+                  timeout: isOT ? 12000 : 8000,
+                }),
+                signal: retryAbort.signal,
+              });
+            } catch (retryErr: any) {
+              clearTimeout(retryTimer);
+              console.log(`Scrape retry failed for ${r.name} [${r.platform}]: ${retryErr?.name || retryErr}`);
+              return null;
+            }
+          } finally {
+            releaseFirecrawlSlot();
+          }
+          clearTimeout(retryTimer);
+          if (resp.status === 408 || !resp.ok) {
+            console.log(`Scrape retry got ${resp.status} for ${r.name} [${r.platform}] — giving up`);
+            return null;
+          }
         }
 
         if (!resp.ok) {
