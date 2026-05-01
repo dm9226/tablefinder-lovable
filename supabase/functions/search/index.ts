@@ -2155,6 +2155,27 @@ async function verifyAvailability(
         return null;
       }
 
+      // Fail-fast: detect Akamai/Incapsula/Cloudflare challenge pages.
+      // OpenTable in particular frequently serves these and the rendered
+      // markdown is essentially empty. No reservation data is ever recoverable
+      // from a challenge response, so reject immediately rather than spending
+      // the rest of verification on it.
+      {
+        const combined = `${markdown}\n${html}`.toLowerCase();
+        const looksLikeChallenge =
+          combined.includes("powered and protected by") ||
+          combined.includes("akamai") && combined.includes("behavioral-content") ||
+          combined.includes("sec-bc-text-container") ||
+          combined.includes("incapsula") ||
+          combined.includes("attention required") ||
+          (combined.includes("captcha") && markdown.length < 600);
+        const tooShort = markdown.trim().length < 200 && (!html || html.length < 1500);
+        if (looksLikeChallenge || tooShort) {
+          console.log(`✗ ${r.name} [${r.platform}] — anti-bot challenge or empty render, rejecting fast`);
+          return null;
+        }
+      }
+
       // Extract structured data from Firecrawl JSON extraction (if present)
       
       // Extract address from markdown/metadata (all platforms)
