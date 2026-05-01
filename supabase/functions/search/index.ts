@@ -347,7 +347,7 @@ serve(async (req) => {
     // OT/Yelp still get a real shot. Initial verification has a hard wall-time deadline below,
     // so we don't actually pay for all of these unless they verify quickly.
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 18 : 22;
+    const maxCandidates = isVagueQuery ? 20 : 26;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -2097,8 +2097,8 @@ async function verifyAvailability(
           // can run. Pushing the timeout to 20s mostly just wasted budget on
           // pages that were never going to load. Trim it back; we detect
           // challenge HTML below and fail fast on it.
-          timeout: isOT ? 13000 : isYelp ? 15000 : 14000,
-          ...(isOT && { waitFor: 3500 }),
+          timeout: isOT ? 22000 : isYelp ? 15000 : 14000,
+          ...(isOT && { waitFor: 5000 }),
           ...(isYelp && { waitFor: 2500 }),
           ...(!isOT && !isYelp && { waitFor: 1500 }),
         };
@@ -2116,7 +2116,7 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(
           () => scrapeAbort.abort(),
-          isOT ? 16_000 : isYelp ? 18_000 : 17_000,
+          isOT ? 26_000 : isYelp ? 18_000 : 17_000,
         );
         let resp: Response;
         try {
