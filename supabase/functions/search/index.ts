@@ -2004,10 +2004,14 @@ function selectCandidatesForVerification(
   // Resy is the most reliable scrape, OpenTable is heavily Akamai-protected
   // and frequently 408s, Yelp is moderate. Skew much harder toward Resy and
   // keep OT small so failed OT scrapes can't blow the budget.
+  // Even-ish allocation now that lanes run in parallel — each provider gets a
+  // real shot regardless of how slow another is. Resy still gets a slight edge
+  // because it's the most reliable; OT gets enough headroom to actually verify
+  // a useful number of pages.
   const baseCaps: Record<string, number> = {
-    resy: Math.round((12 / 20) * maxCandidates),
-    opentable: Math.round((4 / 20) * maxCandidates),
-    yelp: Math.round((6 / 20) * maxCandidates),
+    resy: Math.round((9 / 22) * maxCandidates),
+    opentable: Math.round((7 / 22) * maxCandidates),
+    yelp: Math.round((6 / 22) * maxCandidates),
   };
   const quotas: Record<string, number> = {};
   let assigned = 0;
@@ -2043,29 +2047,31 @@ async function verifyAvailability(
   params: SearchParams,
   firecrawlKey: string,
   amenityTerms: string[] = [],
-  globalStartTime?: number
+  globalStartTime?: number,
+  laneLabel?: "resy" | "opentable" | "yelp"
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
     // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts).
   // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
-  // Smaller batches reduce the chance of all 6 parallel scrapes hitting the
-  // same provider's slow path simultaneously. With Resy first in the queue,
-  // these batches now mostly contain Resy candidates that resolve quickly.
-  const BATCH_SIZE = 5;
+  // Lane-aware batching: OT pages take longer to render, so use smaller concurrent
+  // batches to avoid hammering Firecrawl. Resy/Yelp can go wider.
+  const BATCH_SIZE = laneLabel === "opentable" ? 3 : 5;
+  // Lane-aware verified-target: each lane stops scraping once it has enough wins.
+  const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 5 : 6;
+  // Lane-aware wall-clock budget. Lanes run in parallel so each one gets the
+  // full budget independently. OT gets the most because its pages are slowest.
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 50_000 : 38_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
-    // Early exit: if we already have enough verified results, stop scraping
+    // Lane-local early exit: stop once this lane has hit its useful target.
     const verifiedSoFar = allChecked.filter(Boolean).length;
-    if (verifiedSoFar >= 8) {
-      console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
+    if (verifiedSoFar >= LANE_TARGET) {
+      console.log(`[${laneLabel || "lane"}] target reached: ${verifiedSoFar}/${LANE_TARGET}, skipping remaining ${candidates.length - batchStart}`);
       break;
     }
-    // Time guard: stop if we've used more than 35s of the global budget so we still
-    // have time for geocoding/enrichment and return well under the 60s edge limit.
-    // OT renders take 12–18s, so this gives 1–2 OT batches a real shot.
-    if (globalStartTime && (Date.now() - globalStartTime) > 35_000) {
-      console.log(`Time guard: ${Math.round((Date.now() - globalStartTime) / 1000)}s elapsed, stopping verification with ${verifiedSoFar} results`);
+    if (globalStartTime && (Date.now() - globalStartTime) > LANE_TIME_BUDGET_MS) {
+      console.log(`[${laneLabel || "lane"}] time budget hit (${Math.round((Date.now() - globalStartTime) / 1000)}s), stopping with ${verifiedSoFar} results`);
       break;
     }
     const batch = candidates.slice(batchStart, batchStart + BATCH_SIZE);
