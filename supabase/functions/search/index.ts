@@ -413,16 +413,16 @@ serve(async (req) => {
     }
 
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency).
-    // Skip AI enrichment if verification burned most of our budget; verified results
-    // are still returned, just without AI-derived descriptions/vibe tags/coordinates.
+    // Enrichment is NEVER skipped — without it, results have no description/rating/
+    // vibe tags AND lose their AI-coordinate distance fallback. Even if verification
+    // overran, we still spend up to 4s enriching the (small) returned set.
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 32_000;
-    if (skipEnrichment) {
-      console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
+    if (elapsed > 28_000) {
+      console.warn(`Verification overran (${elapsed}ms) — running enrichment anyway with tight budget`);
     }
 
-    // Hard cap enrichment so it cannot stall the response past ~5s.
-    const enrichmentPromise: Promise<Map<number, any>> = skipEnrichment
+    // Hard cap enrichment so it cannot stall the response past ~4s.
+    const enrichmentPromise: Promise<Map<number, any>> = verified.length === 0
       ? Promise.resolve(new Map<number, any>())
       : Promise.race([
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
