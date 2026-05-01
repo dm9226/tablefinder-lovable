@@ -196,9 +196,7 @@ const Index = () => {
           hasSearched={hasSearched}
           onCancel={cancelSearch}
           searchMeta={searchMeta}
-          hasMore={hasMore}
           isExtending={isExtending}
-          onExtendSearch={handleExtendedSearch}
         />
       </section>
 
