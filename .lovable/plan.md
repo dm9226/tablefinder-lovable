@@ -1,111 +1,63 @@
-You’re right to call this out. The honest status is: I overpromised. I said I was “proceeding” as if I could keep working in the background, but Lovable does not keep executing after that response. Work only happens during an active turn, and right now I’m in read-only planning mode, so I can inspect but not edit/deploy/run regressions.
+You're right. Reverting to Apr 14 again is not the right recommendation if that is the baseline we've already been trying to repair all day.
 
-I inspected the current code. The restoration is not implemented yet:
+The better move now is not another broad revert. It is to stabilize the current code by removing the exact things that are causing the current failures: long provider timeouts, OpenTable stealth retries, parallel lane overrun, and Yelp verification work that cannot reliably produce live buttons.
 
-- Backend still has a 120s global timeout.
-- Discovery still allows 45s.
-- OpenTable verification still allows ~90s lane budget and 50–55s scrape waits.
-- Frontend does not send `originZip`.
-- Distances can still be based on broad city/browser/AI fallback rather than explicit shared zip origin.
-- Tests do not yet enforce the full requirements: ≤25s, 100% descriptions, 100% time slots, zip-origin distance, and deep-link params for every returned result.
+Plan:
 
-## Build plan for the next implementation turn
+1. Lock the non-negotiable behavior
+   - Keep the rule that every returned restaurant must have verified live slot markers.
+   - Keep the Yelp hallucination/operating-hours rejection.
+   - Do not fabricate fallback slots for any provider.
+   - Keep deep-link parameters for date, time, and party size.
 
-### 1. Enforce a real 25s initial-search deadline
-Replace the current long-running search model with one shared deadline object across parsing, discovery, verification, geocoding, enrichment, and response serialization.
+2. Put a real hard deadline around the search
+   - Replace the current 120s global timeout and 90s OpenTable lane budget with a strict initial-response budget around 28-30s.
+   - Stop verification at the deadline and return the verified results already collected.
+   - Avoid long “retry once” behavior that burns another 45-50s after a failed OpenTable scrape.
 
-Target schedule:
+3. Prioritize providers by proven reliability
+   - Run Resy first/fast because it is the most reliable verified source.
+   - Run OpenTable with a capped, no-long-retry path so it can contribute without freezing the whole search.
+   - Keep Yelp discovery available, but Yelp verification must be opportunistic and bounded. If real slot evidence does not render quickly, reject it and move on.
 
-```text
-0–3s      Parse query + resolve explicit zip/postcode origin
-0–8s      Discover candidates from Resy, OpenTable, Yelp in parallel
-8–22s     Verify availability in provider lanes with strict per-call budgets
-22–24s    Complete metadata + distance normalization
-<=25s     Return initial response
-```
+4. Fix the verification scheduler, not the whole architecture
+   - Replace the current independent lane budgets with a central wall-clock-aware verifier.
+   - Use small provider-balanced batches.
+   - Stop after enough verified results are found or the deadline is reached.
+   - Prevent one slow provider from starving the others.
 
-No operation gets to start if it cannot finish inside the remaining budget. No initial OpenTable path gets 50–90 seconds anymore.
+5. Add one-line diagnostics for every search
+   - Emit a `[SEARCH_SUMMARY]` log showing:
+     - candidate counts by provider
+     - selected counts by provider
+     - verified counts by provider
+     - rejection categories such as timeout, no_slots, anti_bot, no_relevance, outside_time_window
+     - elapsed milliseconds
+   - This gives us evidence immediately instead of guessing after each failed run.
 
-### 2. Fix zip/postcode origin handling end-to-end
-Add first-class zip/postcode origin support:
+6. Tighten the regression tests
+   - Update the link/verification test so it fails if:
+     - Yelp operating hours are treated as reservation slots
+     - “Loading...” pages are accepted
+     - OpenTable/Resy results lack date/time/party parameters
+     - returned slots fall outside the requested ±2 hour window
 
-- Frontend search UI captures an optional shared zip/postcode.
-- `Index.tsx` sends `originZip` with the search body.
-- Backend accepts `originZip` separately from the natural language query.
-- Backend geocodes `originZip` once at request start.
-- Distance is calculated from that zip-derived coordinate.
-- If no zip is supplied, use precise browser coordinates if available.
-- If neither exists, distance is explicit/unavailable rather than fabricated.
+Expected result:
 
-### 3. Make returned results complete or exclude them
-Before returning, every result must have:
+- Searches should stop hanging for 60-120s.
+- Returned restaurants should still be verified, not guessed.
+- Resy/OpenTable should carry most initial results.
+- Yelp will appear only when it truly renders usable slot evidence; otherwise it will not drag down the whole search.
+- The next failure will be visible in a single `[SEARCH_SUMMARY]` line instead of requiring a full forensic dig.
 
-- verified available time slots
-- description
-- rating when provider/discovery data exposes it
-- distance when zip/browser origin exists
-- cuisine
-- neighborhood/location label
-- platform
-- direct booking URL
-- vibe tags
+Important caveat:
 
-Fallback metadata is allowed. Fallback availability is not allowed.
+This will make the app faster and more reliable. It will not magically make Yelp thorough without a working anti-bot/proxy path. The evidence from the history is clear: Yelp Fusion expired, Firecrawl hits DataDome/Loading states, Browserbase needed paid proxy capability, and the fake Yelp slots came from operating-hours hallucination. So the right product behavior is: verified Yelp if real evidence renders quickly; otherwise skip Yelp and return verified Resy/OpenTable results fast.
 
-### 4. Restore provider-specific availability lanes
-Implement provider lanes so one slow platform cannot starve the others.
+Technical change scope:
 
-- **Resy**: prioritize direct availability/API-style extraction where possible; scrape only as fallback inside the remaining budget.
-- **OpenTable**: investigate/restore the previously working path rather than accepting the current slow Firecrawl-only behavior. Bound it tightly for initial results. If OpenTable is blocked for a given query, fail closed rather than returning guessed availability.
-- **Yelp**: preserve content verification, make it deadline-aware, and ensure links include date/time/covers.
-
-The initial response should include Resy, OpenTable, and Yelp when candidates are actually available and verifiable within the 25s window.
-
-### 5. Tighten deep links
-Ensure every returned result links directly to the reservation flow with criteria preselected:
-
-- Resy: date, seats, time
-- OpenTable: `dateTime`, covers/party size
-- Yelp: date, time, covers
-
-Generic restaurant pages do not pass unless the platform offers no deeper reservation URL and the page itself contains verified booking slots.
-
-### 6. Strengthen regression tests before declaring done
-Update the existing US, UK, and link verification suites to fail if any returned result violates the requirements.
-
-Required assertions:
-
-- initial response ≤25s
-- every result has at least one actual slot
-- every slot is within ±2 hours of requested time
-- every result has non-empty description
-- every result has non-empty vibe tags
-- every result has distance when zip/postcode/browser origin is supplied
-- every deep link contains date/time/party size params
-- no duplicate restaurants
-- provider counts are reported by platform
-
-Add explicit zip-origin test cases:
-
-- Atlanta `30309`
-- New York `10003`
-- Chicago `60614`
-- London postcode
-
-### 7. Deploy and run live regressions
-After edits, deploy the search backend and run live regression calls against representative searches. I will only report completion with an actual pass/fail table showing:
-
-```text
-query
-response time
-result count
-Resy / OpenTable / Yelp counts
-% with descriptions
-% with ratings where available
-% with distances
-% with verified slots
-% with valid deep-link params
-pass/fail
-```
-
-If any gate fails, I keep iterating in that implementation turn instead of calling it done.
+- Main file: `supabase/functions/search/index.ts`
+- Test file: `supabase/functions/search/link-verify.test.ts`
+- No database changes.
+- No new secrets unless we later choose a paid Yelp/proxy route.
+- No broad project-history revert.
