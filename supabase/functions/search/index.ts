@@ -2027,19 +2027,21 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
-  // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts)
-  const BATCH_SIZE = 4;
+    // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts).
+  // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
+  const BATCH_SIZE = 6;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Early exit: if we already have enough verified results, stop scraping
     const verifiedSoFar = allChecked.filter(Boolean).length;
-    if (verifiedSoFar >= 5) {
+    if (verifiedSoFar >= 6) {
       console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
       break;
     }
-    // Time guard: stop if we've used more than 22s of the global budget,
-    // so we still have time for geocoding/enrichment and return < 30s.
-    if (globalStartTime && (Date.now() - globalStartTime) > 22_000) {
+    // Time guard: stop if we've used more than 35s of the global budget so we still
+    // have time for geocoding/enrichment and return well under the 60s edge limit.
+    // OT renders take 12–18s, so this gives 1–2 OT batches a real shot.
+    if (globalStartTime && (Date.now() - globalStartTime) > 35_000) {
       console.log(`Time guard: ${Math.round((Date.now() - globalStartTime) / 1000)}s elapsed, stopping verification with ${verifiedSoFar} results`);
       break;
     }
