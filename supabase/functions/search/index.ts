@@ -215,12 +215,14 @@ serve(async (req) => {
         (c) => !verifyKeys.has(c.name + c.platform),
       );
 
-      let verified = (await Promise.all(
-        adapters.map(a => a.verify(
-          toVerify.filter((c: Restaurant) => c.platform === a.platform),
-          params, keys, amenityTerms
-        ))
-      )).flat();
+      const extOrdered = [
+        ...toVerify.filter((c: Restaurant) => c.platform === "resy"),
+        ...toVerify.filter((c: Restaurant) => c.platform === "yelp"),
+        ...toVerify.filter((c: Restaurant) => c.platform === "opentable"),
+      ];
+      let verified = await verifyAvailability(
+        extOrdered, params, keys.firecrawlKey, amenityTerms, keys._startTime,
+      );
       console.log(`[EXTENDED] Verified: ${verified.length}/${toVerify.length}`);
 
       // Geocoding + enrichment (same as main flow)
