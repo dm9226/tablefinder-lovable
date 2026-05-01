@@ -2125,10 +2125,11 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          // No stealth proxy on OT — that path adds 20-30s and frequently 408s.
-          // We accept that some OT pages will fail; the lane budget protects us.
-          timeout: isOT ? 18000 : isYelp ? 12000 : 12000,
-          ...(isOT && { waitFor: 4000 }),
+          // OT needs stealth to render the time-slot widget past Akamai. Keep
+          // the timeout tight (no 50s waits, no retry) so failures don't blow
+          // the lane budget; the lane scheduler moves on to the next batch.
+          timeout: isOT ? 22000 : isYelp ? 12000 : 12000,
+          ...(isOT && { waitFor: 5000, proxy: "stealth" }),
           ...(isYelp && { waitFor: 2000 }),
           ...(!isOT && !isYelp && { waitFor: 1200 }),
         };
