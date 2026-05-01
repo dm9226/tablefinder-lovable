@@ -15,7 +15,7 @@ const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
 // up to ~13 simultaneous scrape requests at Firecrawl, which immediately
 // triggers a wave of 408 timeouts. Hold total in-flight scrapes to a sane
 // number so each request gets enough resources to actually complete.
-const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 5;
+const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 8;
 let _firecrawlInFlight = 0;
 const _firecrawlWaiters: Array<() => void> = [];
 async function acquireFirecrawlSlot(): Promise<void> {
@@ -2083,7 +2083,7 @@ async function verifyAvailability(
   const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 5 : 6;
   // Lane-aware wall-clock budget. Lanes run in parallel so each one gets the
   // full budget independently. OT gets the most because its pages are slowest.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 50_000 : 38_000;
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 90_000 : 38_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Lane-local early exit: stop once this lane has hit its useful target.
@@ -2115,12 +2115,11 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          // OpenTable: Akamai often serves a static challenge before any JS
-          // can run. Pushing the timeout to 20s mostly just wasted budget on
-          // pages that were never going to load. Trim it back; we detect
-          // challenge HTML below and fail fast on it.
-          timeout: isOT ? 22000 : isYelp ? 15000 : 14000,
-          ...(isOT && { waitFor: 5000 }),
+          // OpenTable: Akamai blocks normal scrapes — must use Firecrawl's
+          // stealth proxy. Stealth requests take ~20-30s to render past the
+          // bot challenge but reliably return the full booking widget.
+          timeout: isOT ? 50000 : isYelp ? 15000 : 14000,
+          ...(isOT && { waitFor: 6000, proxy: "stealth" }),
           ...(isYelp && { waitFor: 2500 }),
           ...(!isOT && !isYelp && { waitFor: 1500 }),
         };
@@ -2138,7 +2137,7 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(
           () => scrapeAbort.abort(),
-          isOT ? 26_000 : isYelp ? 18_000 : 17_000,
+          isOT ? 55_000 : isYelp ? 18_000 : 17_000,
         );
         // Acquire a slot on the global Firecrawl semaphore before firing the request.
         // This prevents the parallel lanes from saturating Firecrawl with too many
@@ -2170,11 +2169,40 @@ async function verifyAvailability(
         }
         clearTimeout(scrapeTimer);
 
-        // On 408 timeout, skip retry to stay within time budget (retries rarely succeed)
+        // On 408 timeout for OT (stealth scrape), retry once with simpler payload.
+        // For Resy/Yelp the budget doesn't justify a retry.
         if (resp.status === 408) {
           const errBody408 = await resp.text().catch(() => "(no body)");
           console.log(`Scrape failed (408) for ${r.name} [${r.platform}]: ${errBody408.slice(0, 200)}`);
-          return null;
+          if (!isOT) return null;
+          console.log(`Retrying OT scrape once for ${r.name}...`);
+          await acquireFirecrawlSlot();
+          const retryAbort = new AbortController();
+          const retryTimer = setTimeout(() => retryAbort.abort(), 50_000);
+          try {
+            try {
+              resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${firecrawlKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ ...scrapePayload, waitFor: 4000, timeout: 45000 }),
+                signal: retryAbort.signal,
+              });
+            } catch (retryErr: any) {
+              clearTimeout(retryTimer);
+              console.log(`OT retry failed for ${r.name}: ${retryErr.name === "AbortError" ? "timeout" : retryErr}`);
+              return null;
+            }
+          } finally {
+            releaseFirecrawlSlot();
+          }
+          clearTimeout(retryTimer);
+          if (!resp.ok) {
+            console.log(`OT retry non-OK (${resp.status}) for ${r.name}`);
+            return null;
+          }
         }
 
         if (!resp.ok) {
@@ -2209,9 +2237,11 @@ async function verifyAvailability(
           combined.includes("incapsula") ||
           combined.includes("attention required") ||
           (combined.includes("captcha") && markdown.length < 600);
+        // OT stealth scrapes occasionally return short markdown but rich HTML —
+        // require BOTH to be small before rejecting as empty render.
         const tooShort = markdown.trim().length < 200 && (!html || html.length < 1500);
         if (looksLikeChallenge || tooShort) {
-          console.log(`✗ ${r.name} [${r.platform}] — anti-bot challenge or empty render, rejecting fast`);
+          console.log(`✗ ${r.name} [${r.platform}] — anti-bot challenge or empty render (md=${markdown.length}, html=${html.length}), rejecting`);
           return null;
         }
       }
