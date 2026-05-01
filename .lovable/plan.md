@@ -1,63 +1,81 @@
-You're right. Reverting to Apr 14 again is not the right recommendation if that is the baseline we've already been trying to repair all day.
+# Fix the actual failures from today's run
 
-The better move now is not another broad revert. It is to stabilize the current code by removing the exact things that are causing the current failures: long provider timeouts, OpenTable stealth retries, parallel lane overrun, and Yelp verification work that cannot reliably produce live buttons.
+The 46s / 2-result / no-metadata outcome is not a "tune the timeouts more" problem. The logs show three specific, fixable causes. This plan addresses each one directly. No broad revert, no architecture rewrite.
 
-Plan:
+## What the logs actually proved
 
-1. Lock the non-negotiable behavior
-   - Keep the rule that every returned restaurant must have verified live slot markers.
-   - Keep the Yelp hallucination/operating-hours rejection.
-   - Do not fabricate fallback slots for any provider.
-   - Keep deep-link parameters for date, time, and party size.
+From the Atlanta dinner search at 46s:
 
-2. Put a real hard deadline around the search
-   - Replace the current 120s global timeout and 90s OpenTable lane budget with a strict initial-response budget around 28-30s.
-   - Stop verification at the deadline and return the verified results already collected.
-   - Avoid long “retry once” behavior that burns another 45-50s after a failed OpenTable scrape.
+1. **Firecrawl returned HTTP 408 on 6+ scrapes.** Every OpenTable scrape, every Yelp scrape, and 3 of 5 Resy scrapes failed with 408. Today's "no retry" change meant every 408 became a permanent skip. That is why verified = `resy=2, opentable=0, yelp=0`.
 
-3. Prioritize providers by proven reliability
-   - Run Resy first/fast because it is the most reliable verified source.
-   - Run OpenTable with a capped, no-long-retry path so it can contribute without freezing the whole search.
-   - Keep Yelp discovery available, but Yelp verification must be opportunistic and bounded. If real slot evidence does not render quickly, reject it and move on.
+2. **Resy verification succeeded but address extraction failed.** Both verified Resy pages logged `[ADDR_MISS] No address pattern found`. Without an address, Nominatim cannot geocode, so `distanceMiles` stays null. That is why no distances showed up.
 
-4. Fix the verification scheduler, not the whole architecture
-   - Replace the current independent lane budgets with a central wall-clock-aware verifier.
-   - Use small provider-balanced batches.
-   - Stop after enough verified results are found or the deadline is reached.
-   - Prevent one slow provider from starving the others.
+3. **AI enrichment was skipped entirely.** Log line: `Skipping AI enrichment — already 46577ms elapsed`. The 32s skip-enrichment threshold tripped because verification overran. That is why no descriptions, ratings, or vibe tags showed up.
 
-5. Add one-line diagnostics for every search
-   - Emit a `[SEARCH_SUMMARY]` log showing:
-     - candidate counts by provider
-     - selected counts by provider
-     - verified counts by provider
-     - rejection categories such as timeout, no_slots, anti_bot, no_relevance, outside_time_window
-     - elapsed milliseconds
-   - This gives us evidence immediately instead of guessing after each failed run.
+4. **The 38s hard deadline isn't actually hard.** The run took 46.5s. Firecrawl calls are not being aborted at the deadline — they're allowed to finish.
 
-6. Tighten the regression tests
-   - Update the link/verification test so it fails if:
-     - Yelp operating hours are treated as reservation slots
-     - “Loading...” pages are accepted
-     - OpenTable/Resy results lack date/time/party parameters
-     - returned slots fall outside the requested ±2 hour window
+## What to change
 
-Expected result:
+### 1. Handle Firecrawl 408 correctly (the real fix)
 
-- Searches should stop hanging for 60-120s.
-- Returned restaurants should still be verified, not guessed.
-- Resy/OpenTable should carry most initial results.
-- Yelp will appear only when it truly renders usable slot evidence; otherwise it will not drag down the whole search.
-- The next failure will be visible in a single `[SEARCH_SUMMARY]` line instead of requiring a full forensic dig.
+A 408 from Firecrawl means "scrape attempt timed out on their side" — not that the target site is broken, and not that retrying is wasteful. Today's change to "skip on 408 with no retry" was wrong for this provider.
 
-Important caveat:
+- Reintroduce a **single fast retry on 408 only** (not on 4xx generally), with a tighter per-call timeout (~10s instead of 15s) so a retry fits inside the lane budget.
+- Cap retries at 1 per candidate, and only if there's >8s of wall-clock budget left.
+- Keep "no retry" behavior for 403 / 429 / DataDome blocks, where retrying is genuinely pointless.
 
-This will make the app faster and more reliable. It will not magically make Yelp thorough without a working anti-bot/proxy path. The evidence from the history is clear: Yelp Fusion expired, Firecrawl hits DataDome/Loading states, Browserbase needed paid proxy capability, and the fake Yelp slots came from operating-hours hallucination. So the right product behavior is: verified Yelp if real evidence renders quickly; otherwise skip Yelp and return verified Resy/OpenTable results fast.
+Expected impact: Resy verified should rise from 2/5 to 4–5/5, OT from 0/4 to 2–3/4, Yelp from 0/3 to 0–1/3 (Yelp will remain limited by DataDome — that's known and unrelated).
 
-Technical change scope:
+### 2. Actually enforce the wall-clock deadline
 
-- Main file: `supabase/functions/search/index.ts`
-- Test file: `supabase/functions/search/link-verify.test.ts`
-- No database changes.
-- No new secrets unless we later choose a paid Yelp/proxy route.
-- No broad project-history revert.
+- Wrap every Firecrawl call in `Promise.race` against an `AbortController` tied to the global deadline, not just the per-call timeout. If the global budget is gone, in-flight scrapes get aborted, not awaited.
+- Move the verification cutoff from 32s to 28s so enrichment has a guaranteed 6–8s window.
+
+### 3. Fix address extraction so distances appear
+
+The Resy markdown does contain addresses — the current regex cascade in `extractAddressFromMarkdown` is just missing Resy's specific format. Two-part fix:
+
+- Add a Resy-specific extraction pattern (Resy pages render addresses in a known structure near the venue name; check the actual markdown for both verified candidates and write a pattern that matches).
+- As a fallback when regex misses, ask the AI enrichment step to return a `address` field alongside description/vibe tags. Enrichment runs anyway, costs nothing extra, and gives Nominatim something to geocode.
+
+### 4. Make enrichment non-skippable for returned results
+
+Right now if verification overruns, enrichment is skipped entirely and the user gets bare cards. Better behavior:
+
+- Always run enrichment on the final returned set, even if it's only 2 results.
+- Give enrichment its own small budget (4s) carved out of the 30s window before verification starts, not after.
+- If enrichment times out, ship what came back rather than dropping fields silently.
+
+### 5. Add a `[REJECT_SUMMARY]` log line
+
+Complement the existing `[SEARCH_SUMMARY]` with one line counting rejection reasons:
+```
+[REJECT_SUMMARY] firecrawl_408=6 firecrawl_403=0 no_slots=0 outside_window=0 anti_bot=0
+```
+So the next failed run is diagnosable in one glance instead of scrolling through per-candidate logs.
+
+## What this will and won't fix
+
+**Will fix:**
+- Result count should go from 2 to 6–9 on a typical search.
+- Descriptions, ratings, vibe tags should appear (enrichment runs).
+- Distances should appear on Resy results (address extraction + AI fallback).
+- Total response time should land in the 22–28s range instead of 46s.
+
+**Won't fix:**
+- Yelp thoroughness. DataDome still blocks Firecrawl from rendering Yelp's reservation widget. Yelp will contribute 0–1 results per search, sometimes zero. Solving that requires a paid proxy/browser path (Browserbase with proxies, ScrapingBee, etc.) and is a separate decision.
+
+## Files touched
+
+- `supabase/functions/search/index.ts` — retry logic, deadline enforcement, address regex, enrichment scheduling, new log line.
+- `supabase/functions/search/link-verify.test.ts` — assertion that returned results have `description` and (for Resy/OT) `distanceMiles != null`.
+- No DB changes. No new secrets.
+
+## How we'll know it worked
+
+Run the same Atlanta dinner search after the change. Success criteria, all three must hold:
+1. `[SEARCH_SUMMARY]` shows `elapsedMs < 30000` and `returned >= 5`.
+2. Returned cards in the UI have descriptions and ratings populated.
+3. At least one Resy or OT result has a distance value.
+
+If any of those fail, the next step is the proxy decision, not more timeout tuning.
