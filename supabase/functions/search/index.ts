@@ -2118,13 +2118,12 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          // OpenTable: Akamai blocks normal scrapes — must use Firecrawl's
-          // stealth proxy. Stealth requests take ~20-30s to render past the
-          // bot challenge but reliably return the full booking widget.
-          timeout: isOT ? 50000 : isYelp ? 15000 : 14000,
-          ...(isOT && { waitFor: 6000, proxy: "stealth" }),
-          ...(isYelp && { waitFor: 2500 }),
-          ...(!isOT && !isYelp && { waitFor: 1500 }),
+          // No stealth proxy on OT — that path adds 20-30s and frequently 408s.
+          // We accept that some OT pages will fail; the lane budget protects us.
+          timeout: isOT ? 18000 : isYelp ? 12000 : 12000,
+          ...(isOT && { waitFor: 4000 }),
+          ...(isYelp && { waitFor: 2000 }),
+          ...(!isOT && !isYelp && { waitFor: 1200 }),
         };
 
       let markdown = "";
