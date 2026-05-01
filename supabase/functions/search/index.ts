@@ -10,6 +10,28 @@ const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
 // Yelp discovery now uses Firecrawl scraping instead of the Fusion API
 
+// ─── Global Firecrawl scrape concurrency limiter ───
+// Lanes run in parallel (Resy + OT + Yelp), so without this cap we'd fire
+// up to ~13 simultaneous scrape requests at Firecrawl, which immediately
+// triggers a wave of 408 timeouts. Hold total in-flight scrapes to a sane
+// number so each request gets enough resources to actually complete.
+const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 5;
+let _firecrawlInFlight = 0;
+const _firecrawlWaiters: Array<() => void> = [];
+async function acquireFirecrawlSlot(): Promise<void> {
+  if (_firecrawlInFlight < FIRECRAWL_MAX_CONCURRENT_SCRAPES) {
+    _firecrawlInFlight++;
+    return;
+  }
+  await new Promise<void>((resolve) => _firecrawlWaiters.push(resolve));
+  _firecrawlInFlight++;
+}
+function releaseFirecrawlSlot(): void {
+  _firecrawlInFlight--;
+  const next = _firecrawlWaiters.shift();
+  if (next) next();
+}
+
 interface SearchParams {
   cuisine: string;
   cuisineType: string;   // broad category: "seafood", "italian", "japanese", ""
