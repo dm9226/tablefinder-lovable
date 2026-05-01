@@ -215,12 +215,14 @@ serve(async (req) => {
         (c) => !verifyKeys.has(c.name + c.platform),
       );
 
-      let verified = (await Promise.all(
-        adapters.map(a => a.verify(
-          toVerify.filter((c: Restaurant) => c.platform === a.platform),
-          params, keys, amenityTerms
-        ))
-      )).flat();
+      const extOrdered = [
+        ...toVerify.filter((c: Restaurant) => c.platform === "resy"),
+        ...toVerify.filter((c: Restaurant) => c.platform === "yelp"),
+        ...toVerify.filter((c: Restaurant) => c.platform === "opentable"),
+      ];
+      let verified = await verifyAvailability(
+        extOrdered, params, keys.firecrawlKey, amenityTerms, keys._startTime,
+      );
       console.log(`[EXTENDED] Verified: ${verified.length}/${toVerify.length}`);
 
       // Geocoding + enrichment (same as main flow)
@@ -355,12 +357,19 @@ serve(async (req) => {
     const selectedIds = new Set(selected.map(r => r.name + r.platform));
     const remainingAfterSelection = allCandidates.filter(c => !selectedIds.has(c.name + c.platform));
 
-    let verified = (await Promise.all(
-      adapters.map(a => a.verify(
-        selected.filter(c => c.platform === a.platform),
-        params, keys, amenityTerms
-      ))
-    )).flat();
+    // Verify all providers through a SINGLE shared queue so one provider
+    // (especially OpenTable, frequently Akamai-blocked) can't starve the
+    // verification budget for Resy/Yelp. Resy candidates go first because
+    // they verify fastest and most reliably, so the early-exit check fires
+    // on real wins rather than slow OT timeouts.
+    const orderedSelected = [
+      ...selected.filter(c => c.platform === "resy"),
+      ...selected.filter(c => c.platform === "yelp"),
+      ...selected.filter(c => c.platform === "opentable"),
+    ];
+    let verified = await verifyAvailability(
+      orderedSelected, params, keys.firecrawlKey, amenityTerms, keys._startTime,
+    );
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
@@ -1991,10 +2000,13 @@ function selectCandidatesForVerification(
   // quotas so each provider has a real shot at returning. The verification stage
   // uses a wall-time deadline + early-return after 6 verified, so over-allocating
   // is safe — we just don't burn the budget when results come back fast.
+  // Resy is the most reliable scrape, OpenTable is heavily Akamai-protected
+  // and frequently 408s, Yelp is moderate. Skew much harder toward Resy and
+  // keep OT small so failed OT scrapes can't blow the budget.
   const baseCaps: Record<string, number> = {
-    resy: Math.round((10 / 22) * maxCandidates),
-    opentable: Math.round((6 / 22) * maxCandidates),
-    yelp: Math.round((6 / 22) * maxCandidates),
+    resy: Math.round((12 / 20) * maxCandidates),
+    opentable: Math.round((4 / 20) * maxCandidates),
+    yelp: Math.round((6 / 20) * maxCandidates),
   };
   const quotas: Record<string, number> = {};
   let assigned = 0;
@@ -2036,12 +2048,15 @@ async function verifyAvailability(
 
     // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts).
   // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
-  const BATCH_SIZE = 6;
+  // Smaller batches reduce the chance of all 6 parallel scrapes hitting the
+  // same provider's slow path simultaneously. With Resy first in the queue,
+  // these batches now mostly contain Resy candidates that resolve quickly.
+  const BATCH_SIZE = 5;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Early exit: if we already have enough verified results, stop scraping
     const verifiedSoFar = allChecked.filter(Boolean).length;
-    if (verifiedSoFar >= 6) {
+    if (verifiedSoFar >= 8) {
       console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
       break;
     }
@@ -2071,11 +2086,12 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          // Firecrawl-side timeout. Resy pages render their availability widget
-          // client-side so they need a real budget too — earlier 9–10s caused mass
-          // 408s. OT widgets are heaviest and need a small JS settle period.
-          timeout: isOT ? 20000 : isYelp ? 15000 : 14000,
-          ...(isOT && { waitFor: 4000 }),
+          // OpenTable: Akamai often serves a static challenge before any JS
+          // can run. Pushing the timeout to 20s mostly just wasted budget on
+          // pages that were never going to load. Trim it back; we detect
+          // challenge HTML below and fail fast on it.
+          timeout: isOT ? 13000 : isYelp ? 15000 : 14000,
+          ...(isOT && { waitFor: 3500 }),
           ...(isYelp && { waitFor: 2500 }),
           ...(!isOT && !isYelp && { waitFor: 1500 }),
         };
@@ -2093,7 +2109,7 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(
           () => scrapeAbort.abort(),
-          isOT ? 24_000 : isYelp ? 18_000 : 17_000,
+          isOT ? 16_000 : isYelp ? 18_000 : 17_000,
         );
         let resp: Response;
         try {
@@ -2140,6 +2156,27 @@ async function verifyAvailability(
       if (!markdown && !html && !jsonData) {
         console.log(`No content for ${r.name} [${r.platform}]`);
         return null;
+      }
+
+      // Fail-fast: detect Akamai/Incapsula/Cloudflare challenge pages.
+      // OpenTable in particular frequently serves these and the rendered
+      // markdown is essentially empty. No reservation data is ever recoverable
+      // from a challenge response, so reject immediately rather than spending
+      // the rest of verification on it.
+      {
+        const combined = `${markdown}\n${html}`.toLowerCase();
+        const looksLikeChallenge =
+          combined.includes("powered and protected by") ||
+          combined.includes("akamai") && combined.includes("behavioral-content") ||
+          combined.includes("sec-bc-text-container") ||
+          combined.includes("incapsula") ||
+          combined.includes("attention required") ||
+          (combined.includes("captcha") && markdown.length < 600);
+        const tooShort = markdown.trim().length < 200 && (!html || html.length < 1500);
+        if (looksLikeChallenge || tooShort) {
+          console.log(`✗ ${r.name} [${r.platform}] — anti-bot challenge or empty render, rejecting fast`);
+          return null;
+        }
       }
 
       // Extract structured data from Firecrawl JSON extraction (if present)
