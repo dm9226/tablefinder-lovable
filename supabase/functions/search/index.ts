@@ -2078,7 +2078,7 @@ async function verifyAvailability(
   // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
   // Lane-aware batching: OT pages take longer to render, so use smaller concurrent
   // batches to avoid hammering Firecrawl. Resy/Yelp can go wider.
-  const BATCH_SIZE = laneLabel === "opentable" ? 3 : 5;
+  const BATCH_SIZE = laneLabel === "opentable" ? 2 : laneLabel === "yelp" ? 3 : 4;
   // Lane-aware verified-target: each lane stops scraping once it has enough wins.
   const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 5 : 6;
   // Lane-aware wall-clock budget. Lanes run in parallel so each one gets the
