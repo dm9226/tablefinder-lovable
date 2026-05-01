@@ -216,10 +216,15 @@ serve(async (req) => {
 
       // Geocoding + enrichment (same as main flow)
       const elapsed = Date.now() - startTime;
-      const skipEnrichment = elapsed > 110_000;
-      const enrichmentPromise = skipEnrichment
+      const skipEnrichment = elapsed > 24_000;
+      const enrichmentPromise: Promise<Map<number, any>> = skipEnrichment
         ? Promise.resolve(new Map<number, any>())
-        : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
+        : Promise.race([
+            enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
+            new Promise<Map<number, any>>((resolve) =>
+              setTimeout(() => resolve(new Map<number, any>()), 5_000),
+            ),
+          ]);
 
       const [, enrichmentMap] = await Promise.all([
         geocodeVerifiedResults(verified, params),
