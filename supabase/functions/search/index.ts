@@ -2083,11 +2083,12 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          // Firecrawl-side timeout. Resy pages render their availability widget
-          // client-side so they need a real budget too — earlier 9–10s caused mass
-          // 408s. OT widgets are heaviest and need a small JS settle period.
-          timeout: isOT ? 20000 : isYelp ? 15000 : 14000,
-          ...(isOT && { waitFor: 4000 }),
+          // OpenTable: Akamai often serves a static challenge before any JS
+          // can run. Pushing the timeout to 20s mostly just wasted budget on
+          // pages that were never going to load. Trim it back; we detect
+          // challenge HTML below and fail fast on it.
+          timeout: isOT ? 13000 : isYelp ? 15000 : 14000,
+          ...(isOT && { waitFor: 3500 }),
           ...(isYelp && { waitFor: 2500 }),
           ...(!isOT && !isYelp && { waitFor: 1500 }),
         };
