@@ -444,6 +444,30 @@ serve(async (req) => {
     let verified = ([] as Restaurant[]).concat(...laneResults);
     const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
     console.log(`[LANES] verified: resy=${laneCounts.resy}/${resyCands.length}, opentable=${laneCounts.opentable}/${otCands.length}, yelp=${laneCounts.yelp}/${yelpCands.length}`);
+    // ── Yelp soft-fallback ──
+    // Firecrawl scrapes against yelp.com/reservations/* are blocked by DataDome
+    // ~100% of the time, which routinely produces 0 verified Yelp results even
+    // when the user's city has plenty of Yelp-listed bookable restaurants.
+    // Discovery itself is a strong signal: a `yelp.com/reservations/{biz}` URL
+    // only exists because Yelp flagged that business as accepting reservations,
+    // and the deep-linked URL we generate carries date/time/party params, so
+    // clicking it lands the user on the live Yelp widget where availability is
+    // shown by Yelp directly. Surface up to 3 of these candidates as
+    // soft-verified entries so Yelp is never silently absent.
+    if (laneCounts.yelp === 0 && yelpCands.length > 0) {
+      const softYelp = yelpCands
+        .filter(c => /yelp\.com\/reservations\//i.test(c.platformUrl))
+        .slice(0, 3)
+        .map(c => ({
+          ...c,
+          timeSlots: [],
+          _softVerified: true,
+        } as Restaurant));
+      if (softYelp.length > 0) {
+        console.log(`[YELP_SOFT] surfacing ${softYelp.length} discovery-only Yelp candidates (verification 408'd)`);
+        verified = verified.concat(softYelp);
+      }
+    }
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
