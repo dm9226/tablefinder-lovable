@@ -2000,10 +2000,13 @@ function selectCandidatesForVerification(
   // quotas so each provider has a real shot at returning. The verification stage
   // uses a wall-time deadline + early-return after 6 verified, so over-allocating
   // is safe — we just don't burn the budget when results come back fast.
+  // Resy is the most reliable scrape, OpenTable is heavily Akamai-protected
+  // and frequently 408s, Yelp is moderate. Skew much harder toward Resy and
+  // keep OT small so failed OT scrapes can't blow the budget.
   const baseCaps: Record<string, number> = {
-    resy: Math.round((10 / 22) * maxCandidates),
-    opentable: Math.round((6 / 22) * maxCandidates),
-    yelp: Math.round((6 / 22) * maxCandidates),
+    resy: Math.round((12 / 20) * maxCandidates),
+    opentable: Math.round((4 / 20) * maxCandidates),
+    yelp: Math.round((6 / 20) * maxCandidates),
   };
   const quotas: Record<string, number> = {};
   let assigned = 0;
