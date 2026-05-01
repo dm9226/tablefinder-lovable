@@ -23,6 +23,9 @@ const Index = () => {
   const [lastQuery, setLastQuery] = useState<string>("");
   const [lastParams, setLastParams] = useState<any>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const extendAbortRef = useRef<AbortController | null>(null);
+  const searchIdRef = useRef<number>(0);
+  const autoExtendedRef = useRef<number>(0);
 
   const requestLocation = useCallback(() => {
     if (!navigator.geolocation) {
@@ -65,6 +68,7 @@ const Index = () => {
 
   const cancelSearch = useCallback(() => {
     abortRef.current?.abort();
+    extendAbortRef.current?.abort();
     setIsLoading(false);
     setIsExtending(false);
     toast.info("Search cancelled");
@@ -73,8 +77,10 @@ const Index = () => {
   const handleSearch = useCallback(
     async (query: string) => {
       abortRef.current?.abort();
+      extendAbortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
+      const searchId = ++searchIdRef.current;
 
       setIsLoading(true);
       setError(null);
@@ -106,6 +112,7 @@ const Index = () => {
           throw new Error(msg);
         }
 
+        if (searchId !== searchIdRef.current) return;
         setResults(data?.results || []);
         if (data?.params) {
           setSearchMeta(data.params as SearchMeta);
@@ -129,6 +136,11 @@ const Index = () => {
   const handleExtendedSearch = useCallback(async () => {
     if (remainingCandidates.length === 0 || !lastParams) return;
 
+    extendAbortRef.current?.abort();
+    const controller = new AbortController();
+    extendAbortRef.current = controller;
+    const searchId = searchIdRef.current;
+
     setIsExtending(true);
     try {
       const { data, error: fnError } = await supabase.functions.invoke("search", {
@@ -140,25 +152,52 @@ const Index = () => {
         },
       });
 
+      if (controller.signal.aborted || searchId !== searchIdRef.current) return;
       if (data?.error) throw new Error(data.error);
       if (fnError) throw new Error(fnError.message || "Extended search failed");
 
-      const newResults = data?.results || [];
+      const newResults: Restaurant[] = data?.results || [];
       if (newResults.length > 0) {
-        setResults(prev => [...prev, ...newResults]);
-        toast.success(`Found ${newResults.length} more result${newResults.length !== 1 ? "s" : ""}`);
-      } else {
-        toast.info("No additional results found");
+        setResults(prev => {
+          const seen = new Set<string>();
+          const merged: Restaurant[] = [];
+          for (const r of [...prev, ...newResults]) {
+            const key = `${(r.name || "").toLowerCase().trim()}|${r.platform}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(r);
+          }
+          merged.sort((a, b) => {
+            const dA = a.distanceMiles ?? Number.POSITIVE_INFINITY;
+            const dB = b.distanceMiles ?? Number.POSITIVE_INFINITY;
+            if (Math.abs(dA - dB) > 0.5) return dA - dB;
+            return (b.rating ?? 0) - (a.rating ?? 0);
+          });
+          return merged;
+        });
       }
-      setHasMore(!!data?.hasMore);
-      setRemainingCandidates(data?.remainingCandidates || []);
+      // Auto-extend runs once per search; do not chain further rounds.
+      setHasMore(false);
+      setRemainingCandidates([]);
     } catch (err: any) {
+      if (controller.signal.aborted) return;
       console.error("Extended search error:", err);
-      toast.error(err.message || "Extended search failed");
+      // Silent failure for auto-extend — initial results remain visible.
     } finally {
-      setIsExtending(false);
+      if (!controller.signal.aborted && searchId === searchIdRef.current) {
+        setIsExtending(false);
+      }
     }
   }, [remainingCandidates, lastParams, lastQuery]);
+
+  // Auto-trigger the extended search once per search when more candidates exist.
+  useEffect(() => {
+    if (isLoading || isExtending) return;
+    if (!hasMore || remainingCandidates.length === 0 || !lastParams) return;
+    if (autoExtendedRef.current === searchIdRef.current) return;
+    autoExtendedRef.current = searchIdRef.current;
+    handleExtendedSearch();
+  }, [isLoading, isExtending, hasMore, remainingCandidates, lastParams, handleExtendedSearch]);
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
@@ -196,9 +235,7 @@ const Index = () => {
           hasSearched={hasSearched}
           onCancel={cancelSearch}
           searchMeta={searchMeta}
-          hasMore={hasMore}
           isExtending={isExtending}
-          onExtendSearch={handleExtendedSearch}
         />
       </section>
 
