@@ -19,6 +19,7 @@ export interface Restaurant {
   platformUrl: string;
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
+  _softVerified?: boolean;
 }
 
 export interface SearchParams {

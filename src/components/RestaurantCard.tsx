@@ -116,6 +116,11 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
             )}
           </div>
         )}
+        {slots.length === 0 && restaurant._softVerified && (
+          <p className="text-xs text-muted-foreground font-body italic">
+            Tap to view live availability on Yelp
+          </p>
+        )}
       </div>
     </button>
   );

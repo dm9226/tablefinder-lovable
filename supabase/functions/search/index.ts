@@ -176,6 +176,7 @@ interface Restaurant {
   _yelpCategories?: string; // transient: Yelp API category text for cuisine relevance bypass
   _yelpCrossplatformGuess?: boolean; // transient: true if URL was guessed from name (not from link)
   _yelpSearchVerified?: boolean; // transient: true if time slots came from Yelp search results page (skip individual verification)
+  _softVerified?: boolean; // surfaced from discovery without booking-page scrape (Yelp DataDome fallback)
 }
 
 // ─── Provider Adapter Interface ───
@@ -201,7 +202,7 @@ serve(async (req) => {
   // Global timeout: hard ceiling on initial response so the UI never hangs.
   // Lane budgets cap verification at 22s (Resy/Yelp) / 28s (OT). Add a 4s
   // enrichment window + small buffer = 33s.
-  const GLOBAL_TIMEOUT_MS = 33_000;
+  const GLOBAL_TIMEOUT_MS = 38_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
@@ -211,7 +212,7 @@ serve(async (req) => {
   // accept an AbortSignal. Without this race the function can sit waiting
   // on an upstream hang until edge-runtime kills it at 150s (IDLE_TIMEOUT).
   // 36s = global deadline (33s) + 3s grace for in-flight cleanup.
-  const HANDLER_HARD_CEILING_MS = 36_000;
+  const HANDLER_HARD_CEILING_MS = 42_000;
   const hardCeilingResponse = new Promise<Response>((resolve) => {
     setTimeout(() => {
       console.error(`[HARD_CEILING] handler exceeded ${HANDLER_HARD_CEILING_MS}ms — returning empty results`);
@@ -280,7 +281,10 @@ serve(async (req) => {
         : Promise.race([
             enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
             new Promise<Map<number, any>>((resolve) =>
-              setTimeout(() => resolve(new Map<number, any>()), 5_000),
+              setTimeout(() => {
+                console.warn("[EXTENDED] AI enrichment timed out at 10s");
+                resolve(new Map<number, any>());
+              }, 10_000),
             ),
           ]);
 
@@ -441,6 +445,30 @@ serve(async (req) => {
     let verified = ([] as Restaurant[]).concat(...laneResults);
     const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
     console.log(`[LANES] verified: resy=${laneCounts.resy}/${resyCands.length}, opentable=${laneCounts.opentable}/${otCands.length}, yelp=${laneCounts.yelp}/${yelpCands.length}`);
+    // ── Yelp soft-fallback ──
+    // Firecrawl scrapes against yelp.com/reservations/* are blocked by DataDome
+    // ~100% of the time, which routinely produces 0 verified Yelp results even
+    // when the user's city has plenty of Yelp-listed bookable restaurants.
+    // Discovery itself is a strong signal: a `yelp.com/reservations/{biz}` URL
+    // only exists because Yelp flagged that business as accepting reservations,
+    // and the deep-linked URL we generate carries date/time/party params, so
+    // clicking it lands the user on the live Yelp widget where availability is
+    // shown by Yelp directly. Surface up to 3 of these candidates as
+    // soft-verified entries so Yelp is never silently absent.
+    if (laneCounts.yelp === 0 && yelpCands.length > 0) {
+      const softYelp = yelpCands
+        .filter(c => /yelp\.com\/reservations\//i.test(c.platformUrl))
+        .slice(0, 3)
+        .map(c => ({
+          ...c,
+          timeSlots: [],
+          _softVerified: true,
+        } as Restaurant));
+      if (softYelp.length > 0) {
+        console.log(`[YELP_SOFT] surfacing ${softYelp.length} discovery-only Yelp candidates (verification 408'd)`);
+        verified = verified.concat(softYelp);
+      }
+    }
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
@@ -475,9 +503,9 @@ serve(async (req) => {
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-              console.warn("AI enrichment timed out at 6s — returning without enrichment");
+                console.warn("AI enrichment timed out at 10s — returning without enrichment");
               resolve(new Map<number, any>());
-            }, 6_000),
+              }, 10_000),
           ),
         ]);
 
