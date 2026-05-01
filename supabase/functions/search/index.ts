@@ -2025,13 +2025,13 @@ async function verifyAvailability(
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
 
-      // ── Non-Yelp: Firecrawl scrape (Resy / OpenTable) ──
+      // ── Firecrawl scrape (Resy / OpenTable / Yelp) ──
       const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
           timeout: 15000,
-          ...(isOT && { waitFor: 3000 }),
+          ...((isOT || isYelp) && { waitFor: 3000 }),
         };
 
       let markdown = "";
