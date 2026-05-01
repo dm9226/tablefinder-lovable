@@ -313,7 +313,7 @@ serve(async (req) => {
         if (e.neighborhood && r.neighborhood === params.city) {
           r.neighborhood = e.neighborhood;
         }
-        if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
+        if (r.distanceMiles == null && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
           const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
           if (aiDist <= 200) {
             r.distanceMiles = aiDist;
@@ -552,7 +552,7 @@ serve(async (req) => {
       }
 
       // AI coordinate fallback: fill distance for restaurants Nominatim missed
-      if (r.distanceMiles == null && r.platform !== "yelp" && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
+      if (r.distanceMiles == null && typeof e.lat === "number" && typeof e.lng === "number" && cityLat !== 0 && cityLng !== 0) {
         const aiDist = +haversine(cityLat, cityLng, e.lat, e.lng).toFixed(1);
         if (aiDist <= 200) {
           r.distanceMiles = aiDist;
@@ -563,9 +563,8 @@ serve(async (req) => {
         }
       }
     }
-    const aiGeocoded = verified.filter(r => r.distanceMiles != null && r.platform !== "yelp").length;
-    const totalNonYelp = verified.filter(r => r.platform !== "yelp").length;
-    console.log(`Final geocoding: ${aiGeocoded}/${totalNonYelp} non-Yelp restaurants have distances`);
+    const geocodedCount = verified.filter(r => r.distanceMiles != null).length;
+    console.log(`Final geocoding: ${geocodedCount}/${verified.length} restaurants have distances`);
 
     // Apply distance filtering
     const metroCity = getMetroCityName(params.city || "", params.state || "");
@@ -1916,8 +1915,7 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 
   // Single geocoding helper: tries up to 4 strategies, returns on first success
   async function geocodeOne(r: Restaurant): Promise<void> {
-    if (r.platform === "yelp") return; // Yelp has API-provided distance
-    if (r.distanceMiles != null) return; // Already geocoded
+    if (r.distanceMiles != null) return; // Already has distance (e.g. Yelp API)
 
     const cleanedName = r.name
       .replace(/\s+restaurant$/i, "")
