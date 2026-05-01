@@ -1931,9 +1931,10 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 
     // Helper to attempt a Nominatim query and apply result
     async function tryGeocode(queryUrl: string, label: string): Promise<boolean> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 2_500);
+        timer = setTimeout(() => controller.abort(), 2_500);
         const resp = await fetch(queryUrl, { headers: { "User-Agent": "TableFinder/1.0" }, signal: controller.signal });
         clearTimeout(timer);
         if (!resp.ok) return false;
@@ -1956,6 +1957,8 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
         return true;
       } catch {
         return false;
+      } finally {
+        if (timer) clearTimeout(timer);
       }
     }
 
