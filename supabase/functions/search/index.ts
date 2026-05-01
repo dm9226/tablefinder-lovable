@@ -416,7 +416,7 @@ serve(async (req) => {
     // Skip AI enrichment if verification burned most of our budget; verified results
     // are still returned, just without AI-derived descriptions/vibe tags/coordinates.
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 95_000;
+    const skipEnrichment = elapsed > 26_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
@@ -428,9 +428,9 @@ serve(async (req) => {
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-              console.warn("AI enrichment timed out at 5s — returning without enrichment");
+              console.warn("AI enrichment timed out at 4s — returning without enrichment");
               resolve(new Map<number, any>());
-            }, 5_000),
+            }, 4_000),
           ),
         ]);
 
