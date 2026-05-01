@@ -1962,17 +1962,23 @@ function selectCandidatesForVerification(
     yelp: candidates.filter((c) => c.platform === "yelp"),
   };
 
-  // Proportional allocation: distribute slots based on candidate volume per platform
-  const total = candidates.length || 1;
+  // Fixed-cap allocation: prioritise Resy (most reliable/fast), keep OT and Yelp
+  // small so a slow provider can't consume the verification budget.
+  // Initial caps for a 16-total budget: Resy 8 / OpenTable 4 / Yelp 4.
+  // Caps scale proportionally if maxCandidates differs.
+  const baseCaps: Record<string, number> = {
+    resy: Math.round((8 / 16) * maxCandidates),
+    opentable: Math.round((4 / 16) * maxCandidates),
+    yelp: Math.round((4 / 16) * maxCandidates),
+  };
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
-    const raw = Math.round((buckets[platform].length / total) * maxCandidates);
-    // Cap quota to actual bucket size
-    quotas[platform] = Math.min(raw, buckets[platform].length);
+    quotas[platform] = Math.min(baseCaps[platform], buckets[platform].length);
     assigned += quotas[platform];
   }
-  // Distribute any remaining slots (due to rounding or capped buckets) round-robin
+  // Redistribute unused slots to platforms with remaining candidates,
+  // preferring Resy → OpenTable → Yelp.
   let remaining = maxCandidates - assigned;
   for (const platform of platformOrder) {
     if (remaining <= 0) break;
@@ -1984,7 +1990,7 @@ function selectCandidatesForVerification(
     }
   }
 
-  console.log(`[SELECTION] Proportional quotas: ${platformOrder.map(p => `${p}=${quotas[p]}/${buckets[p].length}`).join(", ")}`);
+  console.log(`[SELECTION] Fixed-cap quotas (Resy-priority): ${platformOrder.map(p => `${p}=${quotas[p]}/${buckets[p].length}`).join(", ")}`);
 
   const selected: Restaurant[] = [];
   for (const platform of platformOrder) {
