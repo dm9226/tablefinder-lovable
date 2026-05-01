@@ -2048,12 +2048,15 @@ async function verifyAvailability(
 
     // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts).
   // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
-  const BATCH_SIZE = 6;
+  // Smaller batches reduce the chance of all 6 parallel scrapes hitting the
+  // same provider's slow path simultaneously. With Resy first in the queue,
+  // these batches now mostly contain Resy candidates that resolve quickly.
+  const BATCH_SIZE = 5;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Early exit: if we already have enough verified results, stop scraping
     const verifiedSoFar = allChecked.filter(Boolean).length;
-    if (verifiedSoFar >= 6) {
+    if (verifiedSoFar >= 8) {
       console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
       break;
     }
