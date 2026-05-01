@@ -2092,8 +2092,8 @@ async function verifyAvailability(
   // Lane-aware verified-target: each lane stops scraping once it has enough wins.
   const LANE_TARGET = laneLabel === "opentable" ? 4 : laneLabel === "yelp" ? 3 : 6;
   // Strict wall-clock budget per lane. Lanes run in parallel; this cap is what
-  // keeps the total search under the 32s global ceiling.
-  const LANE_TIME_BUDGET_MS = 22_000;
+  // keeps the total search under the global ceiling.
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 28_000 : 22_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Lane-local early exit: stop once this lane has hit its useful target.
