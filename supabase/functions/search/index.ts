@@ -206,6 +206,8 @@ serve(async (req) => {
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
+  let timeoutFallbackBody: Record<string, unknown> | null = null;
+  let hardCeilingTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Hard wall-clock ceiling on the entire handler. Many downstream fetches
   // (Lovable AI, Nominatim, Firecrawl search/retry, enrichment) do not yet
@@ -214,16 +216,19 @@ serve(async (req) => {
   // 36s = global deadline (33s) + 3s grace for in-flight cleanup.
   const HANDLER_HARD_CEILING_MS = 42_000;
   const hardCeilingResponse = new Promise<Response>((resolve) => {
-    setTimeout(() => {
-      console.error(`[HARD_CEILING] handler exceeded ${HANDLER_HARD_CEILING_MS}ms — returning empty results`);
+    hardCeilingTimer = setTimeout(() => {
+      globalAbort.abort();
+      clearTimeout(globalTimer);
+      const body = timeoutFallbackBody ?? {
+        results: [],
+        params: {},
+        cached: false,
+        hasMore: false,
+        error: "Search took too long. Please try a more specific query (city + cuisine + time).",
+      };
+      console.error(`[HARD_CEILING] handler exceeded ${HANDLER_HARD_CEILING_MS}ms — returning ${Array.isArray(body.results) ? body.results.length : 0} fallback results`);
       resolve(new Response(
-        JSON.stringify({
-          results: [],
-          params: {},
-          cached: false,
-          hasMore: false,
-          error: "Search took too long. Please try a more specific query (city + cuisine + time).",
-        }),
+        JSON.stringify(body),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       ));
     }, HANDLER_HARD_CEILING_MS);
@@ -316,6 +321,13 @@ serve(async (req) => {
           }
         }
       }
+      timeoutFallbackBody = {
+        results: cleanTransientFields(verified),
+        params,
+        cached: false,
+        hasMore: leftover.length > 0,
+        remainingCandidates: leftover.length > 0 ? leftover : undefined,
+      };
 
       // Distance filter + sort
       const metroCity = getMetroCityName(params.city || "", params.state || "");
@@ -335,6 +347,7 @@ serve(async (req) => {
 
       const finalResults = cleanTransientFields(sorted);
       clearTimeout(globalTimer);
+      clearTimeout(hardCeilingTimer);
       return new Response(
         JSON.stringify({
           results: finalResults,
@@ -472,6 +485,13 @@ serve(async (req) => {
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
+    timeoutFallbackBody = {
+      results: cleanTransientFields(verified),
+      params,
+      cached: false,
+      hasMore: remainingAfterSelection.length > 0,
+      remainingCandidates: remainingAfterSelection.length > 0 ? remainingAfterSelection : undefined,
+    };
 
     // Yelp fallback no longer needed — Yelp candidates are pre-verified from search page
 
@@ -510,7 +530,7 @@ serve(async (req) => {
         ]);
 
     const [, enrichmentMap] = await Promise.all([
-      geocodeVerifiedResults(verified, params),
+      geocodeVerifiedResults(verified, params, 8_000),
       enrichmentPromise,
     ]);
 
@@ -567,6 +587,7 @@ serve(async (req) => {
     const finalResults = cleanTransientFields(sorted);
 
     clearTimeout(globalTimer);
+    clearTimeout(hardCeilingTimer);
     const hasMore = remainingAfterSelection.length > 0;
     console.log(`[RESPONSE] ${finalResults.length} results, hasMore=${hasMore} (${remainingAfterSelection.length} remaining candidates)`);
     {
@@ -596,6 +617,7 @@ serve(async (req) => {
     }
   } catch (e) {
     clearTimeout(globalTimer);
+    clearTimeout(hardCeilingTimer);
 
     // If global timeout fired, return empty results gracefully
     if (globalAbort.signal.aborted) {
@@ -1881,7 +1903,7 @@ function toTwelveHourLabel(time24: string): string {
 
 // ─── Batch geocode verified results ───
 
-async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams): Promise<void> {
+async function geocodeVerifiedResults(results: Restaurant[], params: SearchParams, maxMs = 6_000): Promise<void> {
   const cityLat = params.lat || 0;
   const cityLng = params.lng || 0;
   if (!cityLat || !cityLng) {
@@ -1909,8 +1931,12 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
 
     // Helper to attempt a Nominatim query and apply result
     async function tryGeocode(queryUrl: string, label: string): Promise<boolean> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const resp = await fetch(queryUrl, { headers: { "User-Agent": "TableFinder/1.0" } });
+        const controller = new AbortController();
+        timer = setTimeout(() => controller.abort(), 2_500);
+        const resp = await fetch(queryUrl, { headers: { "User-Agent": "TableFinder/1.0" }, signal: controller.signal });
+        clearTimeout(timer);
         if (!resp.ok) return false;
         const data = await resp.json();
         if (!data?.[0]) return false;
@@ -1931,6 +1957,8 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
         return true;
       } catch {
         return false;
+      } finally {
+        if (timer) clearTimeout(timer);
       }
     }
 
@@ -1986,7 +2014,10 @@ async function geocodeVerifiedResults(results: Restaurant[], params: SearchParam
     );
   }
 
-  await Promise.all(geocodePromises);
+  await Promise.race([
+    Promise.all(geocodePromises),
+    new Promise<void>((resolve) => setTimeout(resolve, maxMs)),
+  ]);
   const geocoded = toGeocode.filter(r => r.distanceMiles != null).length;
   console.log(`Geocoded ${geocoded}/${toGeocode.length} restaurants`);
 }
