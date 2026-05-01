@@ -2053,14 +2053,18 @@ async function verifyAvailability(
       const isOT = r.platform === "opentable";
 
       // ── Firecrawl scrape (Resy / OpenTable / Yelp) ──
+      // Per-provider settings:
+      // - OpenTable: needs full JS render to expose "Select a time" widget; use
+      //   markdown+html dual extraction with longer waitFor and timeout.
+      // - Yelp: moderate JS render needed for reservation widget.
+      // - Resy: server-rendered, fast — short wait, short timeout.
       const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          // Tighter Firecrawl-side timeout so 408s come back fast and we
-          // don't waste verification budget on slow renders.
-          timeout: 9000,
-          ...((isOT || isYelp) && { waitFor: 1500 }),
+          timeout: isOT ? 18000 : isYelp ? 12000 : 10000,
+          ...(isOT && { waitFor: 5000 }),
+          ...(isYelp && { waitFor: 2500 }),
         };
 
       let markdown = "";
@@ -2070,9 +2074,14 @@ async function verifyAvailability(
       let data: any = null;
 
       {
-        // Firecrawl for all platforms (Resy/OT/Yelp)
+        // Firecrawl for all platforms (Resy/OT/Yelp). Wrap with our own AbortController
+        // so we can cancel the fetch if Firecrawl's own timeout doesn't fire fast enough.
+        // OT pages need ~18s to render JS widgets; Resy/Yelp are faster.
         const scrapeAbort = new AbortController();
-        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 11_000);
+        const scrapeTimer = setTimeout(
+          () => scrapeAbort.abort(),
+          isOT ? 22_000 : isYelp ? 15_000 : 12_000,
+        );
         let resp: Response;
         try {
           resp = await fetch(`${FIRECRAWL_API}/scrape`, {
