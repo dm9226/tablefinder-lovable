@@ -216,10 +216,15 @@ serve(async (req) => {
 
       // Geocoding + enrichment (same as main flow)
       const elapsed = Date.now() - startTime;
-      const skipEnrichment = elapsed > 110_000;
-      const enrichmentPromise = skipEnrichment
+      const skipEnrichment = elapsed > 24_000;
+      const enrichmentPromise: Promise<Map<number, any>> = skipEnrichment
         ? Promise.resolve(new Map<number, any>())
-        : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
+        : Promise.race([
+            enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
+            new Promise<Map<number, any>>((resolve) =>
+              setTimeout(() => resolve(new Map<number, any>()), 5_000),
+            ),
+          ]);
 
       const [, enrichmentMap] = await Promise.all([
         geocodeVerifiedResults(verified, params),
@@ -329,7 +334,9 @@ serve(async (req) => {
     // Step 3: Select candidates with round-robin balance, then verify per-adapter
     // Use fewer candidates for vague queries to avoid timeouts
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 18 : 24;
+    // Lowered from 24 → 16 to keep the request inside ~25s and stop Yelp from
+    // starving Resy/OpenTable's verification slots.
+    const maxCandidates = isVagueQuery ? 12 : 16;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -364,14 +371,26 @@ serve(async (req) => {
     // Step 3.5 + 4: Run geocoding and AI enrichment in parallel (no dependency)
     // If we're past 110s, skip enrichment to ensure we return in time
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 110_000;
+    // Skip AI enrichment if verification already burned most of our budget.
+    // Verified results are still returned; they just lack AI-derived
+    // descriptions/vibe tags/AI coordinates.
+    const skipEnrichment = elapsed > 24_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
 
-    const enrichmentPromise = skipEnrichment 
-      ? Promise.resolve(new Map<number, any>()) 
-      : enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms);
+    // Hard cap enrichment so it cannot stall the response past ~5s.
+    const enrichmentPromise: Promise<Map<number, any>> = skipEnrichment
+      ? Promise.resolve(new Map<number, any>())
+      : Promise.race([
+          enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
+          new Promise<Map<number, any>>((resolve) =>
+            setTimeout(() => {
+              console.warn("AI enrichment timed out at 5s — returning without enrichment");
+              resolve(new Map<number, any>());
+            }, 5_000),
+          ),
+        ]);
 
     const [, enrichmentMap] = await Promise.all([
       geocodeVerifiedResults(verified, params),
@@ -1960,17 +1979,23 @@ function selectCandidatesForVerification(
     yelp: candidates.filter((c) => c.platform === "yelp"),
   };
 
-  // Proportional allocation: distribute slots based on candidate volume per platform
-  const total = candidates.length || 1;
+  // Fixed-cap allocation: prioritise Resy (most reliable/fast), keep OT and Yelp
+  // small so a slow provider can't consume the verification budget.
+  // Initial caps for a 16-total budget: Resy 8 / OpenTable 4 / Yelp 4.
+  // Caps scale proportionally if maxCandidates differs.
+  const baseCaps: Record<string, number> = {
+    resy: Math.round((8 / 16) * maxCandidates),
+    opentable: Math.round((4 / 16) * maxCandidates),
+    yelp: Math.round((4 / 16) * maxCandidates),
+  };
   const quotas: Record<string, number> = {};
   let assigned = 0;
   for (const platform of platformOrder) {
-    const raw = Math.round((buckets[platform].length / total) * maxCandidates);
-    // Cap quota to actual bucket size
-    quotas[platform] = Math.min(raw, buckets[platform].length);
+    quotas[platform] = Math.min(baseCaps[platform], buckets[platform].length);
     assigned += quotas[platform];
   }
-  // Distribute any remaining slots (due to rounding or capped buckets) round-robin
+  // Redistribute unused slots to platforms with remaining candidates,
+  // preferring Resy → OpenTable → Yelp.
   let remaining = maxCandidates - assigned;
   for (const platform of platformOrder) {
     if (remaining <= 0) break;
@@ -1982,7 +2007,7 @@ function selectCandidatesForVerification(
     }
   }
 
-  console.log(`[SELECTION] Proportional quotas: ${platformOrder.map(p => `${p}=${quotas[p]}/${buckets[p].length}`).join(", ")}`);
+  console.log(`[SELECTION] Fixed-cap quotas (Resy-priority): ${platformOrder.map(p => `${p}=${quotas[p]}/${buckets[p].length}`).join(", ")}`);
 
   const selected: Restaurant[] = [];
   for (const platform of platformOrder) {
@@ -2007,12 +2032,13 @@ async function verifyAvailability(
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Early exit: if we already have enough verified results, stop scraping
     const verifiedSoFar = allChecked.filter(Boolean).length;
-    if (verifiedSoFar >= 8) {
+    if (verifiedSoFar >= 5) {
       console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
       break;
     }
-    // Time guard: stop if we've used more than 50s of the global budget
-    if (globalStartTime && (Date.now() - globalStartTime) > 50_000) {
+    // Time guard: stop if we've used more than 22s of the global budget,
+    // so we still have time for geocoding/enrichment and return < 30s.
+    if (globalStartTime && (Date.now() - globalStartTime) > 22_000) {
       console.log(`Time guard: ${Math.round((Date.now() - globalStartTime) / 1000)}s elapsed, stopping verification with ${verifiedSoFar} results`);
       break;
     }
@@ -2030,8 +2056,10 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          timeout: 15000,
-          ...((isOT || isYelp) && { waitFor: 3000 }),
+          // Tighter Firecrawl-side timeout so 408s come back fast and we
+          // don't waste verification budget on slow renders.
+          timeout: 9000,
+          ...((isOT || isYelp) && { waitFor: 1500 }),
         };
 
       let markdown = "";
@@ -2043,7 +2071,7 @@ async function verifyAvailability(
       {
         // Firecrawl for all platforms (Resy/OT/Yelp)
         const scrapeAbort = new AbortController();
-        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 16_000);
+        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 11_000);
         let resp: Response;
         try {
           resp = await fetch(`${FIRECRAWL_API}/scrape`, {
