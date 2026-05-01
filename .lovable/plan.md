@@ -1,237 +1,111 @@
-You are right. The prior plan under-specified the actual product requirements. The acceptance target is not “eventually returns something”; it is fast initial results with complete, verified, directly bookable data from every platform.
+You’re right to call this out. The honest status is: I overpromised. I said I was “proceeding” as if I could keep working in the background, but Lovable does not keep executing after that response. Work only happens during an active turn, and right now I’m in read-only planning mode, so I can inspect but not edit/deploy/run regressions.
 
-## Non-negotiable acceptance requirements
+I inspected the current code. The restoration is not implemented yet:
 
-Initial search must meet all of these before I report it as done:
+- Backend still has a 120s global timeout.
+- Discovery still allows 45s.
+- OpenTable verification still allows ~90s lane budget and 50–55s scrape waits.
+- Frontend does not send `originZip`.
+- Distances can still be based on broad city/browser/AI fallback rather than explicit shared zip origin.
+- Tests do not yet enforce the full requirements: ≤25s, 100% descriptions, 100% time slots, zip-origin distance, and deep-link params for every returned result.
 
-1. **Initial results return in 20–25 seconds**
-   - Target: ≤25s wall-clock for the initial response.
-   - Hard backend cutoff: no initial search is allowed to run into the 60–120s range.
+## Build plan for the next implementation turn
 
-2. **Initial results include all platforms**
-   - The initial response must include verified results from **Resy, OpenTable, and Yelp** when candidates exist for the search/location.
-   - A slow OpenTable path cannot block Resy/Yelp, and Resy/Yelp cannot be skipped just because OpenTable is slow.
+### 1. Enforce a real 25s initial-search deadline
+Replace the current long-running search model with one shared deadline object across parsing, discovery, verification, geocoding, enrichment, and response serialization.
 
-3. **Every returned result is actually available**
-   - Every result must have concrete available time slots for the requested date/time/party size.
-   - No URL-only results.
-   - No guessed availability.
-   - Slots must be extracted from real platform availability content/API responses and remain within the ±2 hour search window.
-
-4. **Every returned result has complete visible metadata**
-   Each initial result must include:
-   - description
-   - rating when available from discovery/provider data, with deterministic fallback handling if unavailable
-   - distance
-   - cuisine
-   - neighborhood/location label
-   - price range when available
-   - vibe tags
-   - actual available times
-
-5. **Links deep-link directly to reservation pages**
-   - Resy links must include date, party size, and time preselected.
-   - OpenTable links must include date/time and party size preselected.
-   - Yelp reservation links must include date, time, and party size preselected.
-   - The link target must be the reservation/booking flow, not a generic restaurant page whenever the platform supports a reservation URL.
-
-6. **Distance is based on the user’s shared zip code**
-   - The app must capture/use the user’s shared zip/postcode as the search origin when provided.
-   - Distance must be calculated from that zip-derived lat/lng, not from the broad city center and not from an AI guess.
-   - If a zip is not provided but precise browser coordinates are available, use those.
-   - If neither is available, show that distance is unavailable rather than fabricating it.
-
-## Backend implementation plan
-
-### 1. Replace the current long-running search budget
-Current code still has a 120s global timeout, 45s discovery timeout, and enrichment skip logic that allows verification to consume the whole response budget.
-
-I will change the initial search flow to a strict deadline model:
+Target schedule:
 
 ```text
-0–3s      Parse query + resolve zip/location
-0–8s      Discover candidates from all providers in parallel
-4–21s     Verify provider lanes in parallel
-18–24s    Metadata normalization/enrichment/fallbacks
-≤25s      Return initial results
+0–3s      Parse query + resolve explicit zip/postcode origin
+0–8s      Discover candidates from Resy, OpenTable, Yelp in parallel
+8–22s     Verify availability in provider lanes with strict per-call budgets
+22–24s    Complete metadata + distance normalization
+<=25s     Return initial response
 ```
 
-Implementation details:
-- Set initial search hard deadline to ~25s.
-- Every discovery, verification, scrape, browser/API call, and enrichment call receives the same deadline object.
-- No operation starts if it cannot reasonably finish inside the remaining budget.
-- Extended search can still exist, but the first response must satisfy the initial-result requirements.
+No operation gets to start if it cannot finish inside the remaining budget. No initial OpenTable path gets 50–90 seconds anymore.
 
-### 2. Resy: direct availability API first, scraping only as fallback
-Current Resy verification is too slow because it relies on page scraping.
+### 2. Fix zip/postcode origin handling end-to-end
+Add first-class zip/postcode origin support:
 
-I will implement direct Resy availability verification using Resy’s public web API pattern:
-- Search/resolve venue availability by date, party size, location/query.
-- Extract real available slot times/tokens from JSON.
-- Build Resy deep links with `date`, `seats`, and `time` populated.
-- Only use Firecrawl fallback if the API path fails and there is enough budget left.
+- Frontend search UI captures an optional shared zip/postcode.
+- `Index.tsx` sends `originZip` with the search body.
+- Backend accepts `originZip` separately from the natural language query.
+- Backend geocodes `originZip` once at request start.
+- Distance is calculated from that zip-derived coordinate.
+- If no zip is supplied, use precise browser coordinates if available.
+- If neither exists, distance is explicit/unavailable rather than fabricated.
 
-Pass condition:
-- Resy results in the initial response have real slots and complete deep links within the 25s response window.
+### 3. Make returned results complete or exclude them
+Before returning, every result must have:
 
-### 3. OpenTable: bounded browser/API verification path
-OpenTable cannot be allowed to consume 50–90 seconds.
+- verified available time slots
+- description
+- rating when provider/discovery data exposes it
+- distance when zip/browser origin exists
+- cuisine
+- neighborhood/location label
+- platform
+- direct booking URL
+- vibe tags
 
-I will implement a bounded OpenTable verification path:
-- Use the existing Browserbase credentials for rendered availability extraction where direct/static extraction is blocked.
-- Limit OpenTable initial verification to a small concurrent set so it has representation without blocking the response.
-- Use a strict per-candidate browser timeout.
-- Extract slot elements from rendered content only; do not return OpenTable results unless actual slot times are found.
-- Build links with `dateTime=YYYY-MM-DDTHH:mm` and party size/covers populated.
+Fallback metadata is allowed. Fallback availability is not allowed.
 
-Pass condition:
-- If OpenTable has viable candidates, the initial response includes verified OpenTable results with slot times and preselected booking URLs within 25s.
-- If OpenTable is unavailable or platform-blocked for a specific query, it fails closed rather than returning guessed results.
+### 4. Restore provider-specific availability lanes
+Implement provider lanes so one slow platform cannot starve the others.
 
-### 4. Yelp: preserve working verification, tighten booking links
-Yelp is currently the least broken path, so I will keep the existing Firecrawl-based verification but make it deadline-aware.
+- **Resy**: prioritize direct availability/API-style extraction where possible; scrape only as fallback inside the remaining budget.
+- **OpenTable**: investigate/restore the previously working path rather than accepting the current slow Firecrawl-only behavior. Bound it tightly for initial results. If OpenTable is blocked for a given query, fail closed rather than returning guessed availability.
+- **Yelp**: preserve content verification, make it deadline-aware, and ensure links include date/time/covers.
 
-I will ensure:
-- Yelp reservation URLs include `date`, `time`, and `covers`.
-- Yelp results are only returned when reservation evidence/time slots are confirmed.
-- Yelp is not starved by OpenTable or Resy.
+The initial response should include Resy, OpenTable, and Yelp when candidates are actually available and verifiable within the 25s window.
 
-Pass condition:
-- Initial response includes Yelp results with actual availability where Yelp candidates exist.
+### 5. Tighten deep links
+Ensure every returned result links directly to the reservation flow with criteria preselected:
 
-### 5. Mandatory metadata completion before response
-Current code can skip AI enrichment, which is why descriptions disappear.
+- Resy: date, seats, time
+- OpenTable: `dateTime`, covers/party size
+- Yelp: date, time, covers
 
-I will change the output normalization so every returned result receives metadata before being sent:
-- Prefer provider/discovery metadata.
-- Then AI enrichment if it fits the remaining budget.
-- Then deterministic fallback values for description and vibe tags.
+Generic restaurant pages do not pass unless the platform offers no deeper reservation URL and the page itself contains verified booking slots.
 
-Important distinction:
-- Fallback metadata is allowed.
-- Fallback availability is not allowed.
+### 6. Strengthen regression tests before declaring done
+Update the existing US, UK, and link verification suites to fail if any returned result violates the requirements.
 
-The response will never include blank descriptions or empty vibe tags for returned verified results.
+Required assertions:
 
-### 6. Zip-code-origin distance calculation
-Current backend can parse a zip in the query, but the frontend does not explicitly capture/share a zip as the user’s origin, and distance can fall back to city/AI-derived coordinates.
-
-I will add first-class zip origin support:
-- Add zip/postcode input or zip sharing flow in the search UI.
-- Send `zipCode`/`originZip` to the backend with the search request.
-- Backend geocodes that zip once at the start of the request.
-- Store the resulting origin lat/lng on `params`.
-- Calculate every restaurant distance from that zip-origin lat/lng.
-- Do not use AI coordinates as the distance origin.
-- If restaurant coordinates cannot be confidently determined, do not fabricate distance.
-
-Pass condition:
-- Test query with a supplied zip returns distances computed from that zip origin.
-
-## Frontend implementation plan
-
-### 1. Capture the user’s shared zip code
-Add a lightweight way for the user to provide/share a zip/postcode as the location origin.
-
-The search request body will include:
-```json
-{
-  "query": "Italian tonight for 2",
-  "originZip": "30309",
-  "lat": 33.749,
-  "lng": -84.388,
-  "location": "Atlanta, GA"
-}
-```
-
-Backend priority for origin:
-1. `originZip`
-2. zip/postcode parsed from query
-3. precise browser coordinates
-4. city geocode fallback
-
-### 2. Display complete results only
-Restaurant cards already display description, rating, distance, and time slots if present. The backend will guarantee those fields exist for returned results, so the UI will not silently hide missing requirements.
-
-I will also make missing distance explicit if it genuinely cannot be computed, instead of pretending the result is complete.
-
-## Regression tests I will add/update
-
-The current test suites do not fully enforce your requirements. I will update them before using them as the release gate.
-
-### US regression suite
-Add assertions that every initial result has:
-- response time ≤25s target, with hard failure above the agreed cutoff
-- non-empty `description`
-- non-empty `vibeTags`
-- `rating` present when provider data exposes it
-- `distanceMiles` present when zip/browser origin is provided
-- at least one `timeSlot`
-- valid time slot format
-- slot within ±2 hours
-- valid reservation URL params
+- initial response ≤25s
+- every result has at least one actual slot
+- every slot is within ±2 hours of requested time
+- every result has non-empty description
+- every result has non-empty vibe tags
+- every result has distance when zip/postcode/browser origin is supplied
+- every deep link contains date/time/party size params
 - no duplicate restaurants
-- all three platforms represented when available for that market/query
+- provider counts are reported by platform
 
-### UK regression suite
-Add equivalent assertions for UK postcode/location behavior:
-- UK country detection
-- UK/postcode origin distance
-- OpenTable UK domain behavior where applicable
-- valid time slots and booking params
-- ≤25s initial response target
+Add explicit zip-origin test cases:
 
-### Link verification suite
-Strengthen link checks to require:
-- Resy: date + seats + time
-- OpenTable: dateTime + covers/party size
-- Yelp: date + time + covers
-- sample re-verification confirms returned slot times are visible from the booking/reservation page/API response
+- Atlanta `30309`
+- New York `10003`
+- Chicago `60614`
+- London postcode
 
-### New zip-origin tests
-Add representative cases:
-- `Dinner tonight for 2` with `originZip: 30309`
-- `Italian tonight for 2` with `originZip: 10003`
-- `Sushi Friday 7pm for 2` with `originZip: 60614`
-- UK postcode case with `originZip`/postcode
-
-These tests will check that returned `distanceMiles` is calculated from the provided zip/postcode origin.
-
-## Manual/live regression I will run before reporting done
-
-After implementation, I will run live backend tests myself. I will not ask you to spend credits validating this.
-
-Representative live queries:
-- `Dinner tonight for 2` with zip `30309`
-- `Italian tonight for 2` with zip `30309`
-- `Sushi tonight for 2` with zip `10003`
-- `Steakhouse Friday 8pm for 4` with zip `60614`
-- `Brunch Saturday 10:30am for 4` with zip `30309`
-- `Italian tonight for 2` with London postcode
-
-For each live run I will capture:
-- total response time
-- result count
-- platform counts: Resy / OpenTable / Yelp
-- count with descriptions
-- count with ratings
-- count with distances
-- count with time slots
-- URL param pass rate
-- whether logs show enrichment skipped or any provider lane exceeding its budget
-
-## Release gate
-
-I will not report this as fixed unless the regression output shows:
+### 7. Deploy and run live regressions
+After edits, deploy the search backend and run live regression calls against representative searches. I will only report completion with an actual pass/fail table showing:
 
 ```text
-Initial response time: <=25s target for representative searches
-Availability:         100% returned results have actual slots
-Descriptions:         100% returned results have non-empty descriptions
-Distance:             100% returned results have zip-origin distance when zip is supplied
-Deep links:           100% returned URLs include date/time/party size criteria
-Platform coverage:    Resy + OpenTable + Yelp represented when candidates exist
-Logs:                 no enrichment-skip path in successful initial searches
+query
+response time
+result count
+Resy / OpenTable / Yelp counts
+% with descriptions
+% with ratings where available
+% with distances
+% with verified slots
+% with valid deep-link params
+pass/fail
 ```
 
-If any item fails, I keep iterating and rerun the suite. I will only come back with a release summary after the tests pass, including the actual timing and pass/fail table.
+If any gate fails, I keep iterating in that implementation turn instead of calling it done.
