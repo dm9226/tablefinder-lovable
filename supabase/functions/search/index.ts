@@ -201,7 +201,7 @@ serve(async (req) => {
   // Global timeout: hard ceiling on initial response so the UI never hangs.
   // Lane budgets cap verification at 22s (Resy/Yelp) / 28s (OT). Add a 4s
   // enrichment window + small buffer = 33s.
-  const GLOBAL_TIMEOUT_MS = 33_000;
+  const GLOBAL_TIMEOUT_MS = 38_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
@@ -211,7 +211,7 @@ serve(async (req) => {
   // accept an AbortSignal. Without this race the function can sit waiting
   // on an upstream hang until edge-runtime kills it at 150s (IDLE_TIMEOUT).
   // 36s = global deadline (33s) + 3s grace for in-flight cleanup.
-  const HANDLER_HARD_CEILING_MS = 36_000;
+  const HANDLER_HARD_CEILING_MS = 42_000;
   const hardCeilingResponse = new Promise<Response>((resolve) => {
     setTimeout(() => {
       console.error(`[HARD_CEILING] handler exceeded ${HANDLER_HARD_CEILING_MS}ms — returning empty results`);
