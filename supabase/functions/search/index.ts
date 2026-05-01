@@ -321,6 +321,13 @@ serve(async (req) => {
           }
         }
       }
+      timeoutFallbackBody = {
+        results: cleanTransientFields(verified),
+        params,
+        cached: false,
+        hasMore: leftover.length > 0,
+        remainingCandidates: leftover.length > 0 ? leftover : undefined,
+      };
 
       // Distance filter + sort
       const metroCity = getMetroCityName(params.city || "", params.state || "");
@@ -340,6 +347,7 @@ serve(async (req) => {
 
       const finalResults = cleanTransientFields(sorted);
       clearTimeout(globalTimer);
+      clearTimeout(hardCeilingTimer);
       return new Response(
         JSON.stringify({
           results: finalResults,
@@ -477,6 +485,13 @@ serve(async (req) => {
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
+    timeoutFallbackBody = {
+      results: cleanTransientFields(verified),
+      params,
+      cached: false,
+      hasMore: remainingAfterSelection.length > 0,
+      remainingCandidates: remainingAfterSelection.length > 0 ? remainingAfterSelection : undefined,
+    };
 
     // Yelp fallback no longer needed — Yelp candidates are pre-verified from search page
 
@@ -572,6 +587,7 @@ serve(async (req) => {
     const finalResults = cleanTransientFields(sorted);
 
     clearTimeout(globalTimer);
+    clearTimeout(hardCeilingTimer);
     const hasMore = remainingAfterSelection.length > 0;
     console.log(`[RESPONSE] ${finalResults.length} results, hasMore=${hasMore} (${remainingAfterSelection.length} remaining candidates)`);
     {
@@ -601,6 +617,7 @@ serve(async (req) => {
     }
   } catch (e) {
     clearTimeout(globalTimer);
+    clearTimeout(hardCeilingTimer);
 
     // If global timeout fired, return empty results gracefully
     if (globalAbort.signal.aborted) {
