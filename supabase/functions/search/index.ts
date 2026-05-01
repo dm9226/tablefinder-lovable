@@ -2015,12 +2015,13 @@ async function verifyAvailability(
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Early exit: if we already have enough verified results, stop scraping
     const verifiedSoFar = allChecked.filter(Boolean).length;
-    if (verifiedSoFar >= 8) {
+    if (verifiedSoFar >= 5) {
       console.log(`Early exit: already have ${verifiedSoFar} verified results, skipping remaining ${candidates.length - batchStart} candidates`);
       break;
     }
-    // Time guard: stop if we've used more than 50s of the global budget
-    if (globalStartTime && (Date.now() - globalStartTime) > 50_000) {
+    // Time guard: stop if we've used more than 22s of the global budget,
+    // so we still have time for geocoding/enrichment and return < 30s.
+    if (globalStartTime && (Date.now() - globalStartTime) > 22_000) {
       console.log(`Time guard: ${Math.round((Date.now() - globalStartTime) / 1000)}s elapsed, stopping verification with ${verifiedSoFar} results`);
       break;
     }
@@ -2038,8 +2039,10 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          timeout: 15000,
-          ...((isOT || isYelp) && { waitFor: 3000 }),
+          // Tighter Firecrawl-side timeout so 408s come back fast and we
+          // don't waste verification budget on slow renders.
+          timeout: 9000,
+          ...((isOT || isYelp) && { waitFor: 1500 }),
         };
 
       let markdown = "";
@@ -2051,7 +2054,7 @@ async function verifyAvailability(
       {
         // Firecrawl for all platforms (Resy/OT/Yelp)
         const scrapeAbort = new AbortController();
-        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 16_000);
+        const scrapeTimer = setTimeout(() => scrapeAbort.abort(), 11_000);
         let resp: Response;
         try {
           resp = await fetch(`${FIRECRAWL_API}/scrape`, {
