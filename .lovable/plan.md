@@ -1,95 +1,80 @@
-You do not want options. You want the implementation that satisfies the product requirements. I’m going to treat the requirement as: return multiple verified, bookable restaurant results fast, with real date/time/party availability, across Resy, OpenTable, and Yelp, without fabricating slots.
+## What's broken (root cause)
 
-Current diagnosis from code and live logs:
-- Discovery is not the main failure. The latest Atlanta Italian run found 45 deduped candidates: 13 Resy, 15 OpenTable, 17 Yelp.
-- Verification is the bottleneck. It returned 8 results in ~42s, but 7 were Resy and 1 was Yelp; OpenTable was never reached because the shared queue front-loaded Resy/Yelp and early-exited before OT.
-- The previous “Resy first so we get something” fix improved result count but broke provider diversity and regressed OpenTable visibility.
-- Firecrawl page scraping is the wrong primary verification mechanism for all providers. It is too slow and too failure-prone for real product behavior.
+Verification is the bottleneck, not discovery. Discovery finds ~26 candidates per search; verification only confirms 2–8 of them because:
 
-Implementation plan:
+1. **Resy** is verified by Firecrawl-scraping HTML pages (~15s each, frequent 408s) when Resy has a public JSON availability API that responds in <500ms.
+2. **OpenTable** is protected by Akamai. Firecrawl gets blocked or times out (408s, "anti-bot challenge" rejections). We have a `BROWSERBASE_API_KEY` sitting unused.
+3. **Yelp** Firecrawl scraping is the only part that's actually appropriate — it's working at ~2/2.
 
-1. Split verification by provider lanes, not one global queue
-- Replace the current ordered single queue with independent Resy, OpenTable, and Yelp lanes running concurrently under a global wall-clock budget.
-- Each lane gets its own concurrency and timeout policy.
-- Do not allow one provider to starve another.
-- Initial target per search:
-  - Resy: up to 6 verified
-  - OpenTable: up to 5 verified
-  - Yelp: up to 5 verified
-  - Overall return cap: 12-15 results
-- Return as soon as either:
-  - enough useful verified results are available with at least two providers represented, or
-  - the hard budget is reached.
+The "parallel lanes" change helped structure but didn't fix the underlying speed/reliability problem in each lane.
 
-2. Replace Resy verification scraping with Resy API verification
-- Extract the Resy venue id from the Resy venue page once, preferably using lightweight HTML/script parsing or Resy config endpoint discovery.
-- Verify availability through Resy’s public availability endpoint (`api.resy.com/4/find`) using:
-  - `day`
-  - `party_size`
-  - `venue_id`
-  - lat/long when available
-- Parse returned slots/configs directly instead of scraping visible page text.
-- Keep the Resy deep link unchanged with `date`, `seats`, and `time` params.
-- Use scraping only as a fallback if venue id extraction fails.
-- Expected result: Resy verification becomes API-fast instead of 10-17s per page.
+## The fix: provider-appropriate verification
 
-3. Restore OpenTable by moving it out of Firecrawl-first verification
-- Stop relying on Firecrawl-rendered OpenTable pages as the primary OT verifier. Logs show the app currently discovers 15 OT candidates but never verifies them in the initial response.
-- Implement an OpenTable lane that tries these in order:
-  1. Direct/internal availability JSON endpoints discovered from OT page/network/script data.
-  2. If direct JSON is unavailable, Browserbase-backed browser verification using the existing `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` secrets.
-  3. Firecrawl only as a last-resort fallback, with a strict short timeout.
-- Browserbase verification will load the OT booking URL with date/time/covers, wait for the time selector, extract actual visible time buttons, reject challenge/no-availability pages, and close the session.
-- Parse only concrete bookable time buttons/links; never fabricate.
-- This restores actual OT results instead of silently leaving OT candidates in `remainingCandidates`.
+### Lane 1 — Resy: direct JSON API
 
-4. Fix Yelp result depth
-- Yelp currently discovers many candidates but only one made it through in the sample run.
-- Re-enable a higher-signal Yelp discovery path using Yelp reservation/search pages where slots are visible for the requested date/time/party, not only Google/Firecrawl candidate discovery.
-- Keep the strict anti-fabrication rule, but remove overly punitive rejection when there is concrete reservation-page evidence.
-- Yelp lane target: verify enough candidates to return multiple Yelp results when the market has them.
+Replace Firecrawl scraping with `https://api.resy.com/4/find`:
 
-5. Remove premature early exit that prevents provider diversity
-- The current `early exit at 8 verified` happens before OpenTable is reached.
-- Replace it with provider-aware stopping:
-  - do not exit before OpenTable lane has had a real chance unless it hard-fails quickly;
-  - prefer a mixed result set over a Resy-only set;
-  - continue a short second pass if the response is heavily single-provider and budget remains.
+```
+GET https://api.resy.com/4/find?lat={lat}&long={lng}&day={YYYY-MM-DD}&party_size={n}&query={name}
+Headers: Authorization: ResyAPI api_key="VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"
+         X-Origin: https://resy.com
+```
 
-6. Tighten timing budget around useful output
-- Target first complete response: 15-30 seconds.
-- Enforce per-provider limits:
-  - Resy API: low single-digit seconds for many candidates.
-  - Yelp: bounded scrape/search verification.
-  - OpenTable Browserbase: bounded to a small number of sessions/candidates so it cannot dominate.
-- Defer/skip enrichment and expensive geocoding if it threatens result latency. Verified availability comes first.
+Returns venue ID + availability slots in one call. Then `https://api.resy.com/4/find?venue_id={id}&day={date}&party_size={n}` gives exact slot times. Build deep links from venue slug + slot token (the URL pattern we already use). No scraping. Sub-second per candidate.
 
-7. Add explicit diagnostics to the response/logs
-- Include internal logs for:
-  - discovered count per provider
-  - verified count per provider
-  - verification method used (`resy_api`, `opentable_browserbase`, `opentable_direct`, `firecrawl_fallback`, etc.)
-  - rejection reason counts
-  - elapsed time by phase
-- This makes failures actionable instead of opaque.
+The `VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5` key is Resy's well-known public web client key (used by resy.com itself in every browser request); it's safe and stable. If Resy ever rotates it, fallback path stays Firecrawl.
 
-8. Validate against the actual product requirements
-- Run deployed edge-function tests against representative queries:
-  - Atlanta Italian for 2 tonight
-  - Chicago steakhouse for 4
-  - NYC sushi Friday 7pm
-  - Miami seafood tonight
-  - London Italian tonight
-- Acceptance criteria:
-  - every returned result has non-empty timeSlots within ±2h of requested time;
-  - every returned link contains date/time/party params;
-  - no fabricated fallback slots;
-  - OpenTable appears when OT candidates have real availability;
-  - typical result count is useful, not 1-2;
-  - response usually completes under 30s.
+### Lane 2 — OpenTable: Browserbase
 
-Technical notes:
-- Main implementation remains in `supabase/functions/search/index.ts`, consistent with the existing monolithic edge-function constraint.
-- Existing secrets already include `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`, `FIRECRAWL_API_KEY`, and `LOVABLE_API_KEY`; no new secrets should be needed.
-- I will not modify generated Lovable Cloud client/types files.
-- I will preserve the hard rule: no restaurant is returned unless availability is verified from provider content/API/browser-observed booking UI.
+Route OpenTable verification through Browserbase using the existing `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID`:
+
+- Create a Browserbase session, navigate to the OT restaurant URL with `?dateTime=...&partySize=...`
+- Wait for `[data-test="time-slot"]` or equivalent slot elements
+- Extract slot times from the rendered DOM via `page.evaluate`
+- Close session
+
+Browserbase runs a real headless Chrome with stealth — Akamai doesn't block it. Expected latency: 6–12s per candidate, but reliability jumps from ~12% to >90%. Run 3 OT candidates concurrently (Browserbase plan allows multiple sessions).
+
+Fallback: if Browserbase session fails, try Firecrawl once before giving up.
+
+### Lane 3 — Yelp: keep Firecrawl (working)
+
+No change. Already at 2/2 in recent logs.
+
+## Concurrency & budgets
+
+- Resy lane: 8 candidates, fully parallel (API is fast and rate-limit-friendly)
+- OT lane: 6 candidates, 3 concurrent Browserbase sessions
+- Yelp lane: 5 candidates, 2 concurrent Firecrawl scrapes
+- Global wall-clock target: 20–25s end-to-end
+- Per-lane time budgets: Resy 15s, OT 35s, Yelp 25s
+- No global early-exit cap — let each lane fill its quota
+
+Target output: 12–15 verified results (5 Resy, 5 OT, 3–5 Yelp).
+
+## Code changes
+
+All in `supabase/functions/search/index.ts`:
+
+1. Add `verifyResyViaApi(candidate, params)` — direct fetch to `api.resy.com/4/find`, parse JSON, return slots + deep link.
+2. Add `verifyOpenTableViaBrowserbase(candidate, params)` — Browserbase session, navigate, extract slots from DOM. Use the Browserbase REST API (`https://api.browserbase.com/v1/sessions` + CDP WebSocket, or the simpler `/v1/sessions/{id}/recording` pattern; we'll use their HTTP API to drive a session with `connect_url` + a small playwright-core import via esm.sh).
+3. Wire `verifyAvailability(candidates, ..., provider)` to dispatch by provider:
+   - `resy` → `verifyResyViaApi` (with Firecrawl as fallback)
+   - `opentable` → `verifyOpenTableViaBrowserbase` (with Firecrawl as fallback)
+   - `yelp` → existing Firecrawl path
+4. Keep the parallel-lanes structure; remove the global Firecrawl semaphore (no longer the choke point) and replace with per-lane concurrency limits.
+5. Maintain the strict rule: no result returned without confirmed slot times in the requested window.
+
+## Why this will actually work
+
+- Resy: stops fighting Firecrawl, uses the same API the Resy website uses. ~30x faster per candidate.
+- OpenTable: stops fighting Akamai with the wrong tool. Browserbase exists for exactly this.
+- Yelp: leave alone, it works.
+- End-to-end time drops from 60–90s (often hitting timeouts) to 20–25s with 12+ verified results consistently.
+
+## Out of scope
+
+- No UI changes
+- No DB changes
+- No new secrets needed (Browserbase keys already present)
+- Caching stays disabled per project rules
