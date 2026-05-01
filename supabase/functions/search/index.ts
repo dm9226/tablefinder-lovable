@@ -2184,8 +2184,8 @@ async function verifyAvailability(
         // the lane budget. We only retry if we still have ≥10s of wall-clock
         // budget left, and we use a tighter timeout on the retry.
         if (resp.status === 408) {
-          const elapsedSinceStart = Date.now() - startTime;
-          const wallBudgetLeftMs = 28_000 - elapsedSinceStart;
+          const elapsedSinceStart = globalStartTime ? Date.now() - globalStartTime : 0;
+          const wallBudgetLeftMs = (laneLabel === "opentable" ? 28_000 : 22_000) - elapsedSinceStart;
           if (wallBudgetLeftMs < 10_000) {
             console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (only ${wallBudgetLeftMs}ms budget left)`);
             return null;
