@@ -2187,14 +2187,14 @@ async function verifyAvailability(
         // budget left, and we use a tighter timeout on the retry.
         if (resp.status === 408) {
           const elapsedSinceStart = globalStartTime ? Date.now() - globalStartTime : 0;
-          const wallBudgetLeftMs = (laneLabel === "opentable" ? 28_000 : 22_000) - elapsedSinceStart;
+          const wallBudgetLeftMs = (laneLabel === "opentable" ? 24_000 : 20_000) - elapsedSinceStart;
           if (wallBudgetLeftMs < 10_000) {
             console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (only ${wallBudgetLeftMs}ms budget left)`);
             return null;
           }
           console.log(`Scrape 408 for ${r.name} [${r.platform}] — retrying once`);
           const retryAbort = new AbortController();
-          const retryTimer = setTimeout(() => retryAbort.abort(), isOT ? 14_000 : 9_000);
+          const retryTimer = setTimeout(() => retryAbort.abort(), isOT ? 12_000 : 8_000);
           await acquireFirecrawlSlot();
           try {
             try {
