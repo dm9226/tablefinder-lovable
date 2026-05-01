@@ -475,9 +475,9 @@ serve(async (req) => {
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-              console.warn("AI enrichment timed out at 6s — returning without enrichment");
+                console.warn("AI enrichment timed out at 10s — returning without enrichment");
               resolve(new Map<number, any>());
-            }, 6_000),
+              }, 10_000),
           ),
         ]);
 
