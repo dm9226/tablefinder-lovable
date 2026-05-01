@@ -2071,9 +2071,13 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          timeout: isOT ? 18000 : isYelp ? 12000 : 10000,
-          ...(isOT && { waitFor: 5000 }),
+          // Firecrawl-side timeout. Resy pages render their availability widget
+          // client-side so they need a real budget too — earlier 9–10s caused mass
+          // 408s. OT widgets are heaviest and need a small JS settle period.
+          timeout: isOT ? 20000 : isYelp ? 15000 : 14000,
+          ...(isOT && { waitFor: 4000 }),
           ...(isYelp && { waitFor: 2500 }),
+          ...(!isOT && !isYelp && { waitFor: 1500 }),
         };
 
       let markdown = "";
@@ -2089,7 +2093,7 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(
           () => scrapeAbort.abort(),
-          isOT ? 22_000 : isYelp ? 15_000 : 12_000,
+          isOT ? 24_000 : isYelp ? 18_000 : 17_000,
         );
         let resp: Response;
         try {
