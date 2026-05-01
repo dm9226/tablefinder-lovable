@@ -198,8 +198,9 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Global timeout: return partial results before the hard 150s edge function limit
-  const GLOBAL_TIMEOUT_MS = 120_000;
+  // Global timeout: hard ceiling on initial response so the UI never hangs.
+  // Verification stops at the lane budget (see verifyAvailability) well before this.
+  const GLOBAL_TIMEOUT_MS = 38_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
@@ -331,8 +332,8 @@ serve(async (req) => {
       console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
     }
 
-    // Discovery with early termination: if it takes >40s, use whatever we have
-    const DISCOVERY_TIMEOUT_MS = 45_000;
+    // Discovery with early termination: short ceiling so verification gets the budget
+    const DISCOVERY_TIMEOUT_MS = 8_000;
     const discoveryPromises = adapters.map(a => a.discover(params, keys, amenityTerms));
     const discoveryTimer = new Promise<null>(resolve => setTimeout(() => resolve(null), DISCOVERY_TIMEOUT_MS));
     
@@ -368,8 +369,10 @@ serve(async (req) => {
     // Bigger budget so Resy can be over-allocated (it's the most reliable provider) while
     // OT/Yelp still get a real shot. Initial verification has a hard wall-time deadline below,
     // so we don't actually pay for all of these unless they verify quickly.
+    // Smaller candidate cap — verification is the bottleneck, not discovery.
+    // Over-allocating just burns the wall-clock budget on scrapes we'll abandon.
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 20 : 26;
+    const maxCandidates = isVagueQuery ? 12 : 16;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -413,7 +416,7 @@ serve(async (req) => {
     // Skip AI enrichment if verification burned most of our budget; verified results
     // are still returned, just without AI-derived descriptions/vibe tags/coordinates.
     const elapsed = Date.now() - startTime;
-    const skipEnrichment = elapsed > 95_000;
+    const skipEnrichment = elapsed > 32_000;
     if (skipEnrichment) {
       console.warn(`Skipping AI enrichment — already ${elapsed}ms elapsed`);
     }
@@ -425,9 +428,9 @@ serve(async (req) => {
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-              console.warn("AI enrichment timed out at 5s — returning without enrichment");
+              console.warn("AI enrichment timed out at 4s — returning without enrichment");
               resolve(new Map<number, any>());
-            }, 5_000),
+            }, 4_000),
           ),
         ]);
 
@@ -491,6 +494,13 @@ serve(async (req) => {
     clearTimeout(globalTimer);
     const hasMore = remainingAfterSelection.length > 0;
     console.log(`[RESPONSE] ${finalResults.length} results, hasMore=${hasMore} (${remainingAfterSelection.length} remaining candidates)`);
+    {
+      const elapsedMs = Date.now() - startTime;
+      const cand = adapters.map((a, i) => `${a.platform}=${discovered[i]?.length ?? 0}`).join(",");
+      const sel = ["resy","opentable","yelp"].map(p => `${p}=${selected.filter(c=>c.platform===p).length}`).join(",");
+      const ver = ["resy","opentable","yelp"].map(p => `${p}=${verified.filter(c=>c.platform===p).length}`).join(",");
+      console.log(`[SEARCH_SUMMARY] elapsedMs=${elapsedMs} candidates{${cand}} selected{${sel}} verified{${ver}} returned=${finalResults.length} hasMore=${hasMore}`);
+    }
     try {
       const responseBody = JSON.stringify({
         results: finalResults,
@@ -514,7 +524,7 @@ serve(async (req) => {
 
     // If global timeout fired, return empty results gracefully
     if (globalAbort.signal.aborted) {
-      console.error("Global timeout reached (120s) — returning empty results");
+      console.error(`Global timeout reached (${GLOBAL_TIMEOUT_MS}ms) — returning empty results`);
       return new Response(
         JSON.stringify({ results: [], params: {}, cached: false, error: "Search timed out. Please try a more specific query." }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -2078,12 +2088,12 @@ async function verifyAvailability(
   // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
   // Lane-aware batching: OT pages take longer to render, so use smaller concurrent
   // batches to avoid hammering Firecrawl. Resy/Yelp can go wider.
-  const BATCH_SIZE = laneLabel === "opentable" ? 2 : laneLabel === "yelp" ? 3 : 4;
+  const BATCH_SIZE = laneLabel === "opentable" ? 3 : laneLabel === "yelp" ? 3 : 4;
   // Lane-aware verified-target: each lane stops scraping once it has enough wins.
-  const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 5 : 6;
-  // Lane-aware wall-clock budget. Lanes run in parallel so each one gets the
-  // full budget independently. OT gets the most because its pages are slowest.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 90_000 : 38_000;
+  const LANE_TARGET = laneLabel === "opentable" ? 4 : laneLabel === "yelp" ? 3 : 6;
+  // Strict wall-clock budget per lane. Lanes run in parallel; this cap is what
+  // keeps the total search under the global ceiling.
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 28_000 : 22_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Lane-local early exit: stop once this lane has hit its useful target.
@@ -2115,13 +2125,13 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: false,
-          // OpenTable: Akamai blocks normal scrapes — must use Firecrawl's
-          // stealth proxy. Stealth requests take ~20-30s to render past the
-          // bot challenge but reliably return the full booking widget.
-          timeout: isOT ? 50000 : isYelp ? 15000 : 14000,
-          ...(isOT && { waitFor: 6000, proxy: "stealth" }),
-          ...(isYelp && { waitFor: 2500 }),
-          ...(!isOT && !isYelp && { waitFor: 1500 }),
+          // OT needs stealth to render the time-slot widget past Akamai. Keep
+          // the timeout tight (no 50s waits, no retry) so failures don't blow
+          // the lane budget; the lane scheduler moves on to the next batch.
+          timeout: isOT ? 22000 : isYelp ? 12000 : 12000,
+          ...(isOT && { waitFor: 5000, proxy: "stealth" }),
+          ...(isYelp && { waitFor: 2000 }),
+          ...(!isOT && !isYelp && { waitFor: 1200 }),
         };
 
       let markdown = "";
@@ -2137,7 +2147,7 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(
           () => scrapeAbort.abort(),
-          isOT ? 55_000 : isYelp ? 18_000 : 17_000,
+          isOT ? 24_000 : isYelp ? 14_000 : 14_000,
         );
         // Acquire a slot on the global Firecrawl semaphore before firing the request.
         // This prevents the parallel lanes from saturating Firecrawl with too many
@@ -2169,40 +2179,11 @@ async function verifyAvailability(
         }
         clearTimeout(scrapeTimer);
 
-        // On 408 timeout for OT (stealth scrape), retry once with simpler payload.
-        // For Resy/Yelp the budget doesn't justify a retry.
+        // No retry on 408 — the long retry path was the main source of 60-120s
+        // hangs. Accept the loss; the lane budget moves us on to the next batch.
         if (resp.status === 408) {
-          const errBody408 = await resp.text().catch(() => "(no body)");
-          console.log(`Scrape failed (408) for ${r.name} [${r.platform}]: ${errBody408.slice(0, 200)}`);
-          if (!isOT) return null;
-          console.log(`Retrying OT scrape once for ${r.name}...`);
-          await acquireFirecrawlSlot();
-          const retryAbort = new AbortController();
-          const retryTimer = setTimeout(() => retryAbort.abort(), 50_000);
-          try {
-            try {
-              resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${firecrawlKey}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ ...scrapePayload, waitFor: 4000, timeout: 45000 }),
-                signal: retryAbort.signal,
-              });
-            } catch (retryErr: any) {
-              clearTimeout(retryTimer);
-              console.log(`OT retry failed for ${r.name}: ${retryErr.name === "AbortError" ? "timeout" : retryErr}`);
-              return null;
-            }
-          } finally {
-            releaseFirecrawlSlot();
-          }
-          clearTimeout(retryTimer);
-          if (!resp.ok) {
-            console.log(`OT retry non-OK (${resp.status}) for ${r.name}`);
-            return null;
-          }
+          console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
+          return null;
         }
 
         if (!resp.ok) {
