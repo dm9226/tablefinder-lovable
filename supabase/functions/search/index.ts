@@ -332,8 +332,8 @@ serve(async (req) => {
       console.log(`Amenity relevance filter active for: ${amenityTerms.join(", ")}`);
     }
 
-    // Discovery with early termination: if it takes >40s, use whatever we have
-    const DISCOVERY_TIMEOUT_MS = 45_000;
+    // Discovery with early termination: short ceiling so verification gets the budget
+    const DISCOVERY_TIMEOUT_MS = 8_000;
     const discoveryPromises = adapters.map(a => a.discover(params, keys, amenityTerms));
     const discoveryTimer = new Promise<null>(resolve => setTimeout(() => resolve(null), DISCOVERY_TIMEOUT_MS));
     
