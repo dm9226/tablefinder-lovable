@@ -206,7 +206,30 @@ serve(async (req) => {
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
 
-  try {
+  // Hard wall-clock ceiling on the entire handler. Many downstream fetches
+  // (Lovable AI, Nominatim, Firecrawl search/retry, enrichment) do not yet
+  // accept an AbortSignal. Without this race the function can sit waiting
+  // on an upstream hang until edge-runtime kills it at 150s (IDLE_TIMEOUT).
+  // 36s = global deadline (33s) + 3s grace for in-flight cleanup.
+  const HANDLER_HARD_CEILING_MS = 36_000;
+  const hardCeilingResponse = new Promise<Response>((resolve) => {
+    setTimeout(() => {
+      console.error(`[HARD_CEILING] handler exceeded ${HANDLER_HARD_CEILING_MS}ms — returning empty results`);
+      resolve(new Response(
+        JSON.stringify({
+          results: [],
+          params: {},
+          cached: false,
+          hasMore: false,
+          error: "Search took too long. Please try a more specific query (city + cuisine + time).",
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      ));
+    }, HANDLER_HARD_CEILING_MS);
+  });
+
+  const work = (async (): Promise<Response> => {
+   try {
     const body = await req.json();
     const { query, lat, lng, location, extended, remainingCandidates: incomingCandidates, extendedParams } = body;
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
@@ -575,6 +598,9 @@ serve(async (req) => {
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
+  })();
+
+  return await Promise.race([work, hardCeilingResponse]);
 });
 
 // ─── Query parsing ───
