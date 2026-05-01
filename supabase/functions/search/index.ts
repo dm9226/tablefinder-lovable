@@ -355,12 +355,19 @@ serve(async (req) => {
     const selectedIds = new Set(selected.map(r => r.name + r.platform));
     const remainingAfterSelection = allCandidates.filter(c => !selectedIds.has(c.name + c.platform));
 
-    let verified = (await Promise.all(
-      adapters.map(a => a.verify(
-        selected.filter(c => c.platform === a.platform),
-        params, keys, amenityTerms
-      ))
-    )).flat();
+    // Verify all providers through a SINGLE shared queue so one provider
+    // (especially OpenTable, frequently Akamai-blocked) can't starve the
+    // verification budget for Resy/Yelp. Resy candidates go first because
+    // they verify fastest and most reliably, so the early-exit check fires
+    // on real wins rather than slow OT timeouts.
+    const orderedSelected = [
+      ...selected.filter(c => c.platform === "resy"),
+      ...selected.filter(c => c.platform === "yelp"),
+      ...selected.filter(c => c.platform === "opentable"),
+    ];
+    let verified = await verifyAvailability(
+      orderedSelected, params, keys.firecrawlKey, amenityTerms, keys._startTime,
+    );
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
