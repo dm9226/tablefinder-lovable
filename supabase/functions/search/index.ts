@@ -530,10 +530,10 @@ serve(async (req) => {
     // clicking it lands the user on the live Yelp widget where availability is
     // shown by Yelp directly. Surface up to 3 of these candidates as
     // soft-verified entries so Yelp is never silently absent.
-    if (laneCounts.yelp < 2 && yelpCands.length > 0) {
+    if (laneCounts.yelp < 3 && yelpCands.length > 0) {
       const softYelp = yelpCands
         .filter(c => /yelp\.com\/reservations\//i.test(c.platformUrl))
-        .slice(0, 3)
+        .slice(0, 5)
         .map(c => ({
           ...c,
           timeSlots: [],
@@ -551,10 +551,10 @@ serve(async (req) => {
     // bookable restaurant and the deep link carries date/time/party params, so
     // clicking it lands the user on the live OT booking widget. Surface up to 3
     // discovery-only candidates so OT is never silently absent.
-    if (laneCounts.opentable < 2 && otCands.length > 0) {
+    if (laneCounts.opentable < 3 && otCands.length > 0) {
       const softOT = otCands
         .filter(c => /opentable\.(com|co\.uk)\/(r|restaurant)\//i.test(c.platformUrl))
-        .slice(0, 3)
+        .slice(0, 5)
         .map(c => ({
           ...c,
           timeSlots: [],
@@ -563,6 +563,24 @@ serve(async (req) => {
       if (softOT.length > 0) {
         console.log(`[OT_SOFT] surfacing ${softOT.length} discovery-only OpenTable candidates (verification failed)`);
         verified = verified.concat(softOT);
+      }
+    }
+    // ── Resy soft-fallback ──
+    // Resy scrapes are usually fast & reliable, but when Firecrawl is having
+    // a bad day the lane can still come up short. Surface up to 5 discovery
+    // candidates so the user always sees Resy options when they exist.
+    if (laneCounts.resy < 3 && resyCands.length > 0) {
+      const softResy = resyCands
+        .filter(c => /resy\.com\/cities\//i.test(c.platformUrl))
+        .slice(0, 5)
+        .map(c => ({
+          ...c,
+          timeSlots: [],
+          _softVerified: true,
+        } as Restaurant));
+      if (softResy.length > 0) {
+        console.log(`[RESY_SOFT] surfacing ${softResy.length} discovery-only Resy candidates`);
+        verified = verified.concat(softResy);
       }
     }
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
