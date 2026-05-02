@@ -1,58 +1,69 @@
-## Diagnosis
+## Goal
 
-The latest "dinner Wednesday" search shows the new concurrency settings are working — but the bottleneck has moved upstream to **candidate selection**, not scraping speed.
+Get the initial result count up by attacking the Firecrawl 408 problem from three angles simultaneously: faster scrapes, a failover scraper, and more lenient surfacing of unverified-but-discovered candidates.
 
-From the logs:
-```
-candidates  {resy=21, opentable=17, yelp=24}   ← 62 discovered
-selected    {resy=5,  opentable=4,  yelp=3}    ← only 12 verified (cap)
-verified    {resy=2,  opentable=3,  yelp=1}    ← 6 returned initially
-[EXTENDED] Verified: 10/18                      ← 16 total after auto-extend
-elapsedMs=27341                                 ← 27s, well under budget
-```
+## Changes to `supabase/functions/search/index.ts`
 
-You discovered **62 viable candidates** but only verified **12** on the initial pass because of an explicit cap (`maxCandidates = 12` for vague queries like "dinner Wednesday"). The remaining 50 sit on the bench. Auto-extend then verifies 18 more — but that takes another ~10s and the user sees the small initial list first.
+### 1. Tighten Firecrawl scrape parameters (Option 1)
 
-The cap exists to protect the 22s lane wall-clock, but with the new concurrency (14 in-flight scrapes, larger batch sizes), each lane can chew through more candidates per wave. We're leaving headroom on the table.
+Per-lane tuning:
 
-## Plan
+- **Resy verification scrapes**: `waitFor` 3.5s → 2s, `onlyMainContent: true`
+- **Yelp verification scrapes**: `waitFor` 3.5s → 2s, `onlyMainContent: true`
+- **OpenTable verification scrapes**: keep `waitFor` 3.5s (widget needs it), but add `onlyMainContent: true` to reduce payload
+- Drop client-side AbortController timeouts proportionally (Resy/Yelp: 20s → 14s; OT stays 20s)
 
-Three small changes to `supabase/functions/search/index.ts`:
+Rationale: Resy and Yelp render booking widgets faster than OT. Smaller payloads + shorter waits should drop p50 scrape time from ~6–8s to ~3–4s, allowing more candidates per wave inside the same lane budget.
 
-### 1. Raise the initial candidate cap
-- Vague queries: `12 → 20`
-- Specific queries (cuisine/dish): `16 → 24`
+### 2. Multi-scraper failover (Option 2)
 
-This moves Resy/OT/Yelp selection from `5/4/3` to roughly `8/7/5` per lane — well within the now-larger batch sizes (Resy=6, OT=4, Yelp=5), so they fit in 1–2 waves per lane.
+Add a `scrapeWithFailover(url, opts)` helper that:
 
-### 2. Slightly extend lane wall-clocks
-- Resy: `22s → 26s`
-- Yelp: `22s → 26s`
-- OpenTable: stays `26s`
+1. Tries Firecrawl first (existing path).
+2. On `408`, `AbortError`, or `5xx`, retries the same URL via **Steel** (`STEEL_API_KEY` already configured) using their scrape endpoint, returning markdown.
+3. If Steel also fails, falls back to **Browserbase** (`BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` already configured) as a last resort — only for OpenTable, since it's the most blocked.
+4. Each failover hop has its own 12s timeout to avoid blowing the lane budget.
+5. Logs which provider succeeded so we can monitor mix.
 
-Total budget still well under the 120s global timeout, and 4 extra seconds = 1 more verification wave for the slow lane.
+Wire this helper into the existing `verifyResy`, `verifyOpenTable`, and `verifyYelp` paths, replacing direct Firecrawl calls.
 
-### 3. Lower the bar for surfacing the soft-verified Yelp fallback
-Currently Yelp soft-fallback only fires when verification returns 0. Change it to also fire when verified < 2 — Yelp DataDome blocks are still common, and discovery alone is a strong signal.
+### 3. Relax soft-fallback surfacing (Option 3)
+
+Currently:
+- Yelp soft-fallback fires when `verified < 2`
+- OT soft-fallback fires when `verified < 2`
+- Resy has no soft-fallback
+
+Change to:
+- All three lanes get soft-fallback when `verified < 3`
+- Increase soft-fallback cap from 3 → 5 per lane
+- Add `_softVerified: true` flag (already present for OT/Yelp) on Resy soft results
+
+### 4. UI: badge for soft-verified results
+
+In `src/components/RestaurantCard.tsx`:
+
+- Add a small "availability not confirmed — tap to check" badge when `restaurant._softVerified === true` and `timeSlots.length === 0`
+- Use muted styling (border + muted-foreground text) so it doesn't compete with verified results visually
+- Replace the existing Yelp-specific copy with a platform-agnostic version
 
 ## Expected outcome
 
-For a generic "dinner Wednesday" query:
-- Initial pass: **~12–16 verified results** (up from 6)
-- Total wall-clock: ~30–34s (up from 27s, still comfortable)
-- Auto-extend still runs to fill in another 6–8 results, ending around **20+ total**
+- Initial pass: **15–20+ verified-or-soft results** for a generic query (vs current 8)
+- Wall-clock: similar (~30–35s) since failover is bounded
+- User clearly sees which results have confirmed times vs which need a tap-through
 
-## What stays the same
+## Risk / cost
 
-- No caching (per your rule)
-- No new providers / no new APIs
-- Auto-extend behavior unchanged
-- Global 120s timeout, 14-concurrent Firecrawl cap unchanged
-
-## Risk
-
-Slightly higher Firecrawl spend per search (verifying 20 instead of 12). Most are fast scrapes; the wall-clock guard still prevents runaway cost. If spend climbs uncomfortably, we can dial the cap back to 16.
+- Steel and Browserbase calls add cost only on Firecrawl failures (currently ~70% on OT) — bounded by lane budgets
+- If Steel/Browserbase also rate-limit, we're no worse off than today
 
 ## Files to change
 
-- `supabase/functions/search/index.ts` — cap constants (line ~416), lane deadlines (lines ~454–456), Yelp soft-fallback threshold (search for `Yelp soft-fallback`)
+- `supabase/functions/search/index.ts` — scrape params, failover helper, soft-fallback thresholds
+- `src/components/RestaurantCard.tsx` — soft-verified badge
+
+## Memory updates after build
+
+- Update `mem://features/yelp-soft-fallback` → rename to `soft-fallback` and document it now applies to all three lanes
+- Add `mem://integrations/scraper-failover` documenting Firecrawl → Steel → Browserbase chain
