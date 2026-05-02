@@ -2182,19 +2182,17 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
-    // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts).
-  // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
-  // Lane-aware batching: OT pages take longer to render, so use smaller concurrent
-  // batches to avoid hammering Firecrawl. Resy/Yelp can go wider.
-  // Wider per-lane batches so each lane's full candidate set fires in roughly
-  // one wave. Slow tail scrapes overlap with fast ones instead of serializing
-  // behind the previous batch — critical when Firecrawl latency is volatile.
-  const BATCH_SIZE = laneLabel === "opentable" ? 4 : laneLabel === "yelp" ? 5 : 6;
-  // Lane-aware verified-target: each lane stops scraping once it has enough wins.
-  const LANE_TARGET = laneLabel === "opentable" ? 4 : laneLabel === "yelp" ? 3 : 6;
-  // Strict wall-clock budget per lane. Lanes run in parallel; this cap is what
-  // keeps the total search under the global ceiling. Tightened so enrichment
-  // has a real ~6s window inside the 33s global ceiling.
+  // Now that retries and Steel/Browserbase failovers are removed, each candidate
+  // either succeeds (~3–15s) or fails fast (≤14s scrape timeout). That means we
+  // can fire the entire lane's candidate set in one or two big waves — slow tail
+  // scrapes overlap with fast ones inside the budget instead of serializing
+  // behind 12s failover hops. The global Firecrawl semaphore (FIRECRAWL_MAX_
+  // CONCURRENT_SCRAPES) still prevents us from hammering the API.
+  const BATCH_SIZE = laneLabel === "opentable" ? 8 : 10;
+  // Per-lane verified target — stop once we've got enough confirmed results.
+  const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 4 : 6;
+  // Wall-clock budget per lane (parallel). Slightly under the lane deadline
+  // race in handler so the inner guard fires before the outer abort.
   const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 30_000 : 24_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
