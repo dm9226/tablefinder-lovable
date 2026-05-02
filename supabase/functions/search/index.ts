@@ -10,74 +10,24 @@ const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
 // Yelp discovery now uses Firecrawl scraping instead of the Fusion API
 
-// ─── Scraper failover (Firecrawl → Steel → Browserbase) ───
-// Firecrawl 408s on ~70% of OT scrapes and is a frequent cause of empty
-// initial result sets. When Firecrawl returns 408 / 5xx / aborts, we retry
-// the same URL via Steel (cheap headless browser) and, for OT only, fall
-// back to Browserbase as a last resort. Each hop is bounded to ~12s so a
-// single bad URL can never blow the lane budget.
-async function scrapeViaSteel(url: string, waitMs: number): Promise<string> {
-  const key = Deno.env.get("STEEL_API_KEY");
-  if (!key) return "";
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12_000);
-  try {
-    const resp = await fetch("https://api.steel.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        "Steel-Api-Key": key,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url,
-        format: ["markdown"],
-        delay: Math.min(waitMs, 4000),
-      }),
-      signal: ctrl.signal,
-    });
-    if (!resp.ok) return "";
-    const data = await resp.json().catch(() => null);
-    return data?.content?.markdown || data?.markdown || "";
-  } catch {
-    return "";
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function scrapeViaBrowserbase(url: string): Promise<string> {
-  const key = Deno.env.get("BROWSERBASE_API_KEY");
-  const project = Deno.env.get("BROWSERBASE_PROJECT_ID");
-  if (!key || !project) return "";
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12_000);
-  try {
-    // Browserbase exposes a simple "extract" wrapper that returns page text.
-    const resp = await fetch("https://api.browserbase.com/v1/extract", {
-      method: "POST",
-      headers: {
-        "X-BB-API-Key": key,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ projectId: project, url, format: "markdown" }),
-      signal: ctrl.signal,
-    });
-    if (!resp.ok) return "";
-    const data = await resp.json().catch(() => null);
-    return data?.markdown || data?.content || "";
-  } catch {
-    return "";
-  } finally {
-    clearTimeout(timer);
-  }
-}
+// ─── Scraper strategy ───
+// Verification uses Firecrawl exclusively. Prior Steel/Browserbase failovers
+// were removed because production logs proved they returned anti-bot stubs
+// (200–2000 chars, no widget) for OT/Resy and consumed the lane budget for
+// nothing. The verification-rule is strict: every returned result MUST have
+// real time-slot evidence scraped from the live booking page. If Firecrawl
+// can't render a page within budget, we simply skip that candidate — never
+// surface unverified results.
 
 // ─── Global Firecrawl scrape concurrency limiter ───
 // Lanes run in parallel (Resy + OT + Yelp). The cap prevents one slow lane
 // from starving the others when Firecrawl is healthy. Raised to 14 so that
 // when individual scrapes get stuck on slow Firecrawl tail latency, fast
 // scrapes still have free slots and the lane budget isn't wasted serializing.
-const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 14;
+// Firecrawl free/standard plans cap concurrent scrapes per account. Sending
+// too many at once produces a 408 storm where every scrape times out at the
+// SAME wall-clock second (verified in production logs). Keep this conservative.
+const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 6;
 let _firecrawlInFlight = 0;
 const _firecrawlWaiters: Array<() => void> = [];
 async function acquireFirecrawlSlot(): Promise<void> {
@@ -238,7 +188,6 @@ interface Restaurant {
   _yelpCategories?: string; // transient: Yelp API category text for cuisine relevance bypass
   _yelpCrossplatformGuess?: boolean; // transient: true if URL was guessed from name (not from link)
   _yelpSearchVerified?: boolean; // transient: true if time slots came from Yelp search results page (skip individual verification)
-  _softVerified?: boolean; // surfaced from discovery without booking-page scrape (Yelp DataDome fallback)
 }
 
 // ─── Provider Adapter Interface ───
@@ -474,8 +423,13 @@ serve(async (req) => {
     // so we don't actually pay for all of these unless they verify quickly.
     // Smaller candidate cap — verification is the bottleneck, not discovery.
     // Over-allocating just burns the wall-clock budget on scrapes we'll abandon.
+    // With Firecrawl semaphore=6 and ~12s/scrape p50, we can realistically
+    // verify ~12 candidates in 24s of budget. Selecting more than we can
+    // finish just produces 408s (Firecrawl queues them, then times out the
+    // tail). Smaller selection = higher verified count, less wasted budget.
+    // Excess discovered candidates flow to extended search.
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 20 : 24;
+    const maxCandidates = isVagueQuery ? 12 : 14;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -512,6 +466,9 @@ serve(async (req) => {
           }, ms),
         ),
       ]);
+    // Outer deadline = inner LANE_TIME_BUDGET_MS + 2s grace so the inner
+    // guard fires first and returns accumulated results cleanly. The outer
+    // race only triggers if the lane is somehow stuck past its own budget.
     const laneResults = await Promise.all([
       laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 26_000, "resy"),
       laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   32_000, "opentable"),
@@ -2236,19 +2193,17 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
-    // Run scrapes in small batches to avoid overwhelming Firecrawl (prevents mass timeouts).
-  // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
-  // Lane-aware batching: OT pages take longer to render, so use smaller concurrent
-  // batches to avoid hammering Firecrawl. Resy/Yelp can go wider.
-  // Wider per-lane batches so each lane's full candidate set fires in roughly
-  // one wave. Slow tail scrapes overlap with fast ones instead of serializing
-  // behind the previous batch — critical when Firecrawl latency is volatile.
-  const BATCH_SIZE = laneLabel === "opentable" ? 4 : laneLabel === "yelp" ? 5 : 6;
-  // Lane-aware verified-target: each lane stops scraping once it has enough wins.
-  const LANE_TARGET = laneLabel === "opentable" ? 4 : laneLabel === "yelp" ? 3 : 6;
-  // Strict wall-clock budget per lane. Lanes run in parallel; this cap is what
-  // keeps the total search under the global ceiling. Tightened so enrichment
-  // has a real ~6s window inside the 33s global ceiling.
+  // Each candidate either succeeds (~3–15s) or fails fast (≤14s scrape timeout).
+  // Batch size is the per-lane concurrency; the global Firecrawl semaphore
+  // (FIRECRAWL_MAX_CONCURRENT_SCRAPES = 6) is the real cap across all lanes.
+  // Keep batches modest: too wide → Firecrawl 408 storm (every scrape times
+  // out at the same second). Each lane fires 3–4 in parallel; semaphore
+  // serializes the rest.
+  const BATCH_SIZE = 4;
+  // Per-lane verified target — stop once we've got enough confirmed results.
+  const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 4 : 6;
+  // Wall-clock budget per lane (parallel). Slightly under the lane deadline
+  // race in handler so the inner guard fires before the outer abort.
   const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 30_000 : 24_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
@@ -2335,82 +2290,27 @@ async function verifyAvailability(
         }
         clearTimeout(scrapeTimer);
 
-        // 408 from Firecrawl = their scrape worker timed out, not that the page
-        // is broken. A single fast retry recovers most of these without blowing
-        // the lane budget. We only retry if we still have ≥10s of wall-clock
-        // budget left, and we use a tighter timeout on the retry.
-         if (resp.status === 408) {
-           const elapsedSinceStart = globalStartTime ? Date.now() - globalStartTime : 0;
-           const wallBudgetLeftMs = (laneLabel === "opentable" ? 30_000 : 24_000) - elapsedSinceStart;
-           if (wallBudgetLeftMs < 5_000) {
-            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (only ${wallBudgetLeftMs}ms budget left)`);
-            return null;
+        // Firecrawl 408 / non-OK = give up on this candidate. Retries and
+        // alternate providers were removed: production data showed they
+        // either returned anti-bot stubs (failovers) or fired with negative
+        // budget (retries), wasting the lane budget. A clean skip here lets
+        // the next batch start sooner and improves total verified count.
+        if (resp.status === 408 || !resp.ok) {
+          if (resp.status !== 408) {
+            const errBody = await resp.text().catch(() => "(no body)");
+            console.log(`Scrape ${resp.status} for ${r.name} [${r.platform}]: ${errBody.slice(0, 200)}`);
+          } else {
+            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
           }
-          console.log(`Scrape 408 for ${r.name} [${r.platform}] — retrying once`);
-          const retryAbort = new AbortController();
-          const retryTimer = setTimeout(() => retryAbort.abort(), isOT ? 12_000 : 8_000);
-          await acquireFirecrawlSlot();
-          try {
-            try {
-              resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${firecrawlKey}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  ...scrapePayload,
-                  timeout: isOT ? 12000 : 8000,
-                }),
-                signal: retryAbort.signal,
-              });
-            } catch (retryErr: any) {
-              clearTimeout(retryTimer);
-              console.log(`Scrape retry failed for ${r.name} [${r.platform}]: ${retryErr?.name || retryErr}`);
-              return null;
-            }
-          } finally {
-            releaseFirecrawlSlot();
-          }
-          clearTimeout(retryTimer);
-          if (resp.status === 408 || !resp.ok) {
-            console.log(`Scrape retry got ${resp.status} for ${r.name} [${r.platform}] — failing over to Steel`);
-            const steelMd = await scrapeViaSteel(r.platformUrl, isOT ? 3500 : 1500);
-            if (steelMd && steelMd.length > 200) {
-              console.log(`[FAILOVER] Steel succeeded for ${r.name} [${r.platform}] (${steelMd.length} chars)`);
-              markdown = steelMd;
-              data = { data: { markdown: steelMd } };
-            } else if (isOT) {
-              const bbMd = await scrapeViaBrowserbase(r.platformUrl);
-              if (bbMd && bbMd.length > 200) {
-                console.log(`[FAILOVER] Browserbase succeeded for ${r.name} [${r.platform}] (${bbMd.length} chars)`);
-                markdown = bbMd;
-                data = { data: { markdown: bbMd } };
-              } else {
-                console.log(`[FAILOVER] All providers failed for ${r.name} [${r.platform}]`);
-                return null;
-              }
-            } else {
-              console.log(`[FAILOVER] Steel failed for ${r.name} [${r.platform}], no further fallback`);
-              return null;
-            }
-          }
-        }
-
-        if (!markdown && !resp.ok) {
-          const errBody = await resp.text().catch(() => "(no body)");
-          console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
           return null;
         }
 
-        if (!markdown) {
-          // Normal Firecrawl success path
-          data = await resp.json();
-          markdown = extractFirecrawlMarkdown(data);
-          html = extractFirecrawlHtml(data);
-          links = extractFirecrawlLinks(data);
-          jsonData = data?.data?.extract || data?.extract;
-        }
+        // Success path: parse Firecrawl response.
+        data = await resp.json();
+        markdown = extractFirecrawlMarkdown(data);
+        html = extractFirecrawlHtml(data);
+        links = extractFirecrawlLinks(data);
+        jsonData = data?.data?.extract || data?.extract;
       }
 
       if (!markdown && !html && !jsonData) {
