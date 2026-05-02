@@ -2188,13 +2188,13 @@ async function verifyAvailability(
 ): Promise<Restaurant[]> {
    if (candidates.length === 0) return [];
 
-  // Now that retries and Steel/Browserbase failovers are removed, each candidate
-  // either succeeds (~3–15s) or fails fast (≤14s scrape timeout). That means we
-  // can fire the entire lane's candidate set in one or two big waves — slow tail
-  // scrapes overlap with fast ones inside the budget instead of serializing
-  // behind 12s failover hops. The global Firecrawl semaphore (FIRECRAWL_MAX_
-  // CONCURRENT_SCRAPES) still prevents us from hammering the API.
-  const BATCH_SIZE = laneLabel === "opentable" ? 8 : 10;
+  // Each candidate either succeeds (~3–15s) or fails fast (≤14s scrape timeout).
+  // Batch size is the per-lane concurrency; the global Firecrawl semaphore
+  // (FIRECRAWL_MAX_CONCURRENT_SCRAPES = 6) is the real cap across all lanes.
+  // Keep batches modest: too wide → Firecrawl 408 storm (every scrape times
+  // out at the same second). Each lane fires 3–4 in parallel; semaphore
+  // serializes the rest.
+  const BATCH_SIZE = 4;
   // Per-lane verified target — stop once we've got enough confirmed results.
   const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 4 : 6;
   // Wall-clock budget per lane (parallel). Slightly under the lane deadline
