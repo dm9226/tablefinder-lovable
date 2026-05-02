@@ -423,8 +423,13 @@ serve(async (req) => {
     // so we don't actually pay for all of these unless they verify quickly.
     // Smaller candidate cap — verification is the bottleneck, not discovery.
     // Over-allocating just burns the wall-clock budget on scrapes we'll abandon.
+    // With Firecrawl semaphore=6 and ~12s/scrape p50, we can realistically
+    // verify ~12 candidates in 24s of budget. Selecting more than we can
+    // finish just produces 408s (Firecrawl queues them, then times out the
+    // tail). Smaller selection = higher verified count, less wasted budget.
+    // Excess discovered candidates flow to extended search.
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 20 : 24;
+    const maxCandidates = isVagueQuery ? 12 : 14;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
