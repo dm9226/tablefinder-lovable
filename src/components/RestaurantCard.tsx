@@ -116,11 +116,6 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
             )}
           </div>
         )}
-        {slots.length === 0 && restaurant._softVerified && (
-          <span className="inline-flex items-center self-start px-1.5 py-0.5 rounded border border-border text-[11px] font-body text-muted-foreground">
-            Availability not confirmed — tap to check
-          </span>
-        )}
       </div>
     </button>
   );
