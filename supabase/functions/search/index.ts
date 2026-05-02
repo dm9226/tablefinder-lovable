@@ -11,11 +11,11 @@ const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
 // Yelp discovery now uses Firecrawl scraping instead of the Fusion API
 
 // ─── Global Firecrawl scrape concurrency limiter ───
-// Lanes run in parallel (Resy + OT + Yelp), so without this cap we'd fire
-// up to ~13 simultaneous scrape requests at Firecrawl, which immediately
-// triggers a wave of 408 timeouts. Hold total in-flight scrapes to a sane
-// number so each request gets enough resources to actually complete.
-const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 8;
+// Lanes run in parallel (Resy + OT + Yelp). The cap prevents one slow lane
+// from starving the others when Firecrawl is healthy. Raised to 14 so that
+// when individual scrapes get stuck on slow Firecrawl tail latency, fast
+// scrapes still have free slots and the lane budget isn't wasted serializing.
+const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 14;
 let _firecrawlInFlight = 0;
 const _firecrawlWaiters: Array<() => void> = [];
 async function acquireFirecrawlSlot(): Promise<void> {
@@ -2196,7 +2196,10 @@ async function verifyAvailability(
   // Larger batches let Resy's fast scrapes complete quickly while OT renders in parallel.
   // Lane-aware batching: OT pages take longer to render, so use smaller concurrent
   // batches to avoid hammering Firecrawl. Resy/Yelp can go wider.
-  const BATCH_SIZE = laneLabel === "opentable" ? 3 : laneLabel === "yelp" ? 3 : 4;
+  // Wider per-lane batches so each lane's full candidate set fires in roughly
+  // one wave. Slow tail scrapes overlap with fast ones instead of serializing
+  // behind the previous batch — critical when Firecrawl latency is volatile.
+  const BATCH_SIZE = laneLabel === "opentable" ? 4 : laneLabel === "yelp" ? 5 : 6;
   // Lane-aware verified-target: each lane stops scraping once it has enough wins.
   const LANE_TARGET = laneLabel === "opentable" ? 4 : laneLabel === "yelp" ? 3 : 6;
   // Strict wall-clock budget per lane. Lanes run in parallel; this cap is what
@@ -2256,7 +2259,7 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
         const scrapeTimer = setTimeout(
           () => scrapeAbort.abort(),
-          isOT ? 24_000 : isYelp ? 14_000 : 14_000,
+          isOT ? 24_000 : isYelp ? 17_000 : 17_000,
         );
         // Acquire a slot on the global Firecrawl semaphore before firing the request.
         // This prevents the parallel lanes from saturating Firecrawl with too many
