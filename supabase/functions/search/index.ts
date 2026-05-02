@@ -24,7 +24,10 @@ const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
 // from starving the others when Firecrawl is healthy. Raised to 14 so that
 // when individual scrapes get stuck on slow Firecrawl tail latency, fast
 // scrapes still have free slots and the lane budget isn't wasted serializing.
-const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 14;
+// Firecrawl free/standard plans cap concurrent scrapes per account. Sending
+// too many at once produces a 408 storm where every scrape times out at the
+// SAME wall-clock second (verified in production logs). Keep this conservative.
+const FIRECRAWL_MAX_CONCURRENT_SCRAPES = 6;
 let _firecrawlInFlight = 0;
 const _firecrawlWaiters: Array<() => void> = [];
 async function acquireFirecrawlSlot(): Promise<void> {
