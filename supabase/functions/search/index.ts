@@ -2264,7 +2264,7 @@ async function verifyAvailability(
     }
     const batch = candidates.slice(batchStart, batchStart + BATCH_SIZE);
     console.log(`Verification batch ${Math.floor(batchStart / BATCH_SIZE) + 1}: scraping ${batch.length} candidates (${batchStart}..${batchStart + batch.length - 1})`);
-    const batchResults = await Promise.all(batch.map(async (r) => {
+    const verifyOne = async (r: Restaurant): Promise<Restaurant | null> => {
      try {
        const isYelp = r.platform === "yelp";
 
