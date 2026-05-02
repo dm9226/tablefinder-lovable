@@ -2264,7 +2264,7 @@ async function verifyAvailability(
     }
     const batch = candidates.slice(batchStart, batchStart + BATCH_SIZE);
     console.log(`Verification batch ${Math.floor(batchStart / BATCH_SIZE) + 1}: scraping ${batch.length} candidates (${batchStart}..${batchStart + batch.length - 1})`);
-    const batchResults = await Promise.all(batch.map(async (r) => {
+    const verifyOne = async (r: Restaurant): Promise<Restaurant | null> => {
      try {
        const isYelp = r.platform === "yelp";
 
@@ -3073,14 +3073,24 @@ async function verifyAvailability(
       console.log(`Verify error for ${r.name} [${r.platform}]:`, err);
       return null;
     }
+    };
+    // Wrap so each completed verification streams into the shared accumulator
+    // immediately. This protects already-verified results from being dropped
+    // when the outer lane-deadline race fires while slow siblings in the same
+    // batch are still retrying (e.g. OT 408 → retry → AbortError).
+    const batchResults = await Promise.all(batch.map(async (r) => {
+      const result = await verifyOne(r);
+      if (result && accumulator) accumulator.push(result);
+      return result;
     }));
     allChecked.push(...batchResults);
-    // Stream verified results into the shared accumulator so a lane-deadline
-    // race outside this function can return what's already verified instead
-    // of dropping everything when the lane runs over.
-    if (accumulator) {
-      for (const v of batchResults) if (v) accumulator.push(v);
-    }
+    // NOTE: per-candidate streaming into the accumulator happens inside the
+    // batch map below — see the `if (accumulator) accumulator.push(...)` call
+    // immediately after `return ...` for verified results. We previously did
+    // this only after Promise.all resolved, but that meant a slow sibling in
+    // the same batch (e.g. an OT page that 408s and retries to AbortError)
+    // could keep already-verified results bottled up until the lane deadline
+    // fired and dropped them. Per-candidate push fixes that.
   }
 
   return allChecked.filter(Boolean) as Restaurant[];
