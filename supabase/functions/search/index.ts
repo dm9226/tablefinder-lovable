@@ -520,69 +520,12 @@ serve(async (req) => {
     let verified = ([] as Restaurant[]).concat(...laneResults);
     const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
     console.log(`[LANES] verified: resy=${laneCounts.resy}/${resyCands.length}, opentable=${laneCounts.opentable}/${otCands.length}, yelp=${laneCounts.yelp}/${yelpCands.length}`);
-    // ── Yelp soft-fallback ──
-    // Firecrawl scrapes against yelp.com/reservations/* are blocked by DataDome
-    // ~100% of the time, which routinely produces 0 verified Yelp results even
-    // when the user's city has plenty of Yelp-listed bookable restaurants.
-    // Discovery itself is a strong signal: a `yelp.com/reservations/{biz}` URL
-    // only exists because Yelp flagged that business as accepting reservations,
-    // and the deep-linked URL we generate carries date/time/party params, so
-    // clicking it lands the user on the live Yelp widget where availability is
-    // shown by Yelp directly. Surface up to 3 of these candidates as
-    // soft-verified entries so Yelp is never silently absent.
-    if (laneCounts.yelp < 3 && yelpCands.length > 0) {
-      const softYelp = yelpCands
-        .filter(c => /yelp\.com\/reservations\//i.test(c.platformUrl))
-        .slice(0, 5)
-        .map(c => ({
-          ...c,
-          timeSlots: [],
-          _softVerified: true,
-        } as Restaurant));
-      if (softYelp.length > 0) {
-        console.log(`[YELP_SOFT] surfacing ${softYelp.length} discovery-only Yelp candidates (verification 408'd)`);
-        verified = verified.concat(softYelp);
-      }
-    }
-    // ── OpenTable soft-fallback ──
-    // OT pages are Akamai-protected and Firecrawl frequently 408s on the JS-rendered
-    // slot widget, leaving the OT lane with 0 verified despite plenty of valid
-    // discovery URLs. Each `opentable.com/r/{slug}` URL we discovered is a real
-    // bookable restaurant and the deep link carries date/time/party params, so
-    // clicking it lands the user on the live OT booking widget. Surface up to 3
-    // discovery-only candidates so OT is never silently absent.
-    if (laneCounts.opentable < 3 && otCands.length > 0) {
-      const softOT = otCands
-        .filter(c => /opentable\.(com|co\.uk)\/(r|restaurant)\//i.test(c.platformUrl))
-        .slice(0, 5)
-        .map(c => ({
-          ...c,
-          timeSlots: [],
-          _softVerified: true,
-        } as Restaurant));
-      if (softOT.length > 0) {
-        console.log(`[OT_SOFT] surfacing ${softOT.length} discovery-only OpenTable candidates (verification failed)`);
-        verified = verified.concat(softOT);
-      }
-    }
-    // ── Resy soft-fallback ──
-    // Resy scrapes are usually fast & reliable, but when Firecrawl is having
-    // a bad day the lane can still come up short. Surface up to 5 discovery
-    // candidates so the user always sees Resy options when they exist.
-    if (laneCounts.resy < 3 && resyCands.length > 0) {
-      const softResy = resyCands
-        .filter(c => /resy\.com\/cities\//i.test(c.platformUrl))
-        .slice(0, 5)
-        .map(c => ({
-          ...c,
-          timeSlots: [],
-          _softVerified: true,
-        } as Restaurant));
-      if (softResy.length > 0) {
-        console.log(`[RESY_SOFT] surfacing ${softResy.length} discovery-only Resy candidates`);
-        verified = verified.concat(softResy);
-      }
-    }
+    // NOTE: Soft-fallback (returning discovery candidates without verified
+    // availability) is intentionally disabled. Project rule: every result MUST
+    // have verified availability for the requested date/time/party size. If a
+    // lane comes up short we rely on the Firecrawl→Steel→Browserbase failover
+    // chain and the extended-search second pass to recover, never on
+    // surfacing unverified results.
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
     verified = dedupeByName(verified);
     console.log(`Verified available: ${verified.length}/${selected.length}`);
