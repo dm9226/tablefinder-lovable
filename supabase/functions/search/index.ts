@@ -2297,20 +2297,12 @@ async function verifyAvailability(
           return null;
         }
 
-        if (!markdown && !resp.ok) {
-          const errBody = await resp.text().catch(() => "(no body)");
-          console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
-          return null;
-        }
-
-        if (!markdown) {
-          // Normal Firecrawl success path
-          data = await resp.json();
-          markdown = extractFirecrawlMarkdown(data);
-          html = extractFirecrawlHtml(data);
-          links = extractFirecrawlLinks(data);
-          jsonData = data?.data?.extract || data?.extract;
-        }
+        // Success path: parse Firecrawl response.
+        data = await resp.json();
+        markdown = extractFirecrawlMarkdown(data);
+        html = extractFirecrawlHtml(data);
+        links = extractFirecrawlLinks(data);
+        jsonData = data?.data?.extract || data?.extract;
       }
 
       if (!markdown && !html && !jsonData) {
