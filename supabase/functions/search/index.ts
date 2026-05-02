@@ -2413,22 +2413,43 @@ async function verifyAvailability(
           }
           clearTimeout(retryTimer);
           if (resp.status === 408 || !resp.ok) {
-            console.log(`Scrape retry got ${resp.status} for ${r.name} [${r.platform}] — giving up`);
-            return null;
+            console.log(`Scrape retry got ${resp.status} for ${r.name} [${r.platform}] — failing over to Steel`);
+            const steelMd = await scrapeViaSteel(r.platformUrl, isOT ? 3500 : 1500);
+            if (steelMd && steelMd.length > 200) {
+              console.log(`[FAILOVER] Steel succeeded for ${r.name} [${r.platform}] (${steelMd.length} chars)`);
+              markdown = steelMd;
+              data = { data: { markdown: steelMd } };
+            } else if (isOT) {
+              const bbMd = await scrapeViaBrowserbase(r.platformUrl);
+              if (bbMd && bbMd.length > 200) {
+                console.log(`[FAILOVER] Browserbase succeeded for ${r.name} [${r.platform}] (${bbMd.length} chars)`);
+                markdown = bbMd;
+                data = { data: { markdown: bbMd } };
+              } else {
+                console.log(`[FAILOVER] All providers failed for ${r.name} [${r.platform}]`);
+                return null;
+              }
+            } else {
+              console.log(`[FAILOVER] Steel failed for ${r.name} [${r.platform}], no further fallback`);
+              return null;
+            }
           }
         }
 
-        if (!resp.ok) {
+        if (!markdown && !resp.ok) {
           const errBody = await resp.text().catch(() => "(no body)");
           console.log(`Scrape failed (${resp.status}) for ${r.name} [${r.platform}]: ${errBody.slice(0, 300)}`);
           return null;
         }
 
-        data = await resp.json();
-        markdown = extractFirecrawlMarkdown(data);
-        html = extractFirecrawlHtml(data);
-        links = extractFirecrawlLinks(data);
-        jsonData = data?.data?.extract || data?.extract;
+        if (!markdown) {
+          // Normal Firecrawl success path
+          data = await resp.json();
+          markdown = extractFirecrawlMarkdown(data);
+          html = extractFirecrawlHtml(data);
+          links = extractFirecrawlLinks(data);
+          jsonData = data?.data?.extract || data?.extract;
+        }
       }
 
       if (!markdown && !html && !jsonData) {
