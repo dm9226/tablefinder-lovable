@@ -3075,12 +3075,13 @@ async function verifyAvailability(
     }
     }));
     allChecked.push(...batchResults);
-    // Stream verified results into the shared accumulator so a lane-deadline
-    // race outside this function can return what's already verified instead
-    // of dropping everything when the lane runs over.
-    if (accumulator) {
-      for (const v of batchResults) if (v) accumulator.push(v);
-    }
+    // NOTE: per-candidate streaming into the accumulator happens inside the
+    // batch map below — see the `if (accumulator) accumulator.push(...)` call
+    // immediately after `return ...` for verified results. We previously did
+    // this only after Promise.all resolved, but that meant a slow sibling in
+    // the same batch (e.g. an OT page that 408s and retries to AbortError)
+    // could keep already-verified results bottled up until the lane deadline
+    // fired and dropped them. Per-candidate push fixes that.
   }
 
   return allChecked.filter(Boolean) as Restaurant[];
