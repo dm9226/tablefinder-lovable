@@ -10,67 +10,14 @@ const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const FIRECRAWL_API = "https://api.firecrawl.dev/v1";
 // Yelp discovery now uses Firecrawl scraping instead of the Fusion API
 
-// ─── Scraper failover (Firecrawl → Steel → Browserbase) ───
-// Firecrawl 408s on ~70% of OT scrapes and is a frequent cause of empty
-// initial result sets. When Firecrawl returns 408 / 5xx / aborts, we retry
-// the same URL via Steel (cheap headless browser) and, for OT only, fall
-// back to Browserbase as a last resort. Each hop is bounded to ~12s so a
-// single bad URL can never blow the lane budget.
-async function scrapeViaSteel(url: string, waitMs: number): Promise<string> {
-  const key = Deno.env.get("STEEL_API_KEY");
-  if (!key) return "";
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12_000);
-  try {
-    const resp = await fetch("https://api.steel.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        "Steel-Api-Key": key,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url,
-        format: ["markdown"],
-        delay: Math.min(waitMs, 4000),
-      }),
-      signal: ctrl.signal,
-    });
-    if (!resp.ok) return "";
-    const data = await resp.json().catch(() => null);
-    return data?.content?.markdown || data?.markdown || "";
-  } catch {
-    return "";
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function scrapeViaBrowserbase(url: string): Promise<string> {
-  const key = Deno.env.get("BROWSERBASE_API_KEY");
-  const project = Deno.env.get("BROWSERBASE_PROJECT_ID");
-  if (!key || !project) return "";
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12_000);
-  try {
-    // Browserbase exposes a simple "extract" wrapper that returns page text.
-    const resp = await fetch("https://api.browserbase.com/v1/extract", {
-      method: "POST",
-      headers: {
-        "X-BB-API-Key": key,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ projectId: project, url, format: "markdown" }),
-      signal: ctrl.signal,
-    });
-    if (!resp.ok) return "";
-    const data = await resp.json().catch(() => null);
-    return data?.markdown || data?.content || "";
-  } catch {
-    return "";
-  } finally {
-    clearTimeout(timer);
-  }
-}
+// ─── Scraper strategy ───
+// Verification uses Firecrawl exclusively. Prior Steel/Browserbase failovers
+// were removed because production logs proved they returned anti-bot stubs
+// (200–2000 chars, no widget) for OT/Resy and consumed the lane budget for
+// nothing. The verification-rule is strict: every returned result MUST have
+// real time-slot evidence scraped from the live booking page. If Firecrawl
+// can't render a page within budget, we simply skip that candidate — never
+// surface unverified results.
 
 // ─── Global Firecrawl scrape concurrency limiter ───
 // Lanes run in parallel (Resy + OT + Yelp). The cap prevents one slow lane
