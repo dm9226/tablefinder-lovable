@@ -2319,14 +2319,14 @@ async function verifyAvailability(
       const scrapePayload: Record<string, unknown> = {
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
-          onlyMainContent: false,
+          onlyMainContent: !isOT, // OT needs full page for widget HTML; Resy/Yelp don't
           // OT needs stealth to render the time-slot widget past Akamai. Keep
           // the timeout tight (no 50s waits, no retry) so failures don't blow
           // the lane budget; the lane scheduler moves on to the next batch.
-           timeout: isOT ? 18000 : isYelp ? 12000 : 12000,
+           timeout: isOT ? 18000 : isYelp ? 10000 : 10000,
            ...(isOT && { waitFor: 3500, proxy: "stealth" }),
-          ...(isYelp && { waitFor: 2000 }),
-          ...(!isOT && !isYelp && { waitFor: 1200 }),
+          ...(isYelp && { waitFor: 1500 }),
+          ...(!isOT && !isYelp && { waitFor: 1000 }),
         };
 
       let markdown = "";
@@ -2342,7 +2342,7 @@ async function verifyAvailability(
         const scrapeAbort = new AbortController();
          const scrapeTimer = setTimeout(
            () => scrapeAbort.abort(),
-           isOT ? 20_000 : isYelp ? 17_000 : 17_000,
+           isOT ? 20_000 : isYelp ? 14_000 : 14_000,
          );
         // Acquire a slot on the global Firecrawl semaphore before firing the request.
         // This prevents the parallel lanes from saturating Firecrawl with too many
