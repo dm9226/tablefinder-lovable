@@ -452,7 +452,7 @@ serve(async (req) => {
       ]);
     const laneResults = await Promise.all([
       laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 26_000, "resy"),
-      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   26_000, "opentable"),
+      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   32_000, "opentable"),
       laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 26_000, "yelp"),
     ]);
     let verified = ([] as Restaurant[]).concat(...laneResults);
@@ -480,6 +480,27 @@ serve(async (req) => {
       if (softYelp.length > 0) {
         console.log(`[YELP_SOFT] surfacing ${softYelp.length} discovery-only Yelp candidates (verification 408'd)`);
         verified = verified.concat(softYelp);
+      }
+    }
+    // ── OpenTable soft-fallback ──
+    // OT pages are Akamai-protected and Firecrawl frequently 408s on the JS-rendered
+    // slot widget, leaving the OT lane with 0 verified despite plenty of valid
+    // discovery URLs. Each `opentable.com/r/{slug}` URL we discovered is a real
+    // bookable restaurant and the deep link carries date/time/party params, so
+    // clicking it lands the user on the live OT booking widget. Surface up to 3
+    // discovery-only candidates so OT is never silently absent.
+    if (laneCounts.opentable < 2 && otCands.length > 0) {
+      const softOT = otCands
+        .filter(c => /opentable\.(com|co\.uk)\/(r|restaurant)\//i.test(c.platformUrl))
+        .slice(0, 3)
+        .map(c => ({
+          ...c,
+          timeSlots: [],
+          _softVerified: true,
+        } as Restaurant));
+      if (softOT.length > 0) {
+        console.log(`[OT_SOFT] surfacing ${softOT.length} discovery-only OpenTable candidates (verification failed)`);
+        verified = verified.concat(softOT);
       }
     }
     // Dedupe cross-platform conversions (Yelp→OT/Resy may duplicate direct OT/Resy results)
