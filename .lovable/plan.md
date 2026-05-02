@@ -1,45 +1,58 @@
-# Auto-extended search with distance-sorted merge
+## Diagnosis
 
-When the initial search returns and `hasMore` is true, automatically kick off the extended search in the background and slot any new results into the existing list ordered by distance (instead of appending them at the bottom behind a "Find more results" button).
+The latest "dinner Wednesday" search shows the new concurrency settings are working — but the bottleneck has moved upstream to **candidate selection**, not scraping speed.
 
-## Behavior
+From the logs:
+```
+candidates  {resy=21, opentable=17, yelp=24}   ← 62 discovered
+selected    {resy=5,  opentable=4,  yelp=3}    ← only 12 verified (cap)
+verified    {resy=2,  opentable=3,  yelp=1}    ← 6 returned initially
+[EXTENDED] Verified: 10/18                      ← 16 total after auto-extend
+elapsedMs=27341                                 ← 27s, well under budget
+```
 
-- Initial search renders as it does today.
-- As soon as results are shown, if `hasMore` is true, fire the extended search automatically (no user click).
-- Show a subtle "Searching for more…" indicator at the bottom of the list while the auto-extend runs (reuse existing `isExtending` UI).
-- When extended results return, merge them with the existing list, dedupe, then re-sort the entire combined list by `distanceMiles` ascending (nulls last), with rating as the tiebreaker — same ordering rule the edge function already uses.
-- Hide the manual "Find more results" button (no longer needed). If the auto-extend fails, fall back silently — no toast spam.
-- Only auto-extend once per search to avoid loops, even if the extended response itself returns `hasMore: true`.
-- A new search (or cancel) cancels any in-flight auto-extend.
+You discovered **62 viable candidates** but only verified **12** on the initial pass because of an explicit cap (`maxCandidates = 12` for vague queries like "dinner Wednesday"). The remaining 50 sit on the bench. Auto-extend then verifies 18 more — but that takes another ~10s and the user sees the small initial list first.
+
+The cap exists to protect the 22s lane wall-clock, but with the new concurrency (14 in-flight scrapes, larger batch sizes), each lane can chew through more candidates per wave. We're leaving headroom on the table.
+
+## Plan
+
+Three small changes to `supabase/functions/search/index.ts`:
+
+### 1. Raise the initial candidate cap
+- Vague queries: `12 → 20`
+- Specific queries (cuisine/dish): `16 → 24`
+
+This moves Resy/OT/Yelp selection from `5/4/3` to roughly `8/7/5` per lane — well within the now-larger batch sizes (Resy=6, OT=4, Yelp=5), so they fit in 1–2 waves per lane.
+
+### 2. Slightly extend lane wall-clocks
+- Resy: `22s → 26s`
+- Yelp: `22s → 26s`
+- OpenTable: stays `26s`
+
+Total budget still well under the 120s global timeout, and 4 extra seconds = 1 more verification wave for the slow lane.
+
+### 3. Lower the bar for surfacing the soft-verified Yelp fallback
+Currently Yelp soft-fallback only fires when verification returns 0. Change it to also fire when verified < 2 — Yelp DataDome blocks are still common, and discovery alone is a strong signal.
+
+## Expected outcome
+
+For a generic "dinner Wednesday" query:
+- Initial pass: **~12–16 verified results** (up from 6)
+- Total wall-clock: ~30–34s (up from 27s, still comfortable)
+- Auto-extend still runs to fill in another 6–8 results, ending around **20+ total**
+
+## What stays the same
+
+- No caching (per your rule)
+- No new providers / no new APIs
+- Auto-extend behavior unchanged
+- Global 120s timeout, 14-concurrent Firecrawl cap unchanged
+
+## Risk
+
+Slightly higher Firecrawl spend per search (verifying 20 instead of 12). Most are fast scrapes; the wall-clock guard still prevents runaway cost. If spend climbs uncomfortably, we can dial the cap back to 16.
 
 ## Files to change
 
-### `src/pages/Index.tsx`
-- Add a `useEffect` that watches `hasMore`, `remainingCandidates`, `lastParams`, and `isLoading`. When `!isLoading && hasMore && remainingCandidates.length > 0 && !isExtending` and we haven't auto-extended for this search yet, call `handleExtendedSearch()`.
-- Track `autoExtendedFor` (e.g. a ref keyed off the `lastQuery` + timestamp of the initial search) so each search auto-extends at most once.
-- In `handleExtendedSearch`, replace the append-only merge with a merge-then-sort:
-  - Combine `prev` + `newResults`.
-  - Dedupe by `${name}|${platform}` (keep the first occurrence — initial results win, since they're already enriched).
-  - Sort by `distanceMiles ?? Infinity` asc, tiebreak by `(rating ?? 0)` desc.
-- Remove the success/info toasts for the auto path (keep silent). Keep error handling silent on auto-extend; only surface errors if the user manually triggered it (n/a once button is removed, so just swallow).
-- Reset the auto-extend guard inside `handleSearch` and `cancelSearch`.
-- Wire an AbortController (or reuse `abortRef`) so a new search aborts the in-flight extend.
-
-### `src/components/ResultsGrid.tsx`
-- Remove the "Find more results" button block.
-- Keep the `isExtending` spinner row (now serves as the auto-extend indicator).
-- Optionally drop the now-unused `hasMore` and `onExtendSearch` props, or leave them in place as no-ops to avoid wider refactors. Prefer removing for cleanliness.
-
-### `supabase/functions/search/index.ts`
-No changes. The extended endpoint already returns geocoded, distance-bearing results, and the client-side resort handles ordering.
-
-## Edge cases
-
-- If the extended response returns 0 new results: do nothing, leave the list as-is.
-- If the user starts a new search while auto-extend is running: `abortRef.current?.abort()` plus the new search resetting state already prevents stale results from being merged (guard with a captured `controller.signal.aborted` check before `setResults`).
-- Soft-verified Yelp entries with `distanceMiles == null` will sort to the end, which matches current behavior.
-
-## Out of scope
-
-- No animation/transition on the re-sort (results just snap into the new order).
-- No additional rounds of auto-extension beyond the first.
+- `supabase/functions/search/index.ts` — cap constants (line ~416), lane deadlines (lines ~454–456), Yelp soft-fallback threshold (search for `Yelp soft-fallback`)

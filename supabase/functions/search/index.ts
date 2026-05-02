@@ -413,7 +413,7 @@ serve(async (req) => {
     // Smaller candidate cap — verification is the bottleneck, not discovery.
     // Over-allocating just burns the wall-clock budget on scrapes we'll abandon.
     const isVagueQuery = !params.cuisineType && !params.dishKeyword;
-    const maxCandidates = isVagueQuery ? 12 : 16;
+    const maxCandidates = isVagueQuery ? 20 : 24;
     console.log(`Candidate cap: ${maxCandidates} (vague=${isVagueQuery})`);
     const selected = selectCandidatesForVerification(allCandidates, maxCandidates);
     const selectedCounts = selected.reduce((acc, r) => { acc[r.platform] = (acc[r.platform] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -451,9 +451,9 @@ serve(async (req) => {
         ),
       ]);
     const laneResults = await Promise.all([
-      laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 22_000, "resy"),
+      laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 26_000, "resy"),
       laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   26_000, "opentable"),
-      laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 22_000, "yelp"),
+      laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 26_000, "yelp"),
     ]);
     let verified = ([] as Restaurant[]).concat(...laneResults);
     const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
@@ -468,7 +468,7 @@ serve(async (req) => {
     // clicking it lands the user on the live Yelp widget where availability is
     // shown by Yelp directly. Surface up to 3 of these candidates as
     // soft-verified entries so Yelp is never silently absent.
-    if (laneCounts.yelp === 0 && yelpCands.length > 0) {
+    if (laneCounts.yelp < 2 && yelpCands.length > 0) {
       const softYelp = yelpCands
         .filter(c => /yelp\.com\/reservations\//i.test(c.platformUrl))
         .slice(0, 3)
