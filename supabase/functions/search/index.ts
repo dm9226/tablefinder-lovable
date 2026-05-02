@@ -2282,66 +2282,19 @@ async function verifyAvailability(
         }
         clearTimeout(scrapeTimer);
 
-        // 408 from Firecrawl = their scrape worker timed out, not that the page
-        // is broken. A single fast retry recovers most of these without blowing
-        // the lane budget. We only retry if we still have ≥10s of wall-clock
-        // budget left, and we use a tighter timeout on the retry.
-         if (resp.status === 408) {
-           const elapsedSinceStart = globalStartTime ? Date.now() - globalStartTime : 0;
-           const wallBudgetLeftMs = (laneLabel === "opentable" ? 30_000 : 24_000) - elapsedSinceStart;
-           if (wallBudgetLeftMs < 5_000) {
-            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (only ${wallBudgetLeftMs}ms budget left)`);
-            return null;
+        // Firecrawl 408 / non-OK = give up on this candidate. Retries and
+        // alternate providers were removed: production data showed they
+        // either returned anti-bot stubs (failovers) or fired with negative
+        // budget (retries), wasting the lane budget. A clean skip here lets
+        // the next batch start sooner and improves total verified count.
+        if (resp.status === 408 || !resp.ok) {
+          if (resp.status !== 408) {
+            const errBody = await resp.text().catch(() => "(no body)");
+            console.log(`Scrape ${resp.status} for ${r.name} [${r.platform}]: ${errBody.slice(0, 200)}`);
+          } else {
+            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
           }
-          console.log(`Scrape 408 for ${r.name} [${r.platform}] — retrying once`);
-          const retryAbort = new AbortController();
-          const retryTimer = setTimeout(() => retryAbort.abort(), isOT ? 12_000 : 8_000);
-          await acquireFirecrawlSlot();
-          try {
-            try {
-              resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${firecrawlKey}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  ...scrapePayload,
-                  timeout: isOT ? 12000 : 8000,
-                }),
-                signal: retryAbort.signal,
-              });
-            } catch (retryErr: any) {
-              clearTimeout(retryTimer);
-              console.log(`Scrape retry failed for ${r.name} [${r.platform}]: ${retryErr?.name || retryErr}`);
-              return null;
-            }
-          } finally {
-            releaseFirecrawlSlot();
-          }
-          clearTimeout(retryTimer);
-          if (resp.status === 408 || !resp.ok) {
-            console.log(`Scrape retry got ${resp.status} for ${r.name} [${r.platform}] — failing over to Steel`);
-            const steelMd = await scrapeViaSteel(r.platformUrl, isOT ? 3500 : 1500);
-            if (steelMd && steelMd.length > 200) {
-              console.log(`[FAILOVER] Steel succeeded for ${r.name} [${r.platform}] (${steelMd.length} chars)`);
-              markdown = steelMd;
-              data = { data: { markdown: steelMd } };
-            } else if (isOT) {
-              const bbMd = await scrapeViaBrowserbase(r.platformUrl);
-              if (bbMd && bbMd.length > 200) {
-                console.log(`[FAILOVER] Browserbase succeeded for ${r.name} [${r.platform}] (${bbMd.length} chars)`);
-                markdown = bbMd;
-                data = { data: { markdown: bbMd } };
-              } else {
-                console.log(`[FAILOVER] All providers failed for ${r.name} [${r.platform}]`);
-                return null;
-              }
-            } else {
-              console.log(`[FAILOVER] Steel failed for ${r.name} [${r.platform}], no further fallback`);
-              return null;
-            }
-          }
+          return null;
         }
 
         if (!markdown && !resp.ok) {
