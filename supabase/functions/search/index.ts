@@ -3073,6 +3073,15 @@ async function verifyAvailability(
       console.log(`Verify error for ${r.name} [${r.platform}]:`, err);
       return null;
     }
+    };
+    // Wrap so each completed verification streams into the shared accumulator
+    // immediately. This protects already-verified results from being dropped
+    // when the outer lane-deadline race fires while slow siblings in the same
+    // batch are still retrying (e.g. OT 408 → retry → AbortError).
+    const batchResults = await Promise.all(batch.map(async (r) => {
+      const result = await verifyOne(r);
+      if (result && accumulator) accumulator.push(result);
+      return result;
     }));
     allChecked.push(...batchResults);
     // NOTE: per-candidate streaming into the accumulator happens inside the
