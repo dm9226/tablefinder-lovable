@@ -2226,7 +2226,7 @@ async function verifyAvailability(
   // Strict wall-clock budget per lane. Lanes run in parallel; this cap is what
   // keeps the total search under the global ceiling. Tightened so enrichment
   // has a real ~6s window inside the 33s global ceiling.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 24_000 : 20_000;
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 30_000 : 24_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Lane-local early exit: stop once this lane has hit its useful target.
@@ -2261,8 +2261,8 @@ async function verifyAvailability(
           // OT needs stealth to render the time-slot widget past Akamai. Keep
           // the timeout tight (no 50s waits, no retry) so failures don't blow
           // the lane budget; the lane scheduler moves on to the next batch.
-          timeout: isOT ? 22000 : isYelp ? 12000 : 12000,
-          ...(isOT && { waitFor: 5000, proxy: "stealth" }),
+           timeout: isOT ? 18000 : isYelp ? 12000 : 12000,
+           ...(isOT && { waitFor: 3500, proxy: "stealth" }),
           ...(isYelp && { waitFor: 2000 }),
           ...(!isOT && !isYelp && { waitFor: 1200 }),
         };
@@ -2278,10 +2278,10 @@ async function verifyAvailability(
         // so we can cancel the fetch if Firecrawl's own timeout doesn't fire fast enough.
         // OT pages need ~18s to render JS widgets; Resy/Yelp are faster.
         const scrapeAbort = new AbortController();
-        const scrapeTimer = setTimeout(
-          () => scrapeAbort.abort(),
-          isOT ? 24_000 : isYelp ? 17_000 : 17_000,
-        );
+         const scrapeTimer = setTimeout(
+           () => scrapeAbort.abort(),
+           isOT ? 20_000 : isYelp ? 17_000 : 17_000,
+         );
         // Acquire a slot on the global Firecrawl semaphore before firing the request.
         // This prevents the parallel lanes from saturating Firecrawl with too many
         // simultaneous scrapes (which immediately produces 408 timeouts).
@@ -2316,10 +2316,10 @@ async function verifyAvailability(
         // is broken. A single fast retry recovers most of these without blowing
         // the lane budget. We only retry if we still have ≥10s of wall-clock
         // budget left, and we use a tighter timeout on the retry.
-        if (resp.status === 408) {
-          const elapsedSinceStart = globalStartTime ? Date.now() - globalStartTime : 0;
-          const wallBudgetLeftMs = (laneLabel === "opentable" ? 24_000 : 20_000) - elapsedSinceStart;
-          if (wallBudgetLeftMs < 10_000) {
+         if (resp.status === 408) {
+           const elapsedSinceStart = globalStartTime ? Date.now() - globalStartTime : 0;
+           const wallBudgetLeftMs = (laneLabel === "opentable" ? 30_000 : 24_000) - elapsedSinceStart;
+           if (wallBudgetLeftMs < 5_000) {
             console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (only ${wallBudgetLeftMs}ms budget left)`);
             return null;
           }
