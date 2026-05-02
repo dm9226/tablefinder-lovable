@@ -458,10 +458,13 @@ serve(async (req) => {
           }, ms),
         ),
       ]);
+    // Outer deadlines run 1s past the inner LANE_TIME_BUDGET_MS so the inner
+    // guard fires first and cleanly returns accumulated results, instead of
+    // the outer race aborting mid-batch.
     const laneResults = await Promise.all([
-      laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 26_000, "resy"),
-      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   32_000, "opentable"),
-      laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 26_000, "yelp"),
+      laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 25_000, "resy"),
+      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   31_000, "opentable"),
+      laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 25_000, "yelp"),
     ]);
     let verified = ([] as Restaurant[]).concat(...laneResults);
     const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
