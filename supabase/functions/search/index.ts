@@ -2241,7 +2241,7 @@ async function verifyAvailability(
           // the lane budget; the lane scheduler moves on to the next batch.
            timeout: isOT ? 18000 : isYelp ? 10000 : 10000,
            ...(isOT && { waitFor: 3500, proxy: "stealth" }),
-          ...(isYelp && { waitFor: 1500 }),
+           ...(isYelp && { waitFor: 1500 }),
           ...(!isOT && !isYelp && { waitFor: 1000 }),
         };
 
