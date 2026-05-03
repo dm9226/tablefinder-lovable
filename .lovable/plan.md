@@ -1,69 +1,93 @@
 ## Goal
 
-Get the initial result count up by attacking the Firecrawl 408 problem from three angles simultaneously: faster scrapes, a failover scraper, and more lenient surfacing of unverified-but-discovered candidates.
+Get verified results back up across all three providers (Resy, OpenTable, Yelp) without paid APIs and without dropping any provider. The core unlock: stop trying to render anti-bot-protected booking widgets via Firecrawl, and instead call the JSON endpoints those widgets themselves call.
 
-## Changes to `supabase/functions/search/index.ts`
+## Why this works (and what we're not repeating)
 
-### 1. Tighten Firecrawl scrape parameters (Option 1)
+Resy works fine today. The blocked lanes are OpenTable (Akamai on the widget render) and Yelp (DataDome on the widget render). Both platforms' booking widgets, once loaded, fetch availability from internal JSON endpoints. Those endpoints are usually behind much lighter protection than the rendered widget pages, because they're designed to be hit at high volume by the widgets themselves. Calling them directly from the edge function — with proper headers — is free, fast (~200–500ms), and returns structured time-slot data we don't have to parse out of HTML.
 
-Per-lane tuning:
+This is **not** the Yelp Fusion API (paid, off the table). This is the same JSON the public booking widget hits.
 
-- **Resy verification scrapes**: `waitFor` 3.5s → 2s, `onlyMainContent: true`
-- **Yelp verification scrapes**: `waitFor` 3.5s → 2s, `onlyMainContent: true`
-- **OpenTable verification scrapes**: keep `waitFor` 3.5s (widget needs it), but add `onlyMainContent: true` to reduce payload
-- Drop client-side AbortController timeouts proportionally (Resy/Yelp: 20s → 14s; OT stays 20s)
+We are also **not** re-trying anything in `mem://constraints/yelp-failed` (Yelp Fusion, Browserbase for Yelp, paid stealth proxies, etc.).
 
-Rationale: Resy and Yelp render booking widgets faster than OT. Smaller payloads + shorter waits should drop p50 scrape time from ~6–8s to ~3–4s, allowing more candidates per wave inside the same lane budget.
+## Plan
 
-### 2. Multi-scraper failover (Option 2)
+### 1. OpenTable: add `/dapi` availability lane
 
-Add a `scrapeWithFailover(url, opts)` helper that:
+In `supabase/functions/search/index.ts`, add a new verifier `verifyOpenTableDapi(restaurant, params)`:
 
-1. Tries Firecrawl first (existing path).
-2. On `408`, `AbortError`, or `5xx`, retries the same URL via **Steel** (`STEEL_API_KEY` already configured) using their scrape endpoint, returning markdown.
-3. If Steel also fails, falls back to **Browserbase** (`BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` already configured) as a last resort — only for OpenTable, since it's the most blocked.
-4. Each failover hop has its own 12s timeout to avoid blowing the lane budget.
-5. Logs which provider succeeded so we can monitor mix.
+- Resolve the OT `rid` (restaurant ID) from the discovery URL (already present in OT URLs as `restaurantIds=...` or in the slug page).
+- POST to `https://www.opentable.com/dapi/booking/restaurant/availability` with `{ restaurantIds: [rid], dateTime, partySize }` and headers that match a real browser request (UA, `x-csrf-token` if needed — probe first).
+- Parse the JSON response: each restaurant has a `slots[]` array with `time`, `dateTime`, `type`. Map directly to our `TimeSlot[]`.
+- 5s timeout. On any failure (4xx, 5xx, parse error), fall through to existing Firecrawl OT scrape.
 
-Wire this helper into the existing `verifyResy`, `verifyOpenTable`, and `verifyYelp` paths, replacing direct Firecrawl calls.
+Order in `verifyOpenTable`:
+1. Try `/dapi` first (fast, free, structured).
+2. On failure, current Firecrawl scrape (existing behavior).
+3. On Firecrawl failure, soft-verified candidate (existing behavior).
 
-### 3. Relax soft-fallback surfacing (Option 3)
+### 2. Yelp: probe-and-build internal availability endpoint
 
-Currently:
-- Yelp soft-fallback fires when `verified < 2`
-- OT soft-fallback fires when `verified < 2`
-- Resy has no soft-fallback
+Same pattern, but Yelp is riskier (DataDome is more aggressive). Two sub-steps:
+
+**2a. Probe (one-time, in code, gated behind a single search):**
+Add `verifyYelpInternal(restaurant, params)` that:
+- Extracts the Yelp business alias from the discovery URL (`/biz/<alias>`).
+- Calls `https://www.yelp.com/reservations/<alias>/search_availability?date=YYYY-MM-DD&time=HH:MM&num_people=N` (the endpoint the Yelp reservation widget hits).
+- Sends realistic browser headers + `Referer: https://www.yelp.com/biz/<alias>`.
+- 5s timeout.
+- Logs the response status and body shape on first call so we can see whether DataDome lets it through.
+
+**2b. Wire-in:**
+- If the probe returns JSON with slots: use it as the primary Yelp verifier, push current Firecrawl approach to fallback.
+- If DataDome blocks it (403/429/HTML challenge): leave the new function in place but log-and-skip it; Yelp continues with current Firecrawl discovery + soft-verified fallback. No regression.
+
+This is exactly the "probe + build if it works" choice you picked.
+
+### 3. Soft-verified: minor, conservative broadening
+
+Today: cap 3 soft results, only when verified count for that lane < 2, OT and Yelp only.
 
 Change to:
-- All three lanes get soft-fallback when `verified < 3`
-- Increase soft-fallback cap from 3 → 5 per lane
-- Add `_softVerified: true` flag (already present for OT/Yelp) on Resy soft results
+- Same cap (3), same threshold (< 2), but apply to **Resy** too as a safety net (Resy rarely needs it but costs nothing to enable).
+- Keep the existing "tap to check" badge styling.
 
-### 4. UI: badge for soft-verified results
+Not raising cap to 5 and not changing the threshold — keeps the page mostly hard-verified, which matches the product's verification mandate.
 
-In `src/components/RestaurantCard.tsx`:
+### 4. UI: badge already exists for OT/Yelp soft results
 
-- Add a small "availability not confirmed — tap to check" badge when `restaurant._softVerified === true` and `timeSlots.length === 0`
-- Use muted styling (border + muted-foreground text) so it doesn't compete with verified results visually
-- Replace the existing Yelp-specific copy with a platform-agnostic version
+Extend the existing soft-verified badge in `src/components/RestaurantCard.tsx` to render for any platform when `restaurant._softVerified === true && timeSlots.length === 0`. Same muted styling, platform-agnostic copy: *"availability not confirmed — tap to check"*.
+
+### 5. Tests
+
+Add a focused test in `supabase/functions/search/index.test.ts`:
+- One query that historically hit OT-heavy results (Chicago Steakhouse from existing `link-verify.test.ts`).
+- Assert that at least one OT result comes back with `timeSlots.length > 0` (proving `/dapi` worked).
+- Same shape for a Yelp-heavy query, but soft-assert (log-only) since the Yelp probe outcome is unknown until we run it.
 
 ## Expected outcome
 
-- Initial pass: **15–20+ verified-or-soft results** for a generic query (vs current 8)
-- Wall-clock: similar (~30–35s) since failover is bounded
-- User clearly sees which results have confirmed times vs which need a tap-through
+- **OpenTable verified count**: large jump. `/dapi` is fast and rarely blocked. Most OT candidates that currently 408 should return slots in <1s.
+- **Yelp**: either a similar jump (if internal endpoint works) or unchanged from today (if DataDome blocks it) — no worse case.
+- **Resy**: unchanged.
+- **Wall-clock**: faster overall, since `/dapi` replaces 6–20s Firecrawl scrapes with ~500ms JSON calls.
+- **Cost**: drops. Each successful `/dapi` or Yelp-internal call replaces a Firecrawl call.
 
-## Risk / cost
+## Risk
 
-- Steel and Browserbase calls add cost only on Firecrawl failures (currently ~70% on OT) — bounded by lane budgets
-- If Steel/Browserbase also rate-limit, we're no worse off than today
+- OT `/dapi` endpoint is undocumented and could change. Mitigation: Firecrawl scrape stays as fallback, so a `/dapi` shape change degrades gracefully, doesn't break the lane.
+- Yelp internal endpoint may be blocked by DataDome. Mitigation: built as additive — failure path is current behavior.
+- Both endpoints may require headers we don't anticipate (CSRF, cookies). Mitigation: log first response in detail; iterate once if needed.
 
-## Files to change
+## Files changed
 
-- `supabase/functions/search/index.ts` — scrape params, failover helper, soft-fallback thresholds
-- `src/components/RestaurantCard.tsx` — soft-verified badge
+- `supabase/functions/search/index.ts` — add `verifyOpenTableDapi`, add `verifyYelpInternal`, wire both into existing verifiers as primary attempts, broaden soft-verified to Resy.
+- `src/components/RestaurantCard.tsx` — make soft-verified badge platform-agnostic.
+- `supabase/functions/search/index.test.ts` — add OT `/dapi` assertion + Yelp probe log.
 
 ## Memory updates after build
 
-- Update `mem://features/yelp-soft-fallback` → rename to `soft-fallback` and document it now applies to all three lanes
-- Add `mem://integrations/scraper-failover` documenting Firecrawl → Steel → Browserbase chain
+- New: `mem://integrations/opentable-dapi` — documents the `/dapi/booking/restaurant/availability` lane, request shape, fallback chain.
+- New: `mem://integrations/yelp-internal` — documents the probe outcome (works / blocked) and current behavior.
+- Update: `mem://integrations/opentable` — note `/dapi` is tried first, Firecrawl is fallback.
+- Update: `mem://features/yelp-soft-fallback` → rename to `mem://features/soft-fallback`, note it now applies to all three lanes.
