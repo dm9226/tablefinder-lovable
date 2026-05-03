@@ -2226,6 +2226,46 @@ async function verifyAvailability(
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
 
+      // ── FAST PRE-PASS: direct fetch (no Firecrawl) ──
+      // OpenTable and Yelp booking pages frequently serve enough SSR HTML
+      // (or expose internal availability JSON) to extract slots without a JS
+      // render. A plain fetch from the edge function takes ~300–800ms and
+      // costs nothing. If it succeeds we skip Firecrawl entirely. If we get
+      // blocked (Akamai/DataDome challenge, 403/429, empty body), we fall
+      // through to the existing Firecrawl path below — no regression.
+      if (isOT || isYelp) {
+        try {
+          const directSlots = await tryDirectAvailability(r, params);
+          if (directSlots && directSlots.length > 0) {
+            // Apply the same ±2h window the Firecrawl path uses.
+            const { windowStart, windowEnd, requestedMinutes } = computeMealWindow(params);
+            const inWindow = directSlots.filter(t => t.minutes >= windowStart && t.minutes <= windowEnd);
+            if (inWindow.length > 0) {
+              inWindow.sort((a, b) => Math.abs(a.minutes - requestedMinutes) - Math.abs(b.minutes - requestedMinutes));
+              const top = inWindow.slice(0, 5).sort((a, b) => a.minutes - b.minutes);
+              // Yelp guard: reject 1–2 widely-spaced slots (operating hours, not bookable times).
+              if (isYelp && top.length <= 2) {
+                if (top.length === 1 || Math.abs(top[1].minutes - top[0].minutes) >= 180) {
+                  console.log(`[DIRECT] ✗ ${r.name} [yelp] — sparse slots from direct fetch, falling through to Firecrawl`);
+                } else {
+                  r.timeSlots = top.map(t => ({ time: t.time }));
+                  console.log(`[DIRECT] ✓ ${r.name} [yelp] — ${top.length} slots from direct fetch (no Firecrawl): ${top.map(t=>t.time).join(", ")}`);
+                  return r;
+                }
+              } else {
+                r.timeSlots = top.map(t => ({ time: t.time }));
+                console.log(`[DIRECT] ✓ ${r.name} [${r.platform}] — ${top.length} slots from direct fetch (no Firecrawl): ${top.map(t=>t.time).join(", ")}`);
+                return r;
+              }
+            } else {
+              console.log(`[DIRECT] ${r.name} [${r.platform}] — ${directSlots.length} slots from direct fetch but none in window, falling through`);
+            }
+          }
+        } catch (directErr) {
+          console.log(`[DIRECT] ${r.name} [${r.platform}] — direct fetch error, falling through: ${directErr instanceof Error ? directErr.message : directErr}`);
+        }
+      }
+
       // ── Firecrawl scrape (Resy / OpenTable / Yelp) ──
       // Per-provider settings:
       // - OpenTable: needs full JS render to expose "Select a time" widget; use
