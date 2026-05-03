@@ -2241,11 +2241,7 @@ async function verifyAvailability(
           // the lane budget; the lane scheduler moves on to the next batch.
            timeout: isOT ? 18000 : isYelp ? 10000 : 10000,
            ...(isOT && { waitFor: 3500, proxy: "stealth" }),
-           // Yelp's reservation pages are behind DataDome — stealth proxy is
-           // required to get past the bot wall. Without it we get challenge
-           // HTML / 403s. Stealth is ~5x base Firecrawl credits but is the
-           // cheapest verified-availability path for Yelp we have.
-           ...(isYelp && { waitFor: 2000, proxy: "stealth" }),
+           ...(isYelp && { waitFor: 1500 }),
           ...(!isOT && !isYelp && { waitFor: 1000 }),
         };
 
