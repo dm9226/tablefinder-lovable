@@ -870,8 +870,8 @@ function filterWindow(slots: TimeSlot[], requestedTime: string): TimeSlot[] {
       if (ampm === "am" && h === 12) h = 0;
       return { slot: s, mins: h * 60 + mn };
     })
-    .filter(x => x && Math.abs(x.mins - reqMins) <= 120)
-    .sort((a, b) => Math.abs(a!.mins - reqMins) - Math.abs(b!.mins - reqMins))
+    .filter(x => x && Math.min(Math.abs(x.mins - reqMins), 1440 - Math.abs(x.mins - reqMins)) <= 120)
+    .sort((a, b) => Math.min(Math.abs(a!.mins - reqMins), 1440 - Math.abs(a!.mins - reqMins)) - Math.min(Math.abs(b!.mins - reqMins), 1440 - Math.abs(b!.mins - reqMins)))
     .slice(0, 5)
     .sort((a, b) => a!.mins - b!.mins)
     .map(x => x!.slot);
@@ -950,7 +950,7 @@ function cleanTitle(title: string | undefined, url: string, platform: string): s
       .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "")
       .replace(/\s+on\s+(OpenTable|Resy|Yelp)$/i, "")
       .replace(/\s*[|•·]\s*[A-Za-z\s&]+$/i, "")
-      .replace(/^book\s+(your\s+)?/i, "")
+      .replace(/^book\s+(?:your\s+)?(?:reservation\s+(?:at\s+)?)?/i, "")
       .replace(/\s+reservation(s)?.*$/i, "")
       .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "")
       .trim();
