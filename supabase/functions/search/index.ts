@@ -516,7 +516,7 @@ serve(async (req) => {
     // vibe tags AND lose their AI-coordinate distance fallback. Even if verification
     // overran, we still spend up to 4s enriching the (small) returned set.
     const elapsed = Date.now() - startTime;
-    if (elapsed > 28_000) {
+    if (elapsed > 22_000) {
       console.warn(`Verification overran (${elapsed}ms) — running enrichment anyway with tight budget`);
     }
 
@@ -529,14 +529,14 @@ serve(async (req) => {
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-                console.warn("AI enrichment timed out at 14s — returning without enrichment");
+                console.warn("AI enrichment timed out at 8s — returning without enrichment");
               resolve(new Map<number, any>());
-              }, 14_000),
+              }, 8_000),
           ),
         ]);
 
     const [, enrichmentMap] = await Promise.all([
-      geocodeVerifiedResults(verified, params, 12_000),
+      geocodeVerifiedResults(verified, params, 6_000),
       enrichmentPromise,
     ]);
 
