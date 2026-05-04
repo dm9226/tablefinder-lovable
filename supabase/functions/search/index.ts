@@ -792,15 +792,17 @@ async function firecrawlSearch(queries: string[], fcKey: string, limit = 5): Pro
         return;
       }
       const data = await resp.json();
+      // Log raw shape once so we can see what Firecrawl actually returns
+      console.log(`[firecrawlSearch] raw keys: ${data && typeof data === "object" ? Object.keys(data).join(",") : typeof data}`);
       // Firecrawl v2 response shape can vary — handle all known variants
       let items: any[] = [];
-      if (Array.isArray(data))                  items = data;
-      else if (Array.isArray(data.data))        items = data.data;
-      else if (Array.isArray(data.results))     items = data.results;
+      if (Array.isArray(data))                    items = data;
+      else if (Array.isArray(data.data))          items = data.data;
+      else if (Array.isArray(data.results))       items = data.results;
       else if (Array.isArray(data.data?.results)) items = data.data.results;
+      else if (Array.isArray(data.data?.data))    items = data.data.data;
       else {
-        const keys = data && typeof data === "object" ? Object.keys(data).join(",") : String(data);
-        console.warn(`[firecrawlSearch] unexpected shape (keys: ${keys}) for "${query}"`);
+        console.warn(`[firecrawlSearch] unrecognised shape: ${JSON.stringify(data).slice(0, 300)}`);
         return;
       }
       for (const item of items) {
