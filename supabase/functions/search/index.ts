@@ -2421,16 +2421,17 @@ async function verifyAvailability(
   const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 4 : 6;
   // Wall-clock budget per lane (parallel). Slightly under the lane deadline
   // race in handler so the inner guard fires before the outer abort.
-  // OT bumped to 52s to accommodate Browserbase fallback calls (~10–18s each,
-  // up to 2 per search) on top of Firecrawl attempts. Yelp/Resy unchanged.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 52_000 : 24_000;
+  // OT no longer needs an inflated budget — primary verification path is now
+  // the OT JSON availability endpoint (~300–800ms). Firecrawl scrape remains
+  // as a graceful fallback when JSON misses.
+  const LANE_TIME_BUDGET_MS = 22_000;
 
-  // Browserbase fallback budget for the OpenTable lane only. Akamai consistently
-  // serves a challenge interstitial to Firecrawl's stealth proxy (md=139). When
-  // that happens we get one more shot using a real headful Chromium via
-  // Browserbase. Capped at 2 calls per search to bound cost (~$0.02/search worst
-  // case) and wall-clock (~10–18s per call).
-  const BROWSERBASE_MAX_CALLS = laneLabel === "opentable" ? 2 : 0;
+  // Browserbase fallback DISABLED. The current account is on the free plan
+  // which does not include proxies, so every session-create returns HTTP 402
+  // ("Proxies are not included in the free plan") and the call adds ~15s of
+  // pure latency for zero benefit. To re-enable after upgrading Browserbase
+  // to a paid plan, flip this back to `laneLabel === "opentable" ? 2 : 0`.
+  const BROWSERBASE_MAX_CALLS = 0;
   let browserbaseCallsUsed = 0;
 
   const allChecked: (Restaurant | null)[] = [];
