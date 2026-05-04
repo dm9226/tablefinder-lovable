@@ -214,7 +214,9 @@ serve(async (req) => {
   // Lane budgets cap verification at 24s (Resy/Yelp) / 38s (OT — needs the
   // longer window because Akamai stealth render takes ~25–30s per page).
   // Add a small enrichment window + buffer.
-  const GLOBAL_TIMEOUT_MS = 45_000;
+  // Bumped from 45s to 60s to give the OpenTable lane room for the
+  // Browserbase fallback (each BB call is ~10–18s end-to-end).
+  const GLOBAL_TIMEOUT_MS = 60_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
