@@ -212,11 +212,11 @@ serve(async (req) => {
 
   // Global timeout: hard ceiling on initial response so the UI never hangs.
   // Lane budgets cap verification at 24s (Resy/Yelp) / 38s (OT — needs the
-  // longer window because Akamai stealth render takes ~25–30s per page).
-  // Add a small enrichment window + buffer.
-  // Bumped from 45s to 60s to give the OpenTable lane room for the
-  // Browserbase fallback (each BB call is ~10–18s end-to-end).
-  const GLOBAL_TIMEOUT_MS = 60_000;
+  // Product contract: results within ~30s. The OT lane no longer relies on
+  // slow Firecrawl scrapes — it uses OpenTable's own JSON availability
+  // endpoint as the primary verifier (~300–800ms), with Firecrawl scrape as
+  // graceful fallback. That makes a 28s global budget realistic.
+  const GLOBAL_TIMEOUT_MS = 28_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
@@ -228,9 +228,9 @@ serve(async (req) => {
   // accept an AbortSignal. Without this race the function can sit waiting
   // on an upstream hang until edge-runtime kills it at 150s (IDLE_TIMEOUT).
   // Must be > GLOBAL_TIMEOUT_MS so the inner global timer fires first and
-  // returns a clean response. 65s = global deadline (60s) + 5s grace for
+  // returns a clean response. 32s = global deadline (28s) + 4s grace for
   // in-flight cleanup (enrichment + geocoding finalization).
-  const HANDLER_HARD_CEILING_MS = 70_000;
+  const HANDLER_HARD_CEILING_MS = 32_000;
   const hardCeilingResponse = new Promise<Response>((resolve) => {
     hardCeilingTimer = setTimeout(() => {
       globalAbort.abort();
