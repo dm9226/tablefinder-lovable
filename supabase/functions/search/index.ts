@@ -471,7 +471,7 @@ serve(async (req) => {
     // race only triggers if the lane is somehow stuck past its own budget.
     const laneResults = await Promise.all([
       laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 26_000, "resy"),
-      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   32_000, "opentable"),
+      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   38_000, "opentable"),
       laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 26_000, "yelp"),
     ]);
     let verified = ([] as Restaurant[]).concat(...laneResults);
@@ -2207,7 +2207,7 @@ async function verifyAvailability(
   const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 4 : 6;
   // Wall-clock budget per lane (parallel). Slightly under the lane deadline
   // race in handler so the inner guard fires before the outer abort.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 30_000 : 24_000;
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 36_000 : 24_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Lane-local early exit: stop once this lane has hit its useful target.
