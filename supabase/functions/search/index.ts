@@ -2643,7 +2643,7 @@ async function verifyAvailability(
   // ("Proxies are not included in the free plan") and the call adds ~15s of
   // pure latency for zero benefit. To re-enable after upgrading Browserbase
   // to a paid plan, flip this back to `laneLabel === "opentable" ? 2 : 0`.
-  const BROWSERBASE_MAX_CALLS = 0;
+  const BROWSERBASE_MAX_CALLS = 2;
   let browserbaseCallsUsed = 0;
 
   const allChecked: (Restaurant | null)[] = [];
