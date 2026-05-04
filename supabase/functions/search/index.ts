@@ -2879,10 +2879,66 @@ async function verifyAvailability(
         if (foundTimes.length > 0) {
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
         }
-        
-        // Skip two-pass retry to stay within 25-30s budget (retries add 20-25s and rarely succeed)
-        if (foundTimes.length === 0 && !hadSelectSection) {
-          console.log(`  ${r.name} [opentable]: no "Select a time" section — skipping retry to save time`);
+
+        // Two-pass retry: if first pass got 0 slots but the "Select a time"
+        // section IS present (widget started rendering but slots hadn't
+        // populated), give it another shot with a longer waitFor — but only
+        // if the lane still has comfortable budget (avoid blowing the deadline
+        // on a single candidate).
+        const otRetryBudgetOk = !globalStartTime || (Date.now() - globalStartTime + 12_000 < LANE_TIME_BUDGET_MS);
+        if (foundTimes.length === 0 && hadSelectSection && otRetryBudgetOk) {
+          console.log(`  ${r.name} [opentable]: Select-a-time present but 0 slots — retrying with longer wait`);
+          try {
+            const retryAbort = new AbortController();
+            const retryTimer = setTimeout(() => retryAbort.abort(), 18_000);
+            await acquireFirecrawlSlot();
+            let retryResp: Response | null = null;
+            try {
+              try {
+                retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${firecrawlKey}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    ...scrapePayload,
+                    timeout: 16000,
+                    waitFor: 6500,
+                  }),
+                  signal: retryAbort.signal,
+                });
+              } catch (e: any) {
+                console.log(`  ${r.name} [opentable]: retry abort/error (${e?.name || e})`);
+              }
+            } finally {
+              clearTimeout(retryTimer);
+              releaseFirecrawlSlot();
+            }
+            if (retryResp && retryResp.ok) {
+              const retryData = await retryResp.json();
+              const retryMd = extractFirecrawlMarkdown(retryData);
+              const retryHtml = extractFirecrawlHtml(retryData);
+              const moreFromMd = parseOTSlots(retryMd);
+              const moreFromHtml = retryHtml ? parseOTSlotsFromHTML(retryHtml) : [];
+              for (const slot of [...moreFromMd, ...moreFromHtml]) {
+                if (!seenTimes.has(slot.time)) {
+                  seenTimes.add(slot.time);
+                  foundTimes.push(slot);
+                }
+              }
+              if (foundTimes.length > 0) {
+                console.log(`  ${r.name} [opentable]: retry recovered ${foundTimes.length} slots`);
+                // Refresh the working markdown so downstream regex/window
+                // logic sees the retry payload too.
+                if (retryMd) markdown = retryMd;
+              }
+            }
+          } catch (e) {
+            console.log(`  ${r.name} [opentable]: retry failed (${e instanceof Error ? e.message : String(e)})`);
+          }
+        } else if (foundTimes.length === 0 && !hadSelectSection) {
+          console.log(`  ${r.name} [opentable]: no "Select a time" section — skipping retry`);
         }
         
         // Step 3: If still nothing, strip dropdown noise and fall through to generic regex
