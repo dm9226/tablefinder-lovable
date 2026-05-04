@@ -2588,7 +2588,7 @@ async function verifyAvailability(
             isOT &&
             browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
             globalStartTime &&
-            (Date.now() - globalStartTime) + 22_000 < LANE_TIME_BUDGET_MS
+            (Date.now() - globalStartTime) + 14_000 < LANE_TIME_BUDGET_MS
           ) {
             browserbaseCallsUsed++;
             console.log(`[BB] ${r.name} [opentable] — Akamai challenge from Firecrawl (md=${markdown.length}), trying Browserbase (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
