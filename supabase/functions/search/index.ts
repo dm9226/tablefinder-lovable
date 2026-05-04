@@ -2186,6 +2186,215 @@ function selectCandidatesForVerification(
   return selected;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Browserbase fallback for OpenTable Akamai-challenged pages.
+//
+// Firecrawl's stealth proxy reliably solves Resy and Yelp, but OpenTable's
+// Akamai fingerprinting consistently returns a challenge interstitial
+// (markdown ~139 chars, html ~1130 chars). Browserbase runs a real headful
+// Chromium with residential-grade fingerprints that gets through.
+//
+// We use Browserbase's REST sessions API + CDP to navigate and grab the
+// fully-rendered HTML. We do NOT pull in puppeteer/playwright (too heavy for
+// edge functions) — instead we drive the session via the simple HTTP "context"
+// shortcut: create a session, call the /sessions/{id}/scrape-like endpoint,
+// and tear down. If Browserbase doesn't have a one-shot scrape endpoint we
+// fall back to a CDP WebSocket Page.navigate + DOM.getOuterHTML round-trip.
+//
+// Returns { markdown, html } on success or null on failure. Caller is
+// responsible for parsing time slots out of the returned content using the
+// same logic that processes Firecrawl OT responses.
+// ─────────────────────────────────────────────────────────────────────────────
+async function scrapeWithBrowserbase(
+  url: string,
+  restaurantName: string,
+): Promise<{ markdown: string; html: string } | null> {
+  const apiKey = Deno.env.get("BROWSERBASE_API_KEY");
+  const projectId = Deno.env.get("BROWSERBASE_PROJECT_ID");
+  if (!apiKey || !projectId) {
+    console.log(`[BB] missing BROWSERBASE_API_KEY or BROWSERBASE_PROJECT_ID — cannot fall back for ${restaurantName}`);
+    return null;
+  }
+
+  let sessionId: string | null = null;
+  const overallAbort = new AbortController();
+  const overallTimer = setTimeout(() => overallAbort.abort(), 22_000);
+
+  try {
+    // 1. Create a session with stealth + residential proxy.
+    const createResp = await fetch("https://api.browserbase.com/v1/sessions", {
+      method: "POST",
+      headers: {
+        "X-BB-API-Key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        projectId,
+        proxies: true,
+        browserSettings: {
+          fingerprint: { devices: ["desktop"], operatingSystems: ["macos"] },
+          solveCaptchas: true,
+          viewport: { width: 1280, height: 800 },
+        },
+      }),
+      signal: overallAbort.signal,
+    });
+    if (!createResp.ok) {
+      const errBody = await createResp.text().catch(() => "(no body)");
+      console.log(`[BB] session create failed (${createResp.status}) for ${restaurantName}: ${errBody.slice(0, 200)}`);
+      return null;
+    }
+    const session = await createResp.json();
+    sessionId = session?.id;
+    const wsUrl: string | undefined = session?.connectUrl;
+    if (!sessionId || !wsUrl) {
+      console.log(`[BB] session response missing id/connectUrl for ${restaurantName}`);
+      return null;
+    }
+
+    // 2. Drive the session via raw CDP over WebSocket.
+    //    Browserbase exposes a Chrome DevTools Protocol endpoint we can speak
+    //    directly without bringing in puppeteer.
+    const html = await new Promise<string | null>((resolve) => {
+      let done = false;
+      const finish = (val: string | null) => {
+        if (done) return;
+        done = true;
+        try { ws.close(); } catch { /* noop */ }
+        resolve(val);
+      };
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch (e) {
+        console.log(`[BB] WS connect threw for ${restaurantName}: ${e}`);
+        return finish(null);
+      }
+      const wsTimer = setTimeout(() => {
+        console.log(`[BB] CDP timed out for ${restaurantName}`);
+        finish(null);
+      }, 20_000);
+      overallAbort.signal.addEventListener("abort", () => {
+        clearTimeout(wsTimer);
+        finish(null);
+      });
+
+      let nextId = 1;
+      const pending = new Map<number, (v: any) => void>();
+      const send = (method: string, params: Record<string, unknown> = {}) =>
+        new Promise<any>((res) => {
+          const id = nextId++;
+          pending.set(id, res);
+          ws.send(JSON.stringify({ id, method, params }));
+        });
+
+      ws.onopen = async () => {
+        try {
+          // Get the first page target.
+          const targets = await send("Target.getTargets");
+          const pageTarget = targets?.result?.targetInfos?.find(
+            (t: any) => t.type === "page",
+          );
+          if (!pageTarget) {
+            console.log(`[BB] no page target for ${restaurantName}`);
+            clearTimeout(wsTimer);
+            return finish(null);
+          }
+          const attached = await send("Target.attachToTarget", {
+            targetId: pageTarget.targetId,
+            flatten: true,
+          });
+          const sessionIdCdp = attached?.result?.sessionId;
+          if (!sessionIdCdp) {
+            console.log(`[BB] failed to attach for ${restaurantName}`);
+            clearTimeout(wsTimer);
+            return finish(null);
+          }
+
+          // Wrap send to include sessionId for page-scoped methods.
+          const sendOnPage = (method: string, params: Record<string, unknown> = {}) =>
+            new Promise<any>((res) => {
+              const id = nextId++;
+              pending.set(id, res);
+              ws.send(JSON.stringify({ id, sessionId: sessionIdCdp, method, params }));
+            });
+
+          await sendOnPage("Page.enable");
+          await sendOnPage("Page.navigate", { url });
+          // Give the OT widget time to render (Akamai challenge + JS hydration).
+          await new Promise((r) => setTimeout(r, 9_000));
+
+          const outer = await sendOnPage("Runtime.evaluate", {
+            expression: "document.documentElement.outerHTML",
+            returnByValue: true,
+          });
+          const htmlStr: string | undefined = outer?.result?.result?.value;
+          clearTimeout(wsTimer);
+          finish(typeof htmlStr === "string" ? htmlStr : null);
+        } catch (e) {
+          console.log(`[BB] CDP error for ${restaurantName}: ${e}`);
+          clearTimeout(wsTimer);
+          finish(null);
+        }
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data as string);
+          if (typeof msg.id === "number" && pending.has(msg.id)) {
+            const cb = pending.get(msg.id)!;
+            pending.delete(msg.id);
+            cb(msg);
+          }
+        } catch { /* ignore */ }
+      };
+      ws.onerror = () => {
+        console.log(`[BB] WS error for ${restaurantName}`);
+        clearTimeout(wsTimer);
+        finish(null);
+      };
+      ws.onclose = () => {
+        clearTimeout(wsTimer);
+        if (!done) finish(null);
+      };
+    });
+
+    if (!html || html.length < 1500) {
+      console.log(`[BB] empty/short HTML for ${restaurantName} (len=${html?.length ?? 0})`);
+      return null;
+    }
+
+    // Cheap markdown shim: strip tags. Downstream OT extractor primarily
+    // operates on HTML anyway, so this is mostly to satisfy the existing
+    // `markdown.length` checks.
+    const markdown = html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    console.log(`[BB] ✓ retrieved ${restaurantName} via Browserbase (html=${html.length}, md=${markdown.length})`);
+    return { markdown, html };
+  } catch (e) {
+    console.log(`[BB] unexpected error for ${restaurantName}: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  } finally {
+    clearTimeout(overallTimer);
+    if (sessionId) {
+      // Best-effort teardown so Browserbase releases the session immediately.
+      fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+        method: "POST",
+        headers: {
+          "X-BB-API-Key": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ status: "REQUEST_RELEASE", projectId }),
+      }).catch(() => { /* ignore */ });
+    }
+  }
+}
+
 async function verifyAvailability(
   candidates: Restaurant[],
   params: SearchParams,
@@ -2209,6 +2418,15 @@ async function verifyAvailability(
   // Wall-clock budget per lane (parallel). Slightly under the lane deadline
   // race in handler so the inner guard fires before the outer abort.
   const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 36_000 : 24_000;
+
+  // Browserbase fallback budget for the OpenTable lane only. Akamai consistently
+  // serves a challenge interstitial to Firecrawl's stealth proxy (md=139). When
+  // that happens we get one more shot using a real headful Chromium via
+  // Browserbase. Capped at 2 calls per search to bound cost (~$0.02/search worst
+  // case) and wall-clock (~10–18s per call).
+  const BROWSERBASE_MAX_CALLS = laneLabel === "opentable" ? 2 : 0;
+  let browserbaseCallsUsed = 0;
+
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Lane-local early exit: stop once this lane has hit its useful target.
@@ -2363,8 +2581,34 @@ async function verifyAvailability(
         // require BOTH to be small before rejecting as empty render.
         const tooShort = markdown.trim().length < 200 && (!html || html.length < 1500);
         if (looksLikeChallenge || tooShort) {
-          console.log(`✗ ${r.name} [${r.platform}] — anti-bot challenge or empty render (md=${markdown.length}, html=${html.length}), rejecting`);
-          return null;
+          // OT-only Browserbase fallback. Resy/Yelp don't get this treatment:
+          // Resy rarely hits Akamai (server-rendered) and Yelp's DataDome
+          // verification path is handled separately via search-page slots.
+          if (
+            isOT &&
+            browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
+            globalStartTime &&
+            (Date.now() - globalStartTime) + 22_000 < LANE_TIME_BUDGET_MS
+          ) {
+            browserbaseCallsUsed++;
+            console.log(`[BB] ${r.name} [opentable] — Akamai challenge from Firecrawl (md=${markdown.length}), trying Browserbase (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
+            const bb = await scrapeWithBrowserbase(r.platformUrl, r.name);
+            if (bb && bb.html.length >= 1500) {
+              markdown = bb.markdown;
+              html = bb.html;
+              // Reset data/jsonData since they came from Firecrawl's now-stale
+              // response. Downstream parser only depends on markdown+html.
+              data = null;
+              jsonData = null;
+              // Fall through to the rest of verifyOne with the new content.
+            } else {
+              console.log(`✗ ${r.name} [opentable] — Browserbase fallback also failed, rejecting`);
+              return null;
+            }
+          } else {
+            console.log(`✗ ${r.name} [${r.platform}] — anti-bot challenge or empty render (md=${markdown.length}, html=${html.length}), rejecting`);
+            return null;
+          }
         }
       }
 
