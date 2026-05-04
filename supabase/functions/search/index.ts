@@ -212,11 +212,11 @@ serve(async (req) => {
 
   // Global timeout: hard ceiling on initial response so the UI never hangs.
   // Lane budgets cap verification at 24s (Resy/Yelp) / 38s (OT — needs the
-  // longer window because Akamai stealth render takes ~25–30s per page).
-  // Add a small enrichment window + buffer.
-  // Bumped from 45s to 60s to give the OpenTable lane room for the
-  // Browserbase fallback (each BB call is ~10–18s end-to-end).
-  const GLOBAL_TIMEOUT_MS = 60_000;
+  // Product contract: results within ~30s. The OT lane no longer relies on
+  // slow Firecrawl scrapes — it uses OpenTable's own JSON availability
+  // endpoint as the primary verifier (~300–800ms), with Firecrawl scrape as
+  // graceful fallback. That makes a 28s global budget realistic.
+  const GLOBAL_TIMEOUT_MS = 28_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
@@ -228,9 +228,9 @@ serve(async (req) => {
   // accept an AbortSignal. Without this race the function can sit waiting
   // on an upstream hang until edge-runtime kills it at 150s (IDLE_TIMEOUT).
   // Must be > GLOBAL_TIMEOUT_MS so the inner global timer fires first and
-  // returns a clean response. 65s = global deadline (60s) + 5s grace for
+  // returns a clean response. 32s = global deadline (28s) + 4s grace for
   // in-flight cleanup (enrichment + geocoding finalization).
-  const HANDLER_HARD_CEILING_MS = 70_000;
+  const HANDLER_HARD_CEILING_MS = 32_000;
   const hardCeilingResponse = new Promise<Response>((resolve) => {
     hardCeilingTimer = setTimeout(() => {
       globalAbort.abort();
@@ -296,7 +296,7 @@ serve(async (req) => {
 
       // Geocoding + enrichment (same as main flow)
       const elapsed = Date.now() - startTime;
-      const skipEnrichment = elapsed > 38_000;
+      const skipEnrichment = elapsed > 20_000;
       const enrichmentPromise: Promise<Map<number, any>> = skipEnrichment
         ? Promise.resolve(new Map<number, any>())
         : Promise.race([
@@ -475,9 +475,9 @@ serve(async (req) => {
     // guard fires first and returns accumulated results cleanly. The outer
     // race only triggers if the lane is somehow stuck past its own budget.
     const laneResults = await Promise.all([
-      laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 26_000, "resy"),
-      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   54_000, "opentable"),
-      laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 26_000, "yelp"),
+      laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 24_000, "resy"),
+      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   24_000, "opentable"),
+      laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 24_000, "yelp"),
     ]);
     let verified = ([] as Restaurant[]).concat(...laneResults);
     const laneCounts = { resy: laneResults[0].length, opentable: laneResults[1].length, yelp: laneResults[2].length };
@@ -516,7 +516,7 @@ serve(async (req) => {
     // vibe tags AND lose their AI-coordinate distance fallback. Even if verification
     // overran, we still spend up to 4s enriching the (small) returned set.
     const elapsed = Date.now() - startTime;
-    if (elapsed > 28_000) {
+    if (elapsed > 22_000) {
       console.warn(`Verification overran (${elapsed}ms) — running enrichment anyway with tight budget`);
     }
 
@@ -529,14 +529,14 @@ serve(async (req) => {
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-                console.warn("AI enrichment timed out at 14s — returning without enrichment");
+                console.warn("AI enrichment timed out at 8s — returning without enrichment");
               resolve(new Map<number, any>());
-              }, 14_000),
+              }, 8_000),
           ),
         ]);
 
     const [, enrichmentMap] = await Promise.all([
-      geocodeVerifiedResults(verified, params, 12_000),
+      geocodeVerifiedResults(verified, params, 6_000),
       enrichmentPromise,
     ]);
 
@@ -2191,6 +2191,218 @@ function selectCandidatesForVerification(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// OpenTable JSON availability lane (primary OT verifier)
+//
+// OpenTable's own booking widget hits an internal JSON endpoint to fetch slot
+// availability. Calling it directly from the edge function — with realistic
+// browser headers — sidesteps the Akamai challenge that consistently blocks
+// Firecrawl's render of the widget page itself. Typical latency: 300–800ms vs
+// 15–30s for a Firecrawl scrape, and structured JSON means no HTML parsing.
+//
+// Endpoint shape is undocumented and may change; on any failure (missing rid,
+// non-2xx, parse error, timeout) we return null and the caller falls through
+// to the existing Firecrawl scrape path.
+// ─────────────────────────────────────────────────────────────────────────────
+function extractOpenTableRid(url: string): string | null {
+  // Common patterns:
+  //   /r/<slug>?restaurantIds=12345
+  //   /r/<slug>?rid=12345
+  //   /restaurant/profile/12345/...
+  //   /book/<num>?restref=12345
+  try {
+    const u = new URL(url);
+    const qp =
+      u.searchParams.get("restaurantIds") ||
+      u.searchParams.get("rid") ||
+      u.searchParams.get("restref");
+    if (qp && /^\d+$/.test(qp)) return qp;
+    const profileM = u.pathname.match(/\/restaurant\/profile\/(\d+)/);
+    if (profileM) return profileM[1];
+  } catch {
+    /* fall through */
+  }
+  // Last-ditch: scan raw URL for numeric rid hint.
+  const m = url.match(/(?:restaurantIds|rid|restref)=(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Fetch the raw HTML of an OT slug page (no JS render, no proxy) and extract
+// the numeric restaurant ID from embedded JSON. ~200–800ms typical, no
+// Firecrawl cost. Akamai often serves this as plain HTML to non-JS clients
+// because the bot-protected resource is the booking widget, not the slug page.
+async function fetchOpenTableRidFromHtml(url: string): Promise<string | null> {
+  const abort = new AbortController();
+  // Tight 2s cap. OpenTable's edge frequently blocks datacenter IPs entirely
+  // (request hangs or 403s). We don't want to burn lane budget on a path
+  // that's likely to fail — fall through to Firecrawl quickly.
+  const timer = setTimeout(() => abort.abort(), 2_000);
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: abort.signal,
+      redirect: "follow",
+    });
+    if (!resp.ok) {
+      await resp.text().catch(() => "");
+      return null;
+    }
+    const html = await resp.text();
+    // Most reliable: window.__INITIAL_STATE__ / __NEXT_DATA__ has rid;
+    // also appears as "restaurantId":12345 or "rid":12345 in inline JSON.
+    const patterns = [
+      /"restaurantId"\s*:\s*(\d{3,8})/,
+      /"rid"\s*:\s*(\d{3,8})/,
+      /restaurantIds=(\d{3,8})/,
+      /\/book\/(\d{3,8})/,
+    ];
+    for (const p of patterns) {
+      const m = html.match(p);
+      if (m) return m[1];
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function verifyOpenTableJson(
+  r: Restaurant,
+  params: SearchParams,
+): Promise<Array<{ time: string; minutes: number }> | null> {
+  let rid = extractOpenTableRid(r.platformUrl);
+  if (!rid) {
+    rid = await fetchOpenTableRidFromHtml(r.platformUrl);
+  }
+  if (!rid) {
+    console.log(`[OT-JSON] ${r.name}: no rid resolvable from ${r.platformUrl} — falling back`);
+    return null;
+  }
+
+  // Build dateTime as YYYY-MM-DDTHH:MM (no seconds, no TZ — matches widget).
+  const dateTime = `${params.date}T${params.time}`;
+  const referer = r.platformUrl;
+
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 5_000);
+
+  // Try the public dapi availability endpoint first (web widget). Body shape
+  // mirrors what the booking widget sends.
+  const body = {
+    rids: [Number(rid)],
+    dateTime,
+    partySize: params.partySize,
+    includeOffers: false,
+    requestPremium: "true",
+    forceNextAvailable: "false",
+  };
+
+  try {
+    const resp = await fetch(
+      "https://www.opentable.com/dapi/booking/restaurant/availability",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent":
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Referer: referer,
+          Origin: "https://www.opentable.com",
+        },
+        body: JSON.stringify(body),
+        signal: abort.signal,
+      },
+    );
+    if (!resp.ok) {
+      console.log(`[OT-JSON] ${r.name}: HTTP ${resp.status} — falling back to Firecrawl`);
+      await resp.text().catch(() => "");
+      return null;
+    }
+    const json: any = await resp.json().catch(() => null);
+    if (!json) {
+      console.log(`[OT-JSON] ${r.name}: empty/invalid JSON — falling back`);
+      return null;
+    }
+
+    // Response can be { availability: { <rid>: { times: [...] } } } or
+    // { restaurants: [{ slots: [...] }] } or { availability: { times: [...] } }
+    // depending on endpoint version. Probe defensively.
+    const candidates: any[] = [];
+    const tryPushTimes = (arr: any) => {
+      if (Array.isArray(arr)) candidates.push(...arr);
+    };
+    tryPushTimes(json?.availability?.[rid]?.times);
+    tryPushTimes(json?.availability?.[rid]?.timeslots);
+    tryPushTimes(json?.availability?.times);
+    tryPushTimes(json?.availability?.timeslots);
+    if (Array.isArray(json?.restaurants)) {
+      for (const rest of json.restaurants) {
+        tryPushTimes(rest?.slots);
+        tryPushTimes(rest?.times);
+        tryPushTimes(rest?.timeslots);
+      }
+    }
+    if (Array.isArray(json?.timeslots)) tryPushTimes(json.timeslots);
+    if (Array.isArray(json?.slots)) tryPushTimes(json.slots);
+
+    if (candidates.length === 0) {
+      // Log the top-level keys once so we can iterate on shape if needed.
+      const keys = json && typeof json === "object" ? Object.keys(json).slice(0, 8).join(",") : "(none)";
+      console.log(`[OT-JSON] ${r.name}: 0 slots in response (top-level keys: ${keys})`);
+      return null;
+    }
+
+    // Parse each slot entry. Common fields: dateTime "2025-12-04T19:00",
+    // time "19:00", or { hour, minute }.
+    const out: Array<{ time: string; minutes: number }> = [];
+    const seen = new Set<string>();
+    for (const slot of candidates) {
+      let h: number | null = null;
+      let m: number | null = null;
+      const dt = slot?.dateTime || slot?.startDateTime || slot?.time;
+      if (typeof dt === "string") {
+        const tm = dt.match(/T?(\d{1,2}):(\d{2})/);
+        if (tm) {
+          h = parseInt(tm[1], 10);
+          m = parseInt(tm[2], 10);
+        }
+      }
+      if (h === null && typeof slot?.hour === "number" && typeof slot?.minute === "number") {
+        h = slot.hour;
+        m = slot.minute;
+      }
+      if (h === null || m === null || !Number.isFinite(h) || !Number.isFinite(m)) continue;
+      if (h < 0 || h > 23 || m < 0 || m > 59) continue;
+      const minutes = h * 60 + m;
+      const displayH = h % 12 || 12;
+      const ampm = h >= 12 ? "PM" : "AM";
+      const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${ampm}`;
+      if (seen.has(formatted)) continue;
+      seen.add(formatted);
+      out.push({ time: formatted, minutes });
+    }
+    if (out.length === 0) return null;
+    return out;
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      console.log(`[OT-JSON] ${r.name}: 5s timeout — falling back to Firecrawl`);
+    } else {
+      console.log(`[OT-JSON] ${r.name}: error ${err?.message || err} — falling back`);
+    }
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Browserbase fallback for OpenTable Akamai-challenged pages.
 //
 // Firecrawl's stealth proxy reliably solves Resy and Yelp, but OpenTable's
@@ -2421,16 +2633,17 @@ async function verifyAvailability(
   const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 4 : 6;
   // Wall-clock budget per lane (parallel). Slightly under the lane deadline
   // race in handler so the inner guard fires before the outer abort.
-  // OT bumped to 52s to accommodate Browserbase fallback calls (~10–18s each,
-  // up to 2 per search) on top of Firecrawl attempts. Yelp/Resy unchanged.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 52_000 : 24_000;
+  // OT no longer needs an inflated budget — primary verification path is now
+  // the OT JSON availability endpoint (~300–800ms). Firecrawl scrape remains
+  // as a graceful fallback when JSON misses.
+  const LANE_TIME_BUDGET_MS = 22_000;
 
-  // Browserbase fallback budget for the OpenTable lane only. Akamai consistently
-  // serves a challenge interstitial to Firecrawl's stealth proxy (md=139). When
-  // that happens we get one more shot using a real headful Chromium via
-  // Browserbase. Capped at 2 calls per search to bound cost (~$0.02/search worst
-  // case) and wall-clock (~10–18s per call).
-  const BROWSERBASE_MAX_CALLS = laneLabel === "opentable" ? 2 : 0;
+  // Browserbase fallback DISABLED. The current account is on the free plan
+  // which does not include proxies, so every session-create returns HTTP 402
+  // ("Proxies are not included in the free plan") and the call adds ~15s of
+  // pure latency for zero benefit. To re-enable after upgrading Browserbase
+  // to a paid plan, flip this back to `laneLabel === "opentable" ? 2 : 0`.
+  const BROWSERBASE_MAX_CALLS = 0;
   let browserbaseCallsUsed = 0;
 
   const allChecked: (Restaurant | null)[] = [];
@@ -2462,6 +2675,30 @@ async function verifyAvailability(
         return r;
       }
 
+      // ── OpenTable JSON availability lane (primary) ──
+      // Try OT's own JSON endpoint before spending 10–15s on a Firecrawl
+      // scrape that Akamai will likely challenge. Fast (<1s), free, and
+      // returns structured slot data. On miss, falls through to scrape.
+      if (isOT) {
+        const jsonSlots = await verifyOpenTableJson(r, params);
+        if (jsonSlots && jsonSlots.length > 0) {
+          // Apply ±2hr window relative to requested time, top 5.
+          const [reqH, reqM] = params.time.split(":").map(Number);
+          const reqMins = reqH * 60 + (reqM || 0);
+          const windowed = jsonSlots
+            .filter(s => Math.abs(s.minutes - reqMins) <= 120)
+            .sort((a, b) => Math.abs(a.minutes - reqMins) - Math.abs(b.minutes - reqMins))
+            .slice(0, 5)
+            .sort((a, b) => a.minutes - b.minutes);
+          if (windowed.length > 0) {
+            r.timeSlots = windowed.map(s => ({ time: s.time }));
+            console.log(`✓ Verified ${r.name} [opentable] (JSON) — ${windowed.length} slots: ${windowed.map(s => s.time).join(", ")}`);
+            return r;
+          }
+          console.log(`[OT-JSON] ${r.name}: ${jsonSlots.length} slots returned but none in ±2hr window — falling back to scrape`);
+        }
+      }
+
       // ── Firecrawl scrape (Resy / OpenTable / Yelp) ──
       // Per-provider settings:
       // - OpenTable: needs full JS render to expose "Select a time" widget; use
@@ -2478,8 +2715,10 @@ async function verifyAvailability(
           // it enough room. Earlier "weeks-ago working" config used 50s, but
           // global is now 38s — 28s is the largest value that still leaves
           // room for a fail-fast and a second OT candidate within budget.
-           timeout: isOT ? 32000 : isYelp ? 10000 : 10000,
-           ...(isOT && { waitFor: 8000, proxy: "stealth" }),
+           timeout: isOT ? 13000 : isYelp ? 10000 : 10000,
+           // Firecrawl rule: waitFor must be ≤ timeout/2. With OT timeout
+           // tightened to 13s, waitFor caps at 6s.
+           ...(isOT && { waitFor: 6000, proxy: "stealth" }),
            ...(isYelp && { waitFor: 1500 }),
           ...(!isOT && !isYelp && { waitFor: 1000 }),
         };
@@ -2501,7 +2740,7 @@ async function verifyAvailability(
           const scrapeAbort = new AbortController();
           const scrapeTimer = setTimeout(
             () => scrapeAbort.abort(),
-            isOT ? 34_000 : isYelp ? 14_000 : 14_000,
+            isOT ? 14_000 : isYelp ? 14_000 : 14_000,
           );
           await acquireFirecrawlSlot();
           try {
