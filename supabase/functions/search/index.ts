@@ -2581,8 +2581,34 @@ async function verifyAvailability(
         // require BOTH to be small before rejecting as empty render.
         const tooShort = markdown.trim().length < 200 && (!html || html.length < 1500);
         if (looksLikeChallenge || tooShort) {
-          console.log(`✗ ${r.name} [${r.platform}] — anti-bot challenge or empty render (md=${markdown.length}, html=${html.length}), rejecting`);
-          return null;
+          // OT-only Browserbase fallback. Resy/Yelp don't get this treatment:
+          // Resy rarely hits Akamai (server-rendered) and Yelp's DataDome
+          // verification path is handled separately via search-page slots.
+          if (
+            isOT &&
+            browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
+            globalStartTime &&
+            (Date.now() - globalStartTime) + 22_000 < LANE_TIME_BUDGET_MS
+          ) {
+            browserbaseCallsUsed++;
+            console.log(`[BB] ${r.name} [opentable] — Akamai challenge from Firecrawl (md=${markdown.length}), trying Browserbase (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
+            const bb = await scrapeWithBrowserbase(r.platformUrl, r.name);
+            if (bb && bb.html.length >= 1500) {
+              markdown = bb.markdown;
+              html = bb.html;
+              // Reset data/jsonData since they came from Firecrawl's now-stale
+              // response. Downstream parser only depends on markdown+html.
+              data = null;
+              jsonData = null;
+              // Fall through to the rest of verifyOne with the new content.
+            } else {
+              console.log(`✗ ${r.name} [opentable] — Browserbase fallback also failed, rejecting`);
+              return null;
+            }
+          } else {
+            console.log(`✗ ${r.name} [${r.platform}] — anti-bot challenge or empty render (md=${markdown.length}, html=${html.length}), rejecting`);
+            return null;
+          }
         }
       }
 
