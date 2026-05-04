@@ -527,14 +527,14 @@ serve(async (req) => {
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-                console.warn("AI enrichment timed out at 10s — returning without enrichment");
+                console.warn("AI enrichment timed out at 14s — returning without enrichment");
               resolve(new Map<number, any>());
-              }, 10_000),
+              }, 14_000),
           ),
         ]);
 
     const [, enrichmentMap] = await Promise.all([
-      geocodeVerifiedResults(verified, params, 8_000),
+      geocodeVerifiedResults(verified, params, 12_000),
       enrichmentPromise,
     ]);
 
