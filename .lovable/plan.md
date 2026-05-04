@@ -1,93 +1,86 @@
 ## Goal
 
-Get verified results back up across all three providers (Resy, OpenTable, Yelp) without paid APIs and without dropping any provider. The core unlock: stop trying to render anti-bot-protected booking widgets via Firecrawl, and instead call the JSON endpoints those widgets themselves call.
+Two things in one change:
+1. Restore the **30-second search contract** to the user.
+2. Actually bring **OpenTable verified results back** by calling OT's own JSON availability endpoint instead of scraping the Akamai-protected booking widget.
 
-## Why this works (and what we're not repeating)
+These are complementary: the JSON endpoint typically returns in 300–800ms vs. 15–30s for a Firecrawl scrape, so it makes the 30s budget *easier* to hit, not harder.
 
-Resy works fine today. The blocked lanes are OpenTable (Akamai on the widget render) and Yelp (DataDome on the widget render). Both platforms' booking widgets, once loaded, fetch availability from internal JSON endpoints. Those endpoints are usually behind much lighter protection than the rendered widget pages, because they're designed to be hit at high volume by the widgets themselves. Calling them directly from the edge function — with proper headers — is free, fast (~200–500ms), and returns structured time-slot data we don't have to parse out of HTML.
+## Diagnosis recap
 
-This is **not** the Yelp Fusion API (paid, off the table). This is the same JSON the public booking widget hits.
-
-We are also **not** re-trying anything in `mem://constraints/yelp-failed` (Yelp Fusion, Browserbase for Yelp, paid stealth proxies, etc.).
+- Latest logs: `elapsedMs=28139 ... verified{resy=2,opentable=0,yelp=2}` — 28s and zero OT verified.
+- Browserbase fallback dead: `[BB] session create failed (402) ... "Proxies are not included in the free plan"`. Every OT challenge currently burns ~15s for a 100% failure rate.
+- Resy and Yelp work; OT is the only broken lane.
 
 ## Plan
 
-### 1. OpenTable: add `/dapi` availability lane
+### 1. Add OT JSON availability lane (`verifyOpenTableJson`)
 
-In `supabase/functions/search/index.ts`, add a new verifier `verifyOpenTableDapi(restaurant, params)`:
+In `supabase/functions/search/index.ts`:
 
-- Resolve the OT `rid` (restaurant ID) from the discovery URL (already present in OT URLs as `restaurantIds=...` or in the slug page).
-- POST to `https://www.opentable.com/dapi/booking/restaurant/availability` with `{ restaurantIds: [rid], dateTime, partySize }` and headers that match a real browser request (UA, `x-csrf-token` if needed — probe first).
-- Parse the JSON response: each restaurant has a `slots[]` array with `time`, `dateTime`, `type`. Map directly to our `TimeSlot[]`.
-- 5s timeout. On any failure (4xx, 5xx, parse error), fall through to existing Firecrawl OT scrape.
+- **New helper** `extractOpenTableRid(url, markdown)`: pull the numeric restaurant ID from the OT URL (`/r/<slug>?restaurantIds=12345`) or from the discovery page response (`"rid":12345` or `restaurantIds=` in markdown). Return `null` if not found.
+- **New verifier** `verifyOpenTableJson(restaurant, params)`:
+  - Resolve `rid`. If missing, return `null` (caller falls back to Firecrawl scrape).
+  - POST to OT's availability endpoint with realistic browser headers (`User-Agent`, `Accept: application/json`, `Referer: https://www.opentable.com/r/<slug>`, `Origin: https://www.opentable.com`).
+  - Body: `{ rids: [rid], dateTime: "YYYY-MM-DDTHH:MM", partySize, ... }`.
+  - **5s hard timeout** via `AbortController`.
+  - On success: parse `timeslots[]` (or `availability.timeslots[]`) into our `TimeSlot[]` shape, applying the existing ±2hr filter and top-5 cap.
+  - On any non-2xx or parse error: log once and return `null` so the caller falls through.
+- **Wire-in** inside the existing OT verification path (around line 2480, right before the Firecrawl scrape):
+  1. Try `verifyOpenTableJson` first.
+  2. If it returns slots → done, skip the Firecrawl scrape entirely (saves 15–30s).
+  3. If it returns `null` → fall through to current Firecrawl scrape.
+  4. If Firecrawl is challenged → existing soft-verified path (no Browserbase).
 
-Order in `verifyOpenTable`:
-1. Try `/dapi` first (fast, free, structured).
-2. On failure, current Firecrawl scrape (existing behavior).
-3. On Firecrawl failure, soft-verified candidate (existing behavior).
+The endpoint is undocumented; if shape changes, Firecrawl scrape remains as fallback so the lane degrades gracefully.
 
-### 2. Yelp: probe-and-build internal availability endpoint
+### 2. Disable broken Browserbase fallback
 
-Same pattern, but Yelp is riskier (DataDome is more aggressive). Two sub-steps:
+- Set `BROWSERBASE_MAX_CALLS = 0` for all lanes.
+- Keep `scrapeWithBrowserbase` function in place with a comment noting why it's gated off and how to re-enable (flip the constant) if the account is upgraded to a paid plan.
+- Effect: no more 15s waits per OT candidate hitting `[BB] 402` errors.
 
-**2a. Probe (one-time, in code, gated behind a single search):**
-Add `verifyYelpInternal(restaurant, params)` that:
-- Extracts the Yelp business alias from the discovery URL (`/biz/<alias>`).
-- Calls `https://www.yelp.com/reservations/<alias>/search_availability?date=YYYY-MM-DD&time=HH:MM&num_people=N` (the endpoint the Yelp reservation widget hits).
-- Sends realistic browser headers + `Referer: https://www.yelp.com/biz/<alias>`.
-- 5s timeout.
-- Logs the response status and body shape on first call so we can see whether DataDome lets it through.
+### 3. Restore ~30s contract
 
-**2b. Wire-in:**
-- If the probe returns JSON with slots: use it as the primary Yelp verifier, push current Firecrawl approach to fallback.
-- If DataDome blocks it (403/429/HTML challenge): leave the new function in place but log-and-skip it; Yelp continues with current Firecrawl discovery + soft-verified fallback. No regression.
+In `supabase/functions/search/index.ts`:
 
-This is exactly the "probe + build if it works" choice you picked.
+| Constant | Current | New |
+|---|---|---|
+| `GLOBAL_TIMEOUT_MS` | 60_000 | **28_000** |
+| `HANDLER_HARD_CEILING_MS` | 70_000 | **32_000** |
+| OT lane deadline (`laneDeadline`) | 54_000 | **26_000** |
+| OT `LANE_TIME_BUDGET_MS` | 52_000 | **22_000** |
+| OT per-scrape Firecrawl timeout | 34_000 | **14_000** |
+| `skipEnrichment` threshold | 38_000 | **20_000** |
+| AI enrichment timeout | 14_000 | **8_000** |
+| Geocoding timeout | 12_000 | **6_000** |
 
-### 3. Soft-verified: minor, conservative broadening
+These values mirror the (working) Resy/Yelp budgets. The OT JSON endpoint replaces most of the time previously spent on slow OT scrapes, so this isn't a regression — it's the budget the lane *should have had* once verification got fast.
 
-Today: cap 3 soft results, only when verified count for that lane < 2, OT and Yelp only.
+### 4. No frontend changes needed
 
-Change to:
-- Same cap (3), same threshold (< 2), but apply to **Resy** too as a safety net (Resy rarely needs it but costs nothing to enable).
-- Keep the existing "tap to check" badge styling.
-
-Not raising cap to 5 and not changing the threshold — keeps the page mostly hard-verified, which matches the product's verification mandate.
-
-### 4. UI: badge already exists for OT/Yelp soft results
-
-Extend the existing soft-verified badge in `src/components/RestaurantCard.tsx` to render for any platform when `restaurant._softVerified === true && timeSlots.length === 0`. Same muted styling, platform-agnostic copy: *"availability not confirmed — tap to check"*.
-
-### 5. Tests
-
-Add a focused test in `supabase/functions/search/index.test.ts`:
-- One query that historically hit OT-heavy results (Chicago Steakhouse from existing `link-verify.test.ts`).
-- Assert that at least one OT result comes back with `timeSlots.length > 0` (proving `/dapi` worked).
-- Same shape for a Yelp-heavy query, but soft-assert (log-only) since the Yelp probe outcome is unknown until we run it.
-
-## Expected outcome
-
-- **OpenTable verified count**: large jump. `/dapi` is fast and rarely blocked. Most OT candidates that currently 408 should return slots in <1s.
-- **Yelp**: either a similar jump (if internal endpoint works) or unchanged from today (if DataDome blocks it) — no worse case.
-- **Resy**: unchanged.
-- **Wall-clock**: faster overall, since `/dapi` replaces 6–20s Firecrawl scrapes with ~500ms JSON calls.
-- **Cost**: drops. Each successful `/dapi` or Yelp-internal call replaces a Firecrawl call.
-
-## Risk
-
-- OT `/dapi` endpoint is undocumented and could change. Mitigation: Firecrawl scrape stays as fallback, so a `/dapi` shape change degrades gracefully, doesn't break the lane.
-- Yelp internal endpoint may be blocked by DataDome. Mitigation: built as additive — failure path is current behavior.
-- Both endpoints may require headers we don't anticipate (CSRF, cookies). Mitigation: log first response in detail; iterate once if needed.
+`src/components/SearchProgress.tsx` already cycles over ~30s. Soft-verified badge in `RestaurantCard.tsx` already covers the OT degradation path when both JSON and Firecrawl fail.
 
 ## Files changed
 
-- `supabase/functions/search/index.ts` — add `verifyOpenTableDapi`, add `verifyYelpInternal`, wire both into existing verifiers as primary attempts, broaden soft-verified to Resy.
-- `src/components/RestaurantCard.tsx` — make soft-verified badge platform-agnostic.
-- `supabase/functions/search/index.test.ts` — add OT `/dapi` assertion + Yelp probe log.
+- `supabase/functions/search/index.ts` — new `verifyOpenTableJson` + `extractOpenTableRid`, wire into OT verifier as primary attempt, set `BROWSERBASE_MAX_CALLS = 0`, revert all timeout constants.
 
-## Memory updates after build
+## Expected outcome
 
-- New: `mem://integrations/opentable-dapi` — documents the `/dapi/booking/restaurant/availability` lane, request shape, fallback chain.
-- New: `mem://integrations/yelp-internal` — documents the probe outcome (works / blocked) and current behavior.
-- Update: `mem://integrations/opentable` — note `/dapi` is tried first, Firecrawl is fallback.
-- Update: `mem://features/yelp-soft-fallback` → rename to `mem://features/soft-fallback`, note it now applies to all three lanes.
+- **OT verified count**: large jump. Most OT candidates that currently 0-out should return real slots in <1s via JSON.
+- **Resy / Yelp**: unchanged.
+- **Wall-clock**: search completes inside ~25s for typical queries; 28s hard cap respected.
+- **Cost**: down. Each successful JSON call replaces a Firecrawl call (~$0.005 → $0).
+
+## Risks
+
+- **OT JSON endpoint shape may differ from what's documented in public reverse-engineering posts.** Mitigation: log first response body in detail on initial deploy, iterate once if needed. Firecrawl scrape stays as fallback so lane never fully breaks.
+- **OT may rate-limit or geo-block the JSON endpoint.** Mitigation: 5s timeout + graceful fallback means worst case is "no improvement vs. today, no regression."
+- **`rid` extraction may miss for some discovery URLs.** Mitigation: regex tries multiple patterns; on miss, falls through to Firecrawl as today.
+
+## Memory updates (post-build)
+
+- New: `mem://integrations/opentable-json` — documents the availability JSON endpoint, request shape, fallback chain.
+- Update: `mem://integrations/opentable` — note JSON endpoint is tried first, Firecrawl is fallback.
+- Update: `mem://constraints/performance` — confirm 28s global / 32s ceiling is the active contract.
+- Remove or annotate: prior Browserbase notes — gated to 0 calls pending paid plan.
