@@ -2479,7 +2479,7 @@ async function verifyAvailability(
           // it enough room. Earlier "weeks-ago working" config used 50s, but
           // global is now 38s — 28s is the largest value that still leaves
           // room for a fail-fast and a second OT candidate within budget.
-           timeout: isOT ? 32000 : isYelp ? 10000 : 10000,
+           timeout: isOT ? 13000 : isYelp ? 10000 : 10000,
            ...(isOT && { waitFor: 8000, proxy: "stealth" }),
            ...(isYelp && { waitFor: 1500 }),
           ...(!isOT && !isYelp && { waitFor: 1000 }),
@@ -2502,7 +2502,7 @@ async function verifyAvailability(
           const scrapeAbort = new AbortController();
           const scrapeTimer = setTimeout(
             () => scrapeAbort.abort(),
-            isOT ? 34_000 : isYelp ? 14_000 : 14_000,
+            isOT ? 14_000 : isYelp ? 14_000 : 14_000,
           );
           await acquireFirecrawlSlot();
           try {
