@@ -2446,7 +2446,7 @@ async function scrapeWithBrowserbase(
       },
       body: JSON.stringify({
         projectId,
-        proxies: true,
+        proxies: false,
         browserSettings: {
           fingerprint: { devices: ["desktop"], operatingSystems: ["macos"] },
           solveCaptchas: true,
@@ -2643,7 +2643,7 @@ async function verifyAvailability(
   // ("Proxies are not included in the free plan") and the call adds ~15s of
   // pure latency for zero benefit. To re-enable after upgrading Browserbase
   // to a paid plan, flip this back to `laneLabel === "opentable" ? 2 : 0`.
-  const BROWSERBASE_MAX_CALLS = 0;
+  const BROWSERBASE_MAX_CALLS = 2;
   let browserbaseCallsUsed = 0;
 
   const allChecked: (Restaurant | null)[] = [];
@@ -2729,7 +2729,30 @@ async function verifyAvailability(
       let jsonData: any = null;
       let data: any = null;
 
-      {
+      // OT-first: skip Firecrawl and go straight to Browserbase for the first
+      // BROWSERBASE_MAX_CALLS OT candidates. Firecrawl OT has been ~100% 408
+      // recently (Akamai) so trying it first just burns the lane budget.
+      let skipFirecrawl = false;
+      if (
+        isOT &&
+        browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
+        globalStartTime &&
+        (Date.now() - globalStartTime) + 22_000 < LANE_TIME_BUDGET_MS + 8_000
+      ) {
+        browserbaseCallsUsed++;
+        console.log(`[BB] ${r.name} [opentable] — skipping Firecrawl, BB-first (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
+        const bb = await scrapeWithBrowserbase(r.platformUrl, r.name);
+        if (bb && bb.html.length >= 1500) {
+          markdown = bb.markdown;
+          html = bb.html;
+          skipFirecrawl = true;
+        } else {
+          console.log(`[BB] ${r.name} [opentable] — BB failed, will not retry Firecrawl`);
+          return null;
+        }
+      }
+
+      if (!skipFirecrawl) {
         // Firecrawl for all platforms (Resy/OT/Yelp). Wrap with our own AbortController
         // so we can cancel the fetch if Firecrawl's own timeout doesn't fire fast enough.
         // OT pages need ~18s to render JS widgets; Resy/Yelp are faster.
@@ -2786,21 +2809,62 @@ async function verifyAvailability(
         }
 
         if (!resp) {
-          console.log(`Scrape gave up for ${r.name} [${r.platform}] (abort, no budget for further retry)`);
-          return null;
-        }
-        if (!resp.ok) {
+          // OT-only: try Browserbase fallback when Firecrawl gives up entirely
+          if (
+            isOT &&
+            browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
+            globalStartTime &&
+            (Date.now() - globalStartTime) + 14_000 < LANE_TIME_BUDGET_MS
+          ) {
+            browserbaseCallsUsed++;
+            console.log(`[BB] ${r.name} [opentable] — Firecrawl gave up, trying Browserbase (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
+            const bb = await scrapeWithBrowserbase(r.platformUrl, r.name);
+            if (bb && bb.html.length >= 1500) {
+              markdown = bb.markdown;
+              html = bb.html;
+              data = null;
+              jsonData = null;
+            } else {
+              console.log(`Scrape gave up for ${r.name} [${r.platform}] (BB fallback failed)`);
+              return null;
+            }
+          } else {
+            console.log(`Scrape gave up for ${r.name} [${r.platform}] (abort, no budget for further retry)`);
+            return null;
+          }
+        } else if (!resp.ok) {
           const errBody = await resp.text().catch(() => "(no body)");
           console.log(`Scrape ${resp.status} for ${r.name} [${r.platform}]: ${errBody.slice(0, 200)}`);
-          return null;
+          // OT-only: try Browserbase on 408/5xx
+          if (
+            isOT &&
+            (resp.status === 408 || resp.status >= 500) &&
+            browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
+            globalStartTime &&
+            (Date.now() - globalStartTime) + 14_000 < LANE_TIME_BUDGET_MS
+          ) {
+            browserbaseCallsUsed++;
+            console.log(`[BB] ${r.name} [opentable] — Firecrawl ${resp.status}, trying Browserbase (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
+            const bb = await scrapeWithBrowserbase(r.platformUrl, r.name);
+            if (bb && bb.html.length >= 1500) {
+              markdown = bb.markdown;
+              html = bb.html;
+              data = null;
+              jsonData = null;
+            } else {
+              return null;
+            }
+          } else {
+            return null;
+          }
+        } else {
+          // Success path: parse Firecrawl response.
+          data = await resp.json();
+          markdown = extractFirecrawlMarkdown(data);
+          html = extractFirecrawlHtml(data);
+          links = extractFirecrawlLinks(data);
+          jsonData = data?.data?.extract || data?.extract;
         }
-
-        // Success path: parse Firecrawl response.
-        data = await resp.json();
-        markdown = extractFirecrawlMarkdown(data);
-        html = extractFirecrawlHtml(data);
-        links = extractFirecrawlLinks(data);
-        jsonData = data?.data?.extract || data?.extract;
       }
 
       if (!markdown && !html && !jsonData) {
