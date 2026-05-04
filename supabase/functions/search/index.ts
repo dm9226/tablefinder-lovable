@@ -2191,6 +2191,166 @@ function selectCandidatesForVerification(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// OpenTable JSON availability lane (primary OT verifier)
+//
+// OpenTable's own booking widget hits an internal JSON endpoint to fetch slot
+// availability. Calling it directly from the edge function — with realistic
+// browser headers — sidesteps the Akamai challenge that consistently blocks
+// Firecrawl's render of the widget page itself. Typical latency: 300–800ms vs
+// 15–30s for a Firecrawl scrape, and structured JSON means no HTML parsing.
+//
+// Endpoint shape is undocumented and may change; on any failure (missing rid,
+// non-2xx, parse error, timeout) we return null and the caller falls through
+// to the existing Firecrawl scrape path.
+// ─────────────────────────────────────────────────────────────────────────────
+function extractOpenTableRid(url: string): string | null {
+  // Common patterns:
+  //   /r/<slug>?restaurantIds=12345
+  //   /r/<slug>?rid=12345
+  //   /restaurant/profile/12345/...
+  //   /book/<num>?restref=12345
+  try {
+    const u = new URL(url);
+    const qp =
+      u.searchParams.get("restaurantIds") ||
+      u.searchParams.get("rid") ||
+      u.searchParams.get("restref");
+    if (qp && /^\d+$/.test(qp)) return qp;
+    const profileM = u.pathname.match(/\/restaurant\/profile\/(\d+)/);
+    if (profileM) return profileM[1];
+  } catch {
+    /* fall through */
+  }
+  // Last-ditch: scan raw URL for numeric rid hint.
+  const m = url.match(/(?:restaurantIds|rid|restref)=(\d+)/);
+  return m ? m[1] : null;
+}
+
+async function verifyOpenTableJson(
+  r: Restaurant,
+  params: SearchParams,
+): Promise<Array<{ time: string; minutes: number }> | null> {
+  const rid = extractOpenTableRid(r.platformUrl);
+  if (!rid) return null;
+
+  // Build dateTime as YYYY-MM-DDTHH:MM (no seconds, no TZ — matches widget).
+  const dateTime = `${params.date}T${params.time}`;
+  const referer = r.platformUrl;
+
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 5_000);
+
+  // Try the public dapi availability endpoint first (web widget). Body shape
+  // mirrors what the booking widget sends.
+  const body = {
+    rids: [Number(rid)],
+    dateTime,
+    partySize: params.partySize,
+    includeOffers: false,
+    requestPremium: "true",
+    forceNextAvailable: "false",
+  };
+
+  try {
+    const resp = await fetch(
+      "https://www.opentable.com/dapi/booking/restaurant/availability",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent":
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Referer: referer,
+          Origin: "https://www.opentable.com",
+        },
+        body: JSON.stringify(body),
+        signal: abort.signal,
+      },
+    );
+    if (!resp.ok) {
+      console.log(`[OT-JSON] ${r.name}: HTTP ${resp.status} — falling back to Firecrawl`);
+      await resp.text().catch(() => "");
+      return null;
+    }
+    const json: any = await resp.json().catch(() => null);
+    if (!json) {
+      console.log(`[OT-JSON] ${r.name}: empty/invalid JSON — falling back`);
+      return null;
+    }
+
+    // Response can be { availability: { <rid>: { times: [...] } } } or
+    // { restaurants: [{ slots: [...] }] } or { availability: { times: [...] } }
+    // depending on endpoint version. Probe defensively.
+    const candidates: any[] = [];
+    const tryPushTimes = (arr: any) => {
+      if (Array.isArray(arr)) candidates.push(...arr);
+    };
+    tryPushTimes(json?.availability?.[rid]?.times);
+    tryPushTimes(json?.availability?.[rid]?.timeslots);
+    tryPushTimes(json?.availability?.times);
+    tryPushTimes(json?.availability?.timeslots);
+    if (Array.isArray(json?.restaurants)) {
+      for (const rest of json.restaurants) {
+        tryPushTimes(rest?.slots);
+        tryPushTimes(rest?.times);
+        tryPushTimes(rest?.timeslots);
+      }
+    }
+    if (Array.isArray(json?.timeslots)) tryPushTimes(json.timeslots);
+    if (Array.isArray(json?.slots)) tryPushTimes(json.slots);
+
+    if (candidates.length === 0) {
+      // Log the top-level keys once so we can iterate on shape if needed.
+      const keys = json && typeof json === "object" ? Object.keys(json).slice(0, 8).join(",") : "(none)";
+      console.log(`[OT-JSON] ${r.name}: 0 slots in response (top-level keys: ${keys})`);
+      return null;
+    }
+
+    // Parse each slot entry. Common fields: dateTime "2025-12-04T19:00",
+    // time "19:00", or { hour, minute }.
+    const out: Array<{ time: string; minutes: number }> = [];
+    const seen = new Set<string>();
+    for (const slot of candidates) {
+      let h: number | null = null;
+      let m: number | null = null;
+      const dt = slot?.dateTime || slot?.startDateTime || slot?.time;
+      if (typeof dt === "string") {
+        const tm = dt.match(/T?(\d{1,2}):(\d{2})/);
+        if (tm) {
+          h = parseInt(tm[1], 10);
+          m = parseInt(tm[2], 10);
+        }
+      }
+      if (h === null && typeof slot?.hour === "number" && typeof slot?.minute === "number") {
+        h = slot.hour;
+        m = slot.minute;
+      }
+      if (h === null || m === null || !Number.isFinite(h) || !Number.isFinite(m)) continue;
+      if (h < 0 || h > 23 || m < 0 || m > 59) continue;
+      const minutes = h * 60 + m;
+      const displayH = h % 12 || 12;
+      const ampm = h >= 12 ? "PM" : "AM";
+      const formatted = `${displayH}:${m.toString().padStart(2, "0")} ${ampm}`;
+      if (seen.has(formatted)) continue;
+      seen.add(formatted);
+      out.push({ time: formatted, minutes });
+    }
+    if (out.length === 0) return null;
+    return out;
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      console.log(`[OT-JSON] ${r.name}: 5s timeout — falling back to Firecrawl`);
+    } else {
+      console.log(`[OT-JSON] ${r.name}: error ${err?.message || err} — falling back`);
+    }
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Browserbase fallback for OpenTable Akamai-challenged pages.
 //
 // Firecrawl's stealth proxy reliably solves Resy and Yelp, but OpenTable's
