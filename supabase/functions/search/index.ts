@@ -2419,7 +2419,9 @@ async function verifyAvailability(
   const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 4 : 6;
   // Wall-clock budget per lane (parallel). Slightly under the lane deadline
   // race in handler so the inner guard fires before the outer abort.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 36_000 : 24_000;
+  // OT bumped to 52s to accommodate Browserbase fallback calls (~10–18s each,
+  // up to 2 per search) on top of Firecrawl attempts. Yelp/Resy unchanged.
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 52_000 : 24_000;
 
   // Browserbase fallback budget for the OpenTable lane only. Akamai consistently
   // serves a challenge interstitial to Firecrawl's stealth proxy (md=139). When
