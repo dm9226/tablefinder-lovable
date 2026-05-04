@@ -227,8 +227,10 @@ serve(async (req) => {
   // (Lovable AI, Nominatim, Firecrawl search/retry, enrichment) do not yet
   // accept an AbortSignal. Without this race the function can sit waiting
   // on an upstream hang until edge-runtime kills it at 150s (IDLE_TIMEOUT).
-  // 36s = global deadline (33s) + 3s grace for in-flight cleanup.
-  const HANDLER_HARD_CEILING_MS = 42_000;
+  // Must be > GLOBAL_TIMEOUT_MS so the inner global timer fires first and
+  // returns a clean response. 65s = global deadline (60s) + 5s grace for
+  // in-flight cleanup (enrichment + geocoding finalization).
+  const HANDLER_HARD_CEILING_MS = 70_000;
   const hardCeilingResponse = new Promise<Response>((resolve) => {
     hardCeilingTimer = setTimeout(() => {
       globalAbort.abort();
