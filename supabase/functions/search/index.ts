@@ -296,7 +296,7 @@ serve(async (req) => {
 
       // Geocoding + enrichment (same as main flow)
       const elapsed = Date.now() - startTime;
-      const skipEnrichment = elapsed > 38_000;
+      const skipEnrichment = elapsed > 20_000;
       const enrichmentPromise: Promise<Map<number, any>> = skipEnrichment
         ? Promise.resolve(new Map<number, any>())
         : Promise.race([
