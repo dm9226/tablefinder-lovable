@@ -2352,53 +2352,65 @@ async function verifyAvailability(
         // Firecrawl for all platforms (Resy/OT/Yelp). Wrap with our own AbortController
         // so we can cancel the fetch if Firecrawl's own timeout doesn't fire fast enough.
         // OT pages need ~18s to render JS widgets; Resy/Yelp are faster.
-        const scrapeAbort = new AbortController();
-         const scrapeTimer = setTimeout(
-           () => scrapeAbort.abort(),
-           isOT ? 20_000 : isYelp ? 14_000 : 14_000,
-         );
-        // Acquire a slot on the global Firecrawl semaphore before firing the request.
-        // This prevents the parallel lanes from saturating Firecrawl with too many
-        // simultaneous scrapes (which immediately produces 408 timeouts).
-        await acquireFirecrawlSlot();
-        let resp: Response;
-        try {
+        // One bounded retry is allowed for transient 408/abort, IF the lane
+        // still has budget. This restores the resilience the lane used to
+        // have when Firecrawl was less flaky.
+        const attemptScrape = async (): Promise<Response | null> => {
+          const scrapeAbort = new AbortController();
+          const scrapeTimer = setTimeout(
+            () => scrapeAbort.abort(),
+            isOT ? 20_000 : isYelp ? 14_000 : 14_000,
+          );
+          await acquireFirecrawlSlot();
           try {
-            resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${firecrawlKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify(scrapePayload),
-              signal: scrapeAbort.signal,
-            });
-          } catch (fetchErr: any) {
-            clearTimeout(scrapeTimer);
-            if (fetchErr.name === "AbortError") {
-              console.log(`Scrape timeout (abort) for ${r.name} [${r.platform}]`);
-            } else {
-              console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+            try {
+              return await fetch(`${FIRECRAWL_API}/scrape`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${firecrawlKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(scrapePayload),
+                signal: scrapeAbort.signal,
+              });
+            } catch (fetchErr: any) {
+              if (fetchErr?.name === "AbortError") {
+                console.log(`Scrape timeout (abort) for ${r.name} [${r.platform}]`);
+              } else {
+                console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+              }
+              return null;
             }
-            return null;
+          } finally {
+            clearTimeout(scrapeTimer);
+            releaseFirecrawlSlot();
           }
-        } finally {
-          releaseFirecrawlSlot();
-        }
-        clearTimeout(scrapeTimer);
+        };
 
-        // Firecrawl 408 / non-OK = give up on this candidate. Retries and
-        // alternate providers were removed: production data showed they
-        // either returned anti-bot stubs (failovers) or fired with negative
-        // budget (retries), wasting the lane budget. A clean skip here lets
-        // the next batch start sooner and improves total verified count.
-        if (resp.status === 408 || !resp.ok) {
-          if (resp.status !== 408) {
-            const errBody = await resp.text().catch(() => "(no body)");
-            console.log(`Scrape ${resp.status} for ${r.name} [${r.platform}]: ${errBody.slice(0, 200)}`);
-          } else {
-            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
-          }
+        const hasBudgetForRetry = (): boolean => {
+          if (!globalStartTime) return true;
+          const elapsed = Date.now() - globalStartTime;
+          // Need at least 8s of headroom in the lane to attempt a retry.
+          return elapsed + 8_000 < LANE_TIME_BUDGET_MS;
+        };
+
+        let resp = await attemptScrape();
+        const transient = !resp || resp.status === 408 || resp.status === 502 || resp.status === 503 || resp.status === 504;
+        if (transient && hasBudgetForRetry()) {
+          console.log(`  ${r.name} [${r.platform}]: transient ${resp?.status ?? "abort"} — one retry`);
+          // Tiny backoff so we don't immediately re-collide with whatever was
+          // saturating Firecrawl on the first attempt.
+          await new Promise(res => setTimeout(res, 400));
+          resp = await attemptScrape();
+        }
+
+        if (!resp) {
+          console.log(`Scrape gave up for ${r.name} [${r.platform}] (abort, no budget for further retry)`);
+          return null;
+        }
+        if (!resp.ok) {
+          const errBody = await resp.text().catch(() => "(no body)");
+          console.log(`Scrape ${resp.status} for ${r.name} [${r.platform}]: ${errBody.slice(0, 200)}`);
           return null;
         }
 
