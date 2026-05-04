@@ -1621,12 +1621,101 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Yelp discovery via Firecrawl search engine queries for /reservations/ pages
-    // This bypasses DataDome since we search Google, not Yelp directly
+    // Two-pronged Yelp discovery:
+    // (A) Scrape the Yelp search results page directly via Firecrawl. With the
+    //     reservation_date/time/covers query params set, Yelp pre-renders the
+    //     available time slots for each restaurant. Parsing those gives us
+    //     pre-verified candidates (no individual /reservations/ scrape needed),
+    //     which sidesteps DataDome on per-restaurant pages.
+    // (B) Fall back to Google site: queries via searchFirecrawl. These produce
+    //     /reservations/ candidates that go through normal verification.
+    // Merge both, dedupe by alias, prefer the search-verified entries.
+    const searchVerifiedCandidates: Restaurant[] = [];
+    try {
+      await acquireFirecrawlSlot();
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 14_000);
+      let resp: Response | null = null;
+      try {
+        resp = await fetch(`${FIRECRAWL_API}/scrape`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${firecrawlKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url: yelpSearchUrl.toString(),
+            formats: ["markdown"],
+            onlyMainContent: true,
+            timeout: 12000,
+            waitFor: 2000,
+          }),
+          signal: ctrl.signal,
+        });
+      } catch (e) {
+        console.log(`Yelp search-page scrape error: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        clearTimeout(t);
+        releaseFirecrawlSlot();
+      }
+      if (resp && resp.ok) {
+        const data = await resp.json();
+        const md = extractFirecrawlMarkdown(data);
+        const parsed = parseYelpMarkdownResults(md);
+        console.log(`Yelp search-page parsed: ${parsed.length} entries (with pre-rendered times)`);
+        for (const e of parsed) {
+          if (!e.businessUrl) continue;
+          const alias = extractYelpAliasFromUrl(e.businessUrl);
+          if (!alias) continue;
+          const reservationUrl = buildYelpAvailabilityUrl(
+            `https://www.yelp.com/reservations/${alias}`,
+            params,
+          );
+          // Only count as search-verified if we got at least one time slot
+          // from the search page itself.
+          if (e.availableTimes.length === 0) continue;
+          const timeSlots = e.availableTimes.slice(0, 5).map(t => ({ time: t }));
+          searchVerifiedCandidates.push({
+            id: `yelp-search-${alias}`,
+            name: e.name,
+            cuisine: e.cuisineCategories.join(", ") || params.cuisine || "Restaurant",
+            neighborhood: e.neighborhood || params.city,
+            rating: e.rating,
+            reviewCount: e.reviewCount,
+            priceRange: e.priceRange,
+            platform: "yelp",
+            platformUrl: reservationUrl,
+            timeSlots,
+            _yelpSearchVerified: true,
+            _yelpCategories: e.cuisineCategories.join(", "),
+          } as Restaurant);
+        }
+      } else if (resp) {
+        console.log(`Yelp search-page scrape non-ok: ${resp.status}`);
+      }
+    } catch (e) {
+      console.log(`Yelp search-page lane skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // (B) Google site: discovery — run in parallel-ish (we already awaited A above).
     const firecrawlResults = await searchFirecrawl(params, firecrawlKey, "yelp", amenityTerms);
-    const candidates = normalizeCandidates("yelp", firecrawlResults, params);
-    console.log(`Yelp Firecrawl discovery: ${candidates.length} candidates`);
-    return candidates;
+    const googleCandidates = normalizeCandidates("yelp", firecrawlResults, params);
+
+    // Merge: search-verified first; then dedupe googleCandidates by alias.
+    const seenAliases = new Set<string>();
+    for (const c of searchVerifiedCandidates) {
+      const a = extractYelpAliasFromUrl(c.platformUrl);
+      if (a) seenAliases.add(a);
+    }
+    const merged: Restaurant[] = [...searchVerifiedCandidates];
+    for (const c of googleCandidates) {
+      const a = extractYelpAliasFromUrl(c.platformUrl);
+      if (a && seenAliases.has(a)) continue;
+      if (a) seenAliases.add(a);
+      merged.push(c);
+    }
+    console.log(`Yelp discovery: ${searchVerifiedCandidates.length} search-verified + ${googleCandidates.length} google = ${merged.length} merged`);
+    return merged;
   } catch (err) {
     console.error("Yelp scrape error:", err);
     return [];
