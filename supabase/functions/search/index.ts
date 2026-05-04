@@ -2446,7 +2446,7 @@ async function scrapeWithBrowserbase(
       },
       body: JSON.stringify({
         projectId,
-        proxies: true,
+        proxies: false,
         browserSettings: {
           fingerprint: { devices: ["desktop"], operatingSystems: ["macos"] },
           solveCaptchas: true,
