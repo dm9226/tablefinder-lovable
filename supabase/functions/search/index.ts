@@ -2253,8 +2253,8 @@ async function verifyAvailability(
           // it enough room. Earlier "weeks-ago working" config used 50s, but
           // global is now 38s — 28s is the largest value that still leaves
           // room for a fail-fast and a second OT candidate within budget.
-           timeout: isOT ? 28000 : isYelp ? 10000 : 10000,
-           ...(isOT && { waitFor: 5500, proxy: "stealth" }),
+           timeout: isOT ? 32000 : isYelp ? 10000 : 10000,
+           ...(isOT && { waitFor: 8000, proxy: "stealth" }),
            ...(isYelp && { waitFor: 1500 }),
           ...(!isOT && !isYelp && { waitFor: 1000 }),
         };
