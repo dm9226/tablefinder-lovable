@@ -2315,6 +2315,14 @@ async function verifyAvailability(
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
 
+      // Short-circuit: Yelp candidates that already have time slots extracted
+      // from the Yelp search results page are pre-verified — no need to scrape
+      // their individual /reservations/ page (which DataDome blocks anyway).
+      if (isYelp && (r as any)._yelpSearchVerified && r.timeSlots && r.timeSlots.length > 0) {
+        console.log(`✓ ${r.name} [yelp] — search-page verified (${r.timeSlots.length} slots), skipping individual scrape`);
+        return r;
+      }
+
       // ── Firecrawl scrape (Resy / OpenTable / Yelp) ──
       // Per-provider settings:
       // - OpenTable: needs full JS render to expose "Select a time" widget; use
