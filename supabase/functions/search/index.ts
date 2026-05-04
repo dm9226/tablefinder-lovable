@@ -198,7 +198,7 @@ Rules:
 - date: YYYY-MM-DD. "tonight" / "today" = ${todayStr}. "tomorrow" = next day. Day names = nearest upcoming.
 - time: HH:MM in 24h. Default 19:00. "lunch" ≈ 12:00, "brunch" ≈ 11:00, "dinner" ≈ 19:00.
 - partySize: integer. Default 2.
-- city: city name only, no state. Use location context if query omits city.
+- city: city name. Use the location context if the query omits a city. Do not guess — just use whatever city name is most appropriate for the coordinates provided.
 - state: 2-letter US code or empty for UK.
 - country: "us" or "gb". Default "us".
 - cuisine: specific cuisine or dish type (e.g. "Italian", "sushi", "steakhouse").
@@ -259,8 +259,8 @@ function extractCityFromLocation(loc?: string): string {
 // ─── RESY DISCOVERY ───────────────────────────────────────────────────────────
 
 async function discoverResy(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
-  const slug = resyCitySlug(params.city, params.state, params.country);
-  const metro = resyCityName(params.city, params.state);
+  const slug = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
+  const metro = resyCityName(params.city, params.state, params.lat, params.lng);
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
 
   const queries = [
@@ -787,9 +787,23 @@ async function firecrawlSearch(queries: string[], fcKey: string, limit = 5): Pro
         headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({ query, limit, scrapeOptions: { formats: ["markdown"] } }),
       });
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        console.warn(`[firecrawlSearch] HTTP ${resp.status} for "${query}"`);
+        return;
+      }
       const data = await resp.json();
-      for (const item of (data.data ?? [])) {
+      // Firecrawl v2 response shape can vary — handle all known variants
+      let items: any[] = [];
+      if (Array.isArray(data))                  items = data;
+      else if (Array.isArray(data.data))        items = data.data;
+      else if (Array.isArray(data.results))     items = data.results;
+      else if (Array.isArray(data.data?.results)) items = data.data.results;
+      else {
+        const keys = data && typeof data === "object" ? Object.keys(data).join(",") : String(data);
+        console.warn(`[firecrawlSearch] unexpected shape (keys: ${keys}) for "${query}"`);
+        return;
+      }
+      for (const item of items) {
         if (item.url && !seen.has(item.url)) {
           seen.add(item.url);
           results.push(item);
@@ -1012,82 +1026,90 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-// ─── RESY CITY SLUG MAP ────────────────────────────────────────────────────────
-// Maps city+state → Resy metro slug
+// ─── RESY METRO LOOKUP BY COORDINATES ────────────────────────────────────────
+// Keyed by Resy slug. lat/lng is the metro centre point.
+// When the user has coordinates we find the nearest metro by haversine distance.
+// When they don't, we fall back to a name lookup on the known slugs only.
 
-const RESY_MAP: Record<string, [string, string]> = { // [slug, displayName]
-  "new york:ny": ["new-york-city", "New York"],
-  "brooklyn:ny": ["new-york-city", "New York"],
-  "manhattan:ny": ["new-york-city", "New York"],
-  "queens:ny": ["new-york-city", "New York"],
-  "los angeles:ca": ["los-angeles", "Los Angeles"],
-  "la:ca": ["los-angeles", "Los Angeles"],
-  "santa monica:ca": ["los-angeles", "Los Angeles"],
-  "west hollywood:ca": ["los-angeles", "Los Angeles"],
-  "beverly hills:ca": ["los-angeles", "Los Angeles"],
-  "chicago:il": ["chicago", "Chicago"],
-  "san francisco:ca": ["san-francisco", "San Francisco"],
-  "sf:ca": ["san-francisco", "San Francisco"],
-  "washington:dc": ["washington-dc", "Washington DC"],
-  "dc:dc": ["washington-dc", "Washington DC"],
-  "miami:fl": ["miami", "Miami"],
-  "miami beach:fl": ["miami", "Miami"],
-  "coral gables:fl": ["miami", "Miami"],
-  "boston:ma": ["boston", "Boston"],
-  "cambridge:ma": ["boston", "Boston"],
-  "seattle:wa": ["seattle", "Seattle"],
-  "portland:or": ["portland", "Portland"],
-  "denver:co": ["denver", "Denver"],
-  "austin:tx": ["austin", "Austin"],
-  "dallas:tx": ["dallas", "Dallas"],
-  "houston:tx": ["houston", "Houston"],
-  "atlanta:ga": ["atlanta", "Atlanta"],
-  "buckhead:ga": ["atlanta", "Atlanta"],
-  "midtown:ga": ["atlanta", "Atlanta"],
-  "nashville:tn": ["nashville", "Nashville"],
-  "philadelphia:pa": ["philadelphia", "Philadelphia"],
-  "minneapolis:mn": ["minneapolis", "Minneapolis"],
-  "phoenix:az": ["phoenix", "Phoenix"],
-  "scottsdale:az": ["phoenix", "Phoenix"],
-  "new orleans:la": ["new-orleans", "New Orleans"],
-  "las vegas:nv": ["las-vegas", "Las Vegas"],
-  "san diego:ca": ["san-diego", "San Diego"],
-  "portland:me": ["portland-me", "Portland ME"],
-  "charlotte:nc": ["charlotte", "Charlotte"],
-  "raleigh:nc": ["raleigh", "Raleigh"],
-  "durham:nc": ["raleigh", "Raleigh"],
-  "richmond:va": ["richmond", "Richmond"],
-  "baltimore:md": ["baltimore", "Baltimore"],
-  "pittsburgh:pa": ["pittsburgh", "Pittsburgh"],
-  "cleveland:oh": ["cleveland", "Cleveland"],
-  "columbus:oh": ["columbus", "Columbus"],
-  "cincinnati:oh": ["cincinnati", "Cincinnati"],
-  "detroit:mi": ["detroit", "Detroit"],
-  "milwaukee:wi": ["milwaukee", "Milwaukee"],
-  "kansas city:mo": ["kansas-city", "Kansas City"],
-  "st louis:mo": ["st-louis", "St Louis"],
-  "indianapolis:in": ["indianapolis", "Indianapolis"],
-  "louisville:ky": ["louisville", "Louisville"],
-  "memphis:tn": ["memphis", "Memphis"],
-  "tampa:fl": ["tampa", "Tampa"],
-  "orlando:fl": ["orlando", "Orlando"],
-  "fort lauderdale:fl": ["miami", "Miami"],
-  "boca raton:fl": ["miami", "Miami"],
-  "salt lake city:ut": ["salt-lake-city", "Salt Lake City"],
-  "sacramento:ca": ["sacramento", "Sacramento"],
-  "san jose:ca": ["san-francisco", "San Francisco"],
-  "palo alto:ca": ["san-francisco", "San Francisco"],
-  "oakland:ca": ["san-francisco", "San Francisco"],
-  "london:": ["london", "London"],
-  "london:england": ["london", "London"],
-};
+const RESY_METROS: { slug: string; name: string; lat: number; lng: number }[] = [
+  { slug: "new-york-city",  name: "New York",       lat: 40.7128,  lng: -74.0060 },
+  { slug: "los-angeles",    name: "Los Angeles",     lat: 34.0522,  lng: -118.2437 },
+  { slug: "chicago",        name: "Chicago",          lat: 41.8781,  lng: -87.6298 },
+  { slug: "san-francisco",  name: "San Francisco",   lat: 37.7749,  lng: -122.4194 },
+  { slug: "washington-dc",  name: "Washington DC",   lat: 38.9072,  lng: -77.0369 },
+  { slug: "miami",          name: "Miami",            lat: 25.7617,  lng: -80.1918 },
+  { slug: "boston",         name: "Boston",           lat: 42.3601,  lng: -71.0589 },
+  { slug: "seattle",        name: "Seattle",          lat: 47.6062,  lng: -122.3321 },
+  { slug: "portland",       name: "Portland",         lat: 45.5051,  lng: -122.6750 },
+  { slug: "denver",         name: "Denver",           lat: 39.7392,  lng: -104.9903 },
+  { slug: "austin",         name: "Austin",           lat: 30.2672,  lng: -97.7431 },
+  { slug: "dallas",         name: "Dallas",           lat: 32.7767,  lng: -96.7970 },
+  { slug: "houston",        name: "Houston",          lat: 29.7604,  lng: -95.3698 },
+  { slug: "atlanta",        name: "Atlanta",          lat: 33.7490,  lng: -84.3880 },
+  { slug: "nashville",      name: "Nashville",        lat: 36.1627,  lng: -86.7816 },
+  { slug: "philadelphia",   name: "Philadelphia",     lat: 39.9526,  lng: -75.1652 },
+  { slug: "minneapolis",    name: "Minneapolis",      lat: 44.9778,  lng: -93.2650 },
+  { slug: "phoenix",        name: "Phoenix",          lat: 33.4484,  lng: -112.0740 },
+  { slug: "new-orleans",    name: "New Orleans",      lat: 29.9511,  lng: -90.0715 },
+  { slug: "las-vegas",      name: "Las Vegas",        lat: 36.1699,  lng: -115.1398 },
+  { slug: "san-diego",      name: "San Diego",        lat: 32.7157,  lng: -117.1611 },
+  { slug: "charlotte",      name: "Charlotte",        lat: 35.2271,  lng: -80.8431 },
+  { slug: "raleigh",        name: "Raleigh",          lat: 35.7796,  lng: -78.6382 },
+  { slug: "richmond",       name: "Richmond",         lat: 37.5407,  lng: -77.4360 },
+  { slug: "baltimore",      name: "Baltimore",        lat: 39.2904,  lng: -76.6122 },
+  { slug: "pittsburgh",     name: "Pittsburgh",       lat: 40.4406,  lng: -79.9959 },
+  { slug: "cleveland",      name: "Cleveland",        lat: 41.4993,  lng: -81.6944 },
+  { slug: "columbus",       name: "Columbus",         lat: 39.9612,  lng: -82.9988 },
+  { slug: "cincinnati",     name: "Cincinnati",       lat: 39.1031,  lng: -84.5120 },
+  { slug: "detroit",        name: "Detroit",          lat: 42.3314,  lng: -83.0458 },
+  { slug: "milwaukee",      name: "Milwaukee",        lat: 43.0389,  lng: -87.9065 },
+  { slug: "kansas-city",    name: "Kansas City",      lat: 39.0997,  lng: -94.5786 },
+  { slug: "st-louis",       name: "St Louis",         lat: 38.6270,  lng: -90.1994 },
+  { slug: "indianapolis",   name: "Indianapolis",     lat: 39.7684,  lng: -86.1581 },
+  { slug: "louisville",     name: "Louisville",       lat: 38.2527,  lng: -85.7585 },
+  { slug: "memphis",        name: "Memphis",          lat: 35.1495,  lng: -90.0490 },
+  { slug: "tampa",          name: "Tampa",            lat: 27.9506,  lng: -82.4572 },
+  { slug: "orlando",        name: "Orlando",          lat: 28.5383,  lng: -81.3792 },
+  { slug: "salt-lake-city", name: "Salt Lake City",   lat: 40.7608,  lng: -111.8910 },
+  { slug: "sacramento",     name: "Sacramento",       lat: 38.5816,  lng: -121.4944 },
+  { slug: "portland-me",    name: "Portland ME",      lat: 43.6591,  lng: -70.2568 },
+  { slug: "london",         name: "London",           lat: 51.5074,  lng: -0.1278 },
+];
 
-function resyCitySlug(city: string, state: string, country: string): string {
-  const key = `${city.toLowerCase()}:${(state || "").toLowerCase()}`;
-  return RESY_MAP[key]?.[0] ?? slugify(city);
+// Max distance to snap to a Resy metro (miles). Beyond this we use the city name as-is.
+const RESY_SNAP_RADIUS = 60;
+
+function nearestResyMetro(lat: number, lng: number): { slug: string; name: string } | null {
+  let best: { slug: string; name: string } | null = null;
+  let bestDist = Infinity;
+  for (const m of RESY_METROS) {
+    const d = haversine(lat, lng, m.lat, m.lng);
+    if (d < bestDist) { bestDist = d; best = m; }
+  }
+  return bestDist <= RESY_SNAP_RADIUS ? best : null;
 }
 
-function resyCityName(city: string, state: string): string {
+function resyCitySlug(city: string, state: string, _country: string, lat?: number, lng?: number): string {
+  // Coordinate-based lookup (most reliable — works for any suburb)
+  if (lat != null && lng != null) {
+    const metro = nearestResyMetro(lat, lng);
+    if (metro) return metro.slug;
+  }
+  // Name-based fallback for known cities
   const key = `${city.toLowerCase()}:${(state || "").toLowerCase()}`;
-  return RESY_MAP[key]?.[1] ?? city;
+  for (const m of RESY_METROS) {
+    if (m.name.toLowerCase() === city.toLowerCase()) return m.slug;
+  }
+  return slugify(city);
+}
+
+function resyCityName(city: string, state: string, lat?: number, lng?: number): string {
+  if (lat != null && lng != null) {
+    const metro = nearestResyMetro(lat, lng);
+    if (metro) return metro.name;
+  }
+  for (const m of RESY_METROS) {
+    if (m.name.toLowerCase() === city.toLowerCase()) return m.name;
+  }
+  return city;
 }
