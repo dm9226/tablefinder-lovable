@@ -2209,6 +2209,15 @@ async function verifyAvailability(
   // Wall-clock budget per lane (parallel). Slightly under the lane deadline
   // race in handler so the inner guard fires before the outer abort.
   const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 36_000 : 24_000;
+
+  // Browserbase fallback budget for the OpenTable lane only. Akamai consistently
+  // serves a challenge interstitial to Firecrawl's stealth proxy (md=139). When
+  // that happens we get one more shot using a real headful Chromium via
+  // Browserbase. Capped at 2 calls per search to bound cost (~$0.02/search worst
+  // case) and wall-clock (~10–18s per call).
+  const BROWSERBASE_MAX_CALLS = laneLabel === "opentable" ? 2 : 0;
+  let browserbaseCallsUsed = 0;
+
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Lane-local early exit: stop once this lane has hit its useful target.
