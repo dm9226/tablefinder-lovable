@@ -2786,21 +2786,62 @@ async function verifyAvailability(
         }
 
         if (!resp) {
-          console.log(`Scrape gave up for ${r.name} [${r.platform}] (abort, no budget for further retry)`);
-          return null;
-        }
-        if (!resp.ok) {
+          // OT-only: try Browserbase fallback when Firecrawl gives up entirely
+          if (
+            isOT &&
+            browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
+            globalStartTime &&
+            (Date.now() - globalStartTime) + 14_000 < LANE_TIME_BUDGET_MS
+          ) {
+            browserbaseCallsUsed++;
+            console.log(`[BB] ${r.name} [opentable] — Firecrawl gave up, trying Browserbase (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
+            const bb = await scrapeWithBrowserbase(r.platformUrl, r.name);
+            if (bb && bb.html.length >= 1500) {
+              markdown = bb.markdown;
+              html = bb.html;
+              data = null;
+              jsonData = null;
+            } else {
+              console.log(`Scrape gave up for ${r.name} [${r.platform}] (BB fallback failed)`);
+              return null;
+            }
+          } else {
+            console.log(`Scrape gave up for ${r.name} [${r.platform}] (abort, no budget for further retry)`);
+            return null;
+          }
+        } else if (!resp.ok) {
           const errBody = await resp.text().catch(() => "(no body)");
           console.log(`Scrape ${resp.status} for ${r.name} [${r.platform}]: ${errBody.slice(0, 200)}`);
-          return null;
+          // OT-only: try Browserbase on 408/5xx
+          if (
+            isOT &&
+            (resp.status === 408 || resp.status >= 500) &&
+            browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
+            globalStartTime &&
+            (Date.now() - globalStartTime) + 14_000 < LANE_TIME_BUDGET_MS
+          ) {
+            browserbaseCallsUsed++;
+            console.log(`[BB] ${r.name} [opentable] — Firecrawl ${resp.status}, trying Browserbase (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
+            const bb = await scrapeWithBrowserbase(r.platformUrl, r.name);
+            if (bb && bb.html.length >= 1500) {
+              markdown = bb.markdown;
+              html = bb.html;
+              data = null;
+              jsonData = null;
+            } else {
+              return null;
+            }
+          } else {
+            return null;
+          }
+        } else {
+          // Success path: parse Firecrawl response.
+          data = await resp.json();
+          markdown = extractFirecrawlMarkdown(data);
+          html = extractFirecrawlHtml(data);
+          links = extractFirecrawlLinks(data);
+          jsonData = data?.data?.extract || data?.extract;
         }
-
-        // Success path: parse Firecrawl response.
-        data = await resp.json();
-        markdown = extractFirecrawlMarkdown(data);
-        html = extractFirecrawlHtml(data);
-        links = extractFirecrawlLinks(data);
-        jsonData = data?.data?.extract || data?.extract;
       }
 
       if (!markdown && !html && !jsonData) {
