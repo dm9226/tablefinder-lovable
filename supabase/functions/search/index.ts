@@ -2713,7 +2713,9 @@ async function verifyAvailability(
           // global is now 38s — 28s is the largest value that still leaves
           // room for a fail-fast and a second OT candidate within budget.
            timeout: isOT ? 13000 : isYelp ? 10000 : 10000,
-           ...(isOT && { waitFor: 8000, proxy: "stealth" }),
+           // Firecrawl rule: waitFor must be ≤ timeout/2. With OT timeout
+           // tightened to 13s, waitFor caps at 6s.
+           ...(isOT && { waitFor: 6000, proxy: "stealth" }),
            ...(isYelp && { waitFor: 1500 }),
           ...(!isOT && !isYelp && { waitFor: 1000 }),
         };
