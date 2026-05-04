@@ -2226,12 +2226,61 @@ function extractOpenTableRid(url: string): string | null {
   return m ? m[1] : null;
 }
 
+// Fetch the raw HTML of an OT slug page (no JS render, no proxy) and extract
+// the numeric restaurant ID from embedded JSON. ~200–800ms typical, no
+// Firecrawl cost. Akamai often serves this as plain HTML to non-JS clients
+// because the bot-protected resource is the booking widget, not the slug page.
+async function fetchOpenTableRidFromHtml(url: string): Promise<string | null> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 4_000);
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: abort.signal,
+      redirect: "follow",
+    });
+    if (!resp.ok) {
+      await resp.text().catch(() => "");
+      return null;
+    }
+    const html = await resp.text();
+    // Most reliable: window.__INITIAL_STATE__ / __NEXT_DATA__ has rid;
+    // also appears as "restaurantId":12345 or "rid":12345 in inline JSON.
+    const patterns = [
+      /"restaurantId"\s*:\s*(\d{3,8})/,
+      /"rid"\s*:\s*(\d{3,8})/,
+      /restaurantIds=(\d{3,8})/,
+      /\/book\/(\d{3,8})/,
+    ];
+    for (const p of patterns) {
+      const m = html.match(p);
+      if (m) return m[1];
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function verifyOpenTableJson(
   r: Restaurant,
   params: SearchParams,
 ): Promise<Array<{ time: string; minutes: number }> | null> {
-  const rid = extractOpenTableRid(r.platformUrl);
-  if (!rid) return null;
+  let rid = extractOpenTableRid(r.platformUrl);
+  if (!rid) {
+    rid = await fetchOpenTableRidFromHtml(r.platformUrl);
+  }
+  if (!rid) {
+    console.log(`[OT-JSON] ${r.name}: no rid resolvable from ${r.platformUrl} — falling back`);
+    return null;
+  }
 
   // Build dateTime as YYYY-MM-DDTHH:MM (no seconds, no TZ — matches widget).
   const dateTime = `${params.date}T${params.time}`;
