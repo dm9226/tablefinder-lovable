@@ -211,9 +211,10 @@ serve(async (req) => {
   }
 
   // Global timeout: hard ceiling on initial response so the UI never hangs.
-  // Lane budgets cap verification at 22s (Resy/Yelp) / 28s (OT). Add a 4s
-  // enrichment window + small buffer = 33s.
-  const GLOBAL_TIMEOUT_MS = 38_000;
+  // Lane budgets cap verification at 24s (Resy/Yelp) / 38s (OT — needs the
+  // longer window because Akamai stealth render takes ~25–30s per page).
+  // Add a small enrichment window + buffer.
+  const GLOBAL_TIMEOUT_MS = 45_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
