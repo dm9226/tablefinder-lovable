@@ -801,6 +801,8 @@ async function firecrawlSearch(queries: string[], fcKey: string, limit = 5): Pro
       else if (Array.isArray(data.results))       items = data.results;
       else if (Array.isArray(data.data?.results)) items = data.data.results;
       else if (Array.isArray(data.data?.data))    items = data.data.data;
+      else if (Array.isArray(data.data?.web))      items = data.data.web;
+      else if (Array.isArray(data.web))             items = data.web;
       else {
         console.warn(`[firecrawlSearch] unrecognised shape: ${JSON.stringify(data).slice(0, 300)}`);
         return;
