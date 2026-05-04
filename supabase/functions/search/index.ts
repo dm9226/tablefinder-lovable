@@ -2276,7 +2276,7 @@ async function verifyAvailability(
           const scrapeAbort = new AbortController();
           const scrapeTimer = setTimeout(
             () => scrapeAbort.abort(),
-            isOT ? 30_000 : isYelp ? 14_000 : 14_000,
+            isOT ? 34_000 : isYelp ? 14_000 : 14_000,
           );
           await acquireFirecrawlSlot();
           try {
