@@ -2623,6 +2623,30 @@ async function verifyAvailability(
         return r;
       }
 
+      // ── OpenTable JSON availability lane (primary) ──
+      // Try OT's own JSON endpoint before spending 10–15s on a Firecrawl
+      // scrape that Akamai will likely challenge. Fast (<1s), free, and
+      // returns structured slot data. On miss, falls through to scrape.
+      if (isOT) {
+        const jsonSlots = await verifyOpenTableJson(r, params);
+        if (jsonSlots && jsonSlots.length > 0) {
+          // Apply ±2hr window relative to requested time, top 5.
+          const [reqH, reqM] = params.time.split(":").map(Number);
+          const reqMins = reqH * 60 + (reqM || 0);
+          const windowed = jsonSlots
+            .filter(s => Math.abs(s.minutes - reqMins) <= 120)
+            .sort((a, b) => Math.abs(a.minutes - reqMins) - Math.abs(b.minutes - reqMins))
+            .slice(0, 5)
+            .sort((a, b) => a.minutes - b.minutes);
+          if (windowed.length > 0) {
+            r.timeSlots = windowed.map(s => ({ time: s.time }));
+            console.log(`✓ Verified ${r.name} [opentable] (JSON) — ${windowed.length} slots: ${windowed.map(s => s.time).join(", ")}`);
+            return r;
+          }
+          console.log(`[OT-JSON] ${r.name}: ${jsonSlots.length} slots returned but none in ±2hr window — falling back to scrape`);
+        }
+      }
+
       // ── Firecrawl scrape (Resy / OpenTable / Yelp) ──
       // Per-provider settings:
       // - OpenTable: needs full JS render to expose "Select a time" widget; use
