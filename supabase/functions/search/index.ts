@@ -2232,7 +2232,10 @@ function extractOpenTableRid(url: string): string | null {
 // because the bot-protected resource is the booking widget, not the slug page.
 async function fetchOpenTableRidFromHtml(url: string): Promise<string | null> {
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), 4_000);
+  // Tight 2s cap. OpenTable's edge frequently blocks datacenter IPs entirely
+  // (request hangs or 403s). We don't want to burn lane budget on a path
+  // that's likely to fail — fall through to Firecrawl quickly.
+  const timer = setTimeout(() => abort.abort(), 2_000);
   try {
     const resp = await fetch(url, {
       headers: {
