@@ -214,7 +214,9 @@ serve(async (req) => {
   // Lane budgets cap verification at 24s (Resy/Yelp) / 38s (OT — needs the
   // longer window because Akamai stealth render takes ~25–30s per page).
   // Add a small enrichment window + buffer.
-  const GLOBAL_TIMEOUT_MS = 45_000;
+  // Bumped from 45s to 60s to give the OpenTable lane room for the
+  // Browserbase fallback (each BB call is ~10–18s end-to-end).
+  const GLOBAL_TIMEOUT_MS = 60_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
@@ -472,7 +474,7 @@ serve(async (req) => {
     // race only triggers if the lane is somehow stuck past its own budget.
     const laneResults = await Promise.all([
       laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 26_000, "resy"),
-      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   38_000, "opentable"),
+      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   54_000, "opentable"),
       laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 26_000, "yelp"),
     ]);
     let verified = ([] as Restaurant[]).concat(...laneResults);
@@ -525,14 +527,14 @@ serve(async (req) => {
           enrichWithAI(verified, LOVABLE_API_KEY, params, amenityTerms),
           new Promise<Map<number, any>>((resolve) =>
             setTimeout(() => {
-                console.warn("AI enrichment timed out at 10s — returning without enrichment");
+                console.warn("AI enrichment timed out at 14s — returning without enrichment");
               resolve(new Map<number, any>());
-              }, 10_000),
+              }, 14_000),
           ),
         ]);
 
     const [, enrichmentMap] = await Promise.all([
-      geocodeVerifiedResults(verified, params, 8_000),
+      geocodeVerifiedResults(verified, params, 12_000),
       enrichmentPromise,
     ]);
 
@@ -2417,7 +2419,9 @@ async function verifyAvailability(
   const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 4 : 6;
   // Wall-clock budget per lane (parallel). Slightly under the lane deadline
   // race in handler so the inner guard fires before the outer abort.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 36_000 : 24_000;
+  // OT bumped to 52s to accommodate Browserbase fallback calls (~10–18s each,
+  // up to 2 per search) on top of Firecrawl attempts. Yelp/Resy unchanged.
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 52_000 : 24_000;
 
   // Browserbase fallback budget for the OpenTable lane only. Akamai consistently
   // serves a challenge interstitial to Firecrawl's stealth proxy (md=139). When
@@ -2588,7 +2592,7 @@ async function verifyAvailability(
             isOT &&
             browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
             globalStartTime &&
-            (Date.now() - globalStartTime) + 22_000 < LANE_TIME_BUDGET_MS
+            (Date.now() - globalStartTime) + 14_000 < LANE_TIME_BUDGET_MS
           ) {
             browserbaseCallsUsed++;
             console.log(`[BB] ${r.name} [opentable] — Akamai challenge from Firecrawl (md=${markdown.length}), trying Browserbase (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
