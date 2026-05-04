@@ -2729,7 +2729,30 @@ async function verifyAvailability(
       let jsonData: any = null;
       let data: any = null;
 
-      {
+      // OT-first: skip Firecrawl and go straight to Browserbase for the first
+      // BROWSERBASE_MAX_CALLS OT candidates. Firecrawl OT has been ~100% 408
+      // recently (Akamai) so trying it first just burns the lane budget.
+      let skipFirecrawl = false;
+      if (
+        isOT &&
+        browserbaseCallsUsed < BROWSERBASE_MAX_CALLS &&
+        globalStartTime &&
+        (Date.now() - globalStartTime) + 22_000 < LANE_TIME_BUDGET_MS + 8_000
+      ) {
+        browserbaseCallsUsed++;
+        console.log(`[BB] ${r.name} [opentable] — skipping Firecrawl, BB-first (call ${browserbaseCallsUsed}/${BROWSERBASE_MAX_CALLS})`);
+        const bb = await scrapeWithBrowserbase(r.platformUrl, r.name);
+        if (bb && bb.html.length >= 1500) {
+          markdown = bb.markdown;
+          html = bb.html;
+          skipFirecrawl = true;
+        } else {
+          console.log(`[BB] ${r.name} [opentable] — BB failed, will not retry Firecrawl`);
+          return null;
+        }
+      }
+
+      if (!skipFirecrawl) {
         // Firecrawl for all platforms (Resy/OT/Yelp). Wrap with our own AbortController
         // so we can cancel the fetch if Firecrawl's own timeout doesn't fire fast enough.
         // OT pages need ~18s to render JS widgets; Resy/Yelp are faster.
