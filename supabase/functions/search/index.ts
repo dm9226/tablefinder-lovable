@@ -2333,11 +2333,14 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: !isOT, // OT needs full page for widget HTML; Resy/Yelp don't
-          // OT needs stealth to render the time-slot widget past Akamai. Keep
-          // the timeout tight (no 50s waits, no retry) so failures don't blow
-          // the lane budget; the lane scheduler moves on to the next batch.
-           timeout: isOT ? 18000 : isYelp ? 10000 : 10000,
-           ...(isOT && { waitFor: 3500, proxy: "stealth" }),
+          // OT needs stealth to render the time-slot widget past Akamai. The
+          // stealth render typically takes ~22–28s end-to-end (Akamai
+          // challenge + page render), so the per-scrape timeout has to give
+          // it enough room. Earlier "weeks-ago working" config used 50s, but
+          // global is now 38s — 28s is the largest value that still leaves
+          // room for a fail-fast and a second OT candidate within budget.
+           timeout: isOT ? 28000 : isYelp ? 10000 : 10000,
+           ...(isOT && { waitFor: 5500, proxy: "stealth" }),
            ...(isYelp && { waitFor: 1500 }),
           ...(!isOT && !isYelp && { waitFor: 1000 }),
         };
