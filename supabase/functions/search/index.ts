@@ -211,9 +211,10 @@ serve(async (req) => {
   }
 
   // Global timeout: hard ceiling on initial response so the UI never hangs.
-  // Lane budgets cap verification at 22s (Resy/Yelp) / 28s (OT). Add a 4s
-  // enrichment window + small buffer = 33s.
-  const GLOBAL_TIMEOUT_MS = 38_000;
+  // Lane budgets cap verification at 24s (Resy/Yelp) / 38s (OT — needs the
+  // longer window because Akamai stealth render takes ~25–30s per page).
+  // Add a small enrichment window + buffer.
+  const GLOBAL_TIMEOUT_MS = 45_000;
   const globalAbort = new AbortController();
   const globalTimer = setTimeout(() => globalAbort.abort(), GLOBAL_TIMEOUT_MS);
   const startTime = Date.now();
@@ -471,7 +472,7 @@ serve(async (req) => {
     // race only triggers if the lane is somehow stuck past its own budget.
     const laneResults = await Promise.all([
       laneDeadline(verifyAvailability(resyCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "resy", resyAccum),         resyAccum, 26_000, "resy"),
-      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   32_000, "opentable"),
+      laneDeadline(verifyAvailability(otCands,   params, keys.firecrawlKey, amenityTerms, keys._startTime, "opentable", otAccum),       otAccum,   38_000, "opentable"),
       laneDeadline(verifyAvailability(yelpCands, params, keys.firecrawlKey, amenityTerms, keys._startTime, "yelp", yelpAccum),         yelpAccum, 26_000, "yelp"),
     ]);
     let verified = ([] as Restaurant[]).concat(...laneResults);
@@ -1621,8 +1622,11 @@ async function fetchYelpCandidates(
 
     console.log(`Yelp scrape discovery: ${yelpSearchUrl.toString()}`);
 
-    // Yelp discovery via Firecrawl search engine queries for /reservations/ pages
-    // This bypasses DataDome since we search Google, not Yelp directly
+    // Yelp discovery via Firecrawl Google search (`site:yelp.com/reservations …`).
+    // We deliberately do NOT scrape the Yelp search results page directly — Yelp
+    // serves a DataDome-protected map fallback for automated scrapes, so the
+    // markdown comes back without restaurant entries. Each candidate's
+    // availability is then verified individually downstream.
     const firecrawlResults = await searchFirecrawl(params, firecrawlKey, "yelp", amenityTerms);
     const candidates = normalizeCandidates("yelp", firecrawlResults, params);
     console.log(`Yelp Firecrawl discovery: ${candidates.length} candidates`);
@@ -2204,7 +2208,7 @@ async function verifyAvailability(
   const LANE_TARGET = laneLabel === "opentable" ? 5 : laneLabel === "yelp" ? 4 : 6;
   // Wall-clock budget per lane (parallel). Slightly under the lane deadline
   // race in handler so the inner guard fires before the outer abort.
-  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 30_000 : 24_000;
+  const LANE_TIME_BUDGET_MS = laneLabel === "opentable" ? 36_000 : 24_000;
   const allChecked: (Restaurant | null)[] = [];
   for (let batchStart = 0; batchStart < candidates.length; batchStart += BATCH_SIZE) {
     // Lane-local early exit: stop once this lane has hit its useful target.
@@ -2226,6 +2230,14 @@ async function verifyAvailability(
       const isResy = r.platform === "resy";
       const isOT = r.platform === "opentable";
 
+      // Short-circuit: Yelp candidates that already have time slots extracted
+      // from the Yelp search results page are pre-verified — no need to scrape
+      // their individual /reservations/ page (which DataDome blocks anyway).
+      if (isYelp && (r as any)._yelpSearchVerified && r.timeSlots && r.timeSlots.length > 0) {
+        console.log(`✓ ${r.name} [yelp] — search-page verified (${r.timeSlots.length} slots), skipping individual scrape`);
+        return r;
+      }
+
       // ── Firecrawl scrape (Resy / OpenTable / Yelp) ──
       // Per-provider settings:
       // - OpenTable: needs full JS render to expose "Select a time" widget; use
@@ -2236,11 +2248,14 @@ async function verifyAvailability(
           url: r.platformUrl,
           formats: isOT ? ["markdown", "html"] : ["markdown"],
           onlyMainContent: !isOT, // OT needs full page for widget HTML; Resy/Yelp don't
-          // OT needs stealth to render the time-slot widget past Akamai. Keep
-          // the timeout tight (no 50s waits, no retry) so failures don't blow
-          // the lane budget; the lane scheduler moves on to the next batch.
-           timeout: isOT ? 18000 : isYelp ? 10000 : 10000,
-           ...(isOT && { waitFor: 3500, proxy: "stealth" }),
+          // OT needs stealth to render the time-slot widget past Akamai. The
+          // stealth render typically takes ~22–28s end-to-end (Akamai
+          // challenge + page render), so the per-scrape timeout has to give
+          // it enough room. Earlier "weeks-ago working" config used 50s, but
+          // global is now 38s — 28s is the largest value that still leaves
+          // room for a fail-fast and a second OT candidate within budget.
+           timeout: isOT ? 32000 : isYelp ? 10000 : 10000,
+           ...(isOT && { waitFor: 8000, proxy: "stealth" }),
            ...(isYelp && { waitFor: 1500 }),
           ...(!isOT && !isYelp && { waitFor: 1000 }),
         };
@@ -2255,53 +2270,65 @@ async function verifyAvailability(
         // Firecrawl for all platforms (Resy/OT/Yelp). Wrap with our own AbortController
         // so we can cancel the fetch if Firecrawl's own timeout doesn't fire fast enough.
         // OT pages need ~18s to render JS widgets; Resy/Yelp are faster.
-        const scrapeAbort = new AbortController();
-         const scrapeTimer = setTimeout(
-           () => scrapeAbort.abort(),
-           isOT ? 20_000 : isYelp ? 14_000 : 14_000,
-         );
-        // Acquire a slot on the global Firecrawl semaphore before firing the request.
-        // This prevents the parallel lanes from saturating Firecrawl with too many
-        // simultaneous scrapes (which immediately produces 408 timeouts).
-        await acquireFirecrawlSlot();
-        let resp: Response;
-        try {
+        // One bounded retry is allowed for transient 408/abort, IF the lane
+        // still has budget. This restores the resilience the lane used to
+        // have when Firecrawl was less flaky.
+        const attemptScrape = async (): Promise<Response | null> => {
+          const scrapeAbort = new AbortController();
+          const scrapeTimer = setTimeout(
+            () => scrapeAbort.abort(),
+            isOT ? 34_000 : isYelp ? 14_000 : 14_000,
+          );
+          await acquireFirecrawlSlot();
           try {
-            resp = await fetch(`${FIRECRAWL_API}/scrape`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${firecrawlKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify(scrapePayload),
-              signal: scrapeAbort.signal,
-            });
-          } catch (fetchErr: any) {
-            clearTimeout(scrapeTimer);
-            if (fetchErr.name === "AbortError") {
-              console.log(`Scrape timeout (abort) for ${r.name} [${r.platform}]`);
-            } else {
-              console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+            try {
+              return await fetch(`${FIRECRAWL_API}/scrape`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${firecrawlKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(scrapePayload),
+                signal: scrapeAbort.signal,
+              });
+            } catch (fetchErr: any) {
+              if (fetchErr?.name === "AbortError") {
+                console.log(`Scrape timeout (abort) for ${r.name} [${r.platform}]`);
+              } else {
+                console.log(`Scrape fetch error for ${r.name} [${r.platform}]: ${fetchErr}`);
+              }
+              return null;
             }
-            return null;
+          } finally {
+            clearTimeout(scrapeTimer);
+            releaseFirecrawlSlot();
           }
-        } finally {
-          releaseFirecrawlSlot();
-        }
-        clearTimeout(scrapeTimer);
+        };
 
-        // Firecrawl 408 / non-OK = give up on this candidate. Retries and
-        // alternate providers were removed: production data showed they
-        // either returned anti-bot stubs (failovers) or fired with negative
-        // budget (retries), wasting the lane budget. A clean skip here lets
-        // the next batch start sooner and improves total verified count.
-        if (resp.status === 408 || !resp.ok) {
-          if (resp.status !== 408) {
-            const errBody = await resp.text().catch(() => "(no body)");
-            console.log(`Scrape ${resp.status} for ${r.name} [${r.platform}]: ${errBody.slice(0, 200)}`);
-          } else {
-            console.log(`Scrape 408 for ${r.name} [${r.platform}] — skipping (no retry)`);
-          }
+        const hasBudgetForRetry = (): boolean => {
+          if (!globalStartTime) return true;
+          const elapsed = Date.now() - globalStartTime;
+          // Need at least 8s of headroom in the lane to attempt a retry.
+          return elapsed + 8_000 < LANE_TIME_BUDGET_MS;
+        };
+
+        let resp = await attemptScrape();
+        const transient = !resp || resp.status === 408 || resp.status === 502 || resp.status === 503 || resp.status === 504;
+        if (transient && hasBudgetForRetry()) {
+          console.log(`  ${r.name} [${r.platform}]: transient ${resp?.status ?? "abort"} — one retry`);
+          // Tiny backoff so we don't immediately re-collide with whatever was
+          // saturating Firecrawl on the first attempt.
+          await new Promise(res => setTimeout(res, 400));
+          resp = await attemptScrape();
+        }
+
+        if (!resp) {
+          console.log(`Scrape gave up for ${r.name} [${r.platform}] (abort, no budget for further retry)`);
+          return null;
+        }
+        if (!resp.ok) {
+          const errBody = await resp.text().catch(() => "(no body)");
+          console.log(`Scrape ${resp.status} for ${r.name} [${r.platform}]: ${errBody.slice(0, 200)}`);
           return null;
         }
 
@@ -2770,10 +2797,66 @@ async function verifyAvailability(
         if (foundTimes.length > 0) {
           console.log(`  ${r.name} [opentable]: extracted ${foundTimes.length} times (md+html): ${foundTimes.map(t=>t.time).join(", ")}`);
         }
-        
-        // Skip two-pass retry to stay within 25-30s budget (retries add 20-25s and rarely succeed)
-        if (foundTimes.length === 0 && !hadSelectSection) {
-          console.log(`  ${r.name} [opentable]: no "Select a time" section — skipping retry to save time`);
+
+        // Two-pass retry: if first pass got 0 slots but the "Select a time"
+        // section IS present (widget started rendering but slots hadn't
+        // populated), give it another shot with a longer waitFor — but only
+        // if the lane still has comfortable budget (avoid blowing the deadline
+        // on a single candidate).
+        const otRetryBudgetOk = !globalStartTime || (Date.now() - globalStartTime + 12_000 < LANE_TIME_BUDGET_MS);
+        if (foundTimes.length === 0 && hadSelectSection && otRetryBudgetOk) {
+          console.log(`  ${r.name} [opentable]: Select-a-time present but 0 slots — retrying with longer wait`);
+          try {
+            const retryAbort = new AbortController();
+            const retryTimer = setTimeout(() => retryAbort.abort(), 18_000);
+            await acquireFirecrawlSlot();
+            let retryResp: Response | null = null;
+            try {
+              try {
+                retryResp = await fetch(`${FIRECRAWL_API}/scrape`, {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${firecrawlKey}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    ...scrapePayload,
+                    timeout: 16000,
+                    waitFor: 6500,
+                  }),
+                  signal: retryAbort.signal,
+                });
+              } catch (e: any) {
+                console.log(`  ${r.name} [opentable]: retry abort/error (${e?.name || e})`);
+              }
+            } finally {
+              clearTimeout(retryTimer);
+              releaseFirecrawlSlot();
+            }
+            if (retryResp && retryResp.ok) {
+              const retryData = await retryResp.json();
+              const retryMd = extractFirecrawlMarkdown(retryData);
+              const retryHtml = extractFirecrawlHtml(retryData);
+              const moreFromMd = parseOTSlots(retryMd);
+              const moreFromHtml = retryHtml ? parseOTSlotsFromHTML(retryHtml) : [];
+              for (const slot of [...moreFromMd, ...moreFromHtml]) {
+                if (!seenTimes.has(slot.time)) {
+                  seenTimes.add(slot.time);
+                  foundTimes.push(slot);
+                }
+              }
+              if (foundTimes.length > 0) {
+                console.log(`  ${r.name} [opentable]: retry recovered ${foundTimes.length} slots`);
+                // Refresh the working markdown so downstream regex/window
+                // logic sees the retry payload too.
+                if (retryMd) markdown = retryMd;
+              }
+            }
+          } catch (e) {
+            console.log(`  ${r.name} [opentable]: retry failed (${e instanceof Error ? e.message : String(e)})`);
+          }
+        } else if (foundTimes.length === 0 && !hadSelectSection) {
+          console.log(`  ${r.name} [opentable]: no "Select a time" section — skipping retry`);
         }
         
         // Step 3: If still nothing, strip dropdown noise and fall through to generic regex
