@@ -30,7 +30,10 @@ const CORS = {
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 
-interface TimeSlot { time: string; }
+interface TimeSlot {
+  time: string;
+  url?: string;   // platform booking URL pre-filled with this slot's time
+}
 
 interface Restaurant {
   id: string;
@@ -46,6 +49,7 @@ interface Restaurant {
   platformUrl: string;
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
+  softVerified?: boolean;   // Yelp: reservation widget found but no extractable times
   // internal
   _lat?: number;
   _lng?: number;
@@ -69,7 +73,8 @@ interface SearchParams {
 }
 
 interface SearchMeta {
-  date: string;
+  date: string;       // formatted display e.g. "Tonight"
+  dateRaw: string;    // YYYY-MM-DD
   time: string;
   partySize: number;
   city: string;
@@ -123,8 +128,13 @@ serve(async (req) => {
 
     let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
 
-    // Geocode and rank by distance
-    verified = await geocodeAndRank(verified, params, AI_KEY);
+    // Separate soft-verified (Yelp widget found but no extractable times) — cap at 3
+    const softVerifiedResults = verified.filter(r => r.softVerified).slice(0, 3);
+    const hardVerified = verified.filter(r => !r.softVerified);
+
+    // Geocode and rank hard-verified by distance, then append soft-verified at end
+    const ranked = await geocodeAndRank(hardVerified, params, AI_KEY);
+    verified = [...ranked, ...softVerifiedResults];
 
     // Enrich top results (descriptions + vibe tags) if time allows
     if (Date.now() - start < 95_000) {
@@ -139,6 +149,7 @@ serve(async (req) => {
 
     const meta: SearchMeta = {
       date: formatDisplayDate(params.date),
+      dateRaw: params.date,
       time: formatDisplayTime(params.time),
       partySize: params.partySize,
       city: params.city,
@@ -369,6 +380,11 @@ async function discoverOTviaApify(params: SearchParams, token: string): Promise<
       if (filtered.length === 0 && !item.name) return [];
 
       const rid = extractRid(bookingUrl);
+      const baseOTUrl = (bookingUrl || `https://www.opentable.com/r/${slugify(item.name||"")}`).split("?")[0];
+      const slotsWithUrls = filtered.map(s => ({
+        ...s,
+        url: buildSlotUrl("opentable", baseOTUrl, params, s.time),
+      }));
 
       return [{
         id: `opentable-${rid || slugify(item.name || "")}`,
@@ -379,11 +395,11 @@ async function discoverOTviaApify(params: SearchParams, token: string): Promise<
         reviewCount: item.reviewCount ?? item.reviews,
         priceRange: item.priceRange ?? item.price,
         platform: "opentable" as const,
-        platformUrl: addOTParams(bookingUrl || `https://www.opentable.com/r/${slugify(item.name||"")}`, params),
-        timeSlots: filtered,
+        platformUrl: addOTParams(baseOTUrl, params),
+        timeSlots: slotsWithUrls,
         distanceMiles: null,
         _lat: item.lat, _lng: item.lng,
-        _preVerified: filtered.length > 0,
+        _preVerified: slotsWithUrls.length > 0,
         _rid: rid ?? undefined,
       }];
     }).filter(r => r.name);
@@ -533,13 +549,19 @@ async function verifyResy(r: Restaurant, params: SearchParams, fcKey: string): P
     const windowed = filterWindow(slots, params.time);
     if (windowed.length === 0) return null;
 
+    const base = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({
+      ...s,
+      url: buildSlotUrl("resy", base, params, s.time),
+    }));
+
     // Extract rating/reviews from the markdown if present
     const ratingM = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
     const reviewM  = md.match(/\(([\d,]+)\s*review/i);
 
     return {
       ...r,
-      timeSlots: windowed,
+      timeSlots: slotsWithUrls,
       rating:      ratingM  ? parseFloat(ratingM[1])                       : r.rating,
       reviewCount: reviewM  ? parseInt(reviewM[1].replace(/,/g, ""))        : r.reviewCount,
     };
@@ -606,7 +628,13 @@ async function verifyOT(r: Restaurant, params: SearchParams): Promise<Restaurant
     const windowed = filterWindow(slots, params.time);
     if (windowed.length === 0) return null;
 
-    return { ...r, timeSlots: windowed };
+    const base = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({
+      ...s,
+      url: buildSlotUrl("opentable", base, params, s.time),
+    }));
+
+    return { ...r, timeSlots: slotsWithUrls };
   } catch (err: any) {
     if (err?.name !== "AbortError") console.log(`[OT JSON] ${r.name}: ${err?.message}`);
     return null;
@@ -660,20 +688,30 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
 
     const slots = extractTimes(md);
     const windowed = filterWindow(slots, params.time);
-    if (windowed.length === 0 && !hasWidget) return null;
 
     // Extract metadata from markdown
     const ratingM = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
     const reviewM  = md.match(/\(([\d,]+)\s*review/i);
     const priceM   = md.match(/(\$+)\s*(?:·|•|,|\s)/);
 
-    return {
-      ...r,
-      timeSlots: windowed.length > 0 ? windowed : [],
+    const meta = {
       rating:      ratingM ? parseFloat(ratingM[1])                    : r.rating,
       reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, ""))    : r.reviewCount,
       priceRange:  priceM  ? priceM[1]                                 : r.priceRange,
     };
+
+    if (windowed.length === 0) {
+      // Reservation widget found but no extractable times — soft-verified fallback
+      return { ...r, ...meta, timeSlots: [], softVerified: true };
+    }
+
+    const base = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({
+      ...s,
+      url: buildSlotUrl("yelp", base, params, s.time),
+    }));
+
+    return { ...r, ...meta, timeSlots: slotsWithUrls };
   } catch (err) {
     console.error(`[verifyYelp] ${r.name}:`, err);
     return null;
@@ -743,8 +781,8 @@ Vibe tags pick from: Romantic, Lively, Date Night, Outdoor Seating, Chef's Table
 Restaurants:
 ${tops.map((r, i) => `${i + 1}. ${r.name} — ${r.cuisine}${r.neighborhood ? ` in ${r.neighborhood}` : ""}`).join("\n")}
 
-Respond with ONLY a JSON array (no markdown):
-[{"description":"...","vibeTags":["..."]}]`;
+Respond with ONLY valid JSON (no markdown) in this exact shape:
+{"items":[{"description":"...","vibeTags":["..."]}]}`;
 
   try {
     const resp = await fetch(AI_GATEWAY, {
@@ -758,10 +796,11 @@ Respond with ONLY a JSON array (no markdown):
     });
     if (!resp.ok) return restaurants;
     const data = await resp.json();
-    const raw = data.choices?.[0]?.message?.content ?? "[]";
-    const enriched: { description: string; vibeTags: string[] }[] = JSON.parse(
-      raw.replace(/```json|```/g, "").trim()
-    );
+    const raw = data.choices?.[0]?.message?.content ?? "{}";
+    const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
+    const enriched: { description: string; vibeTags: string[] }[] = Array.isArray(parsed)
+      ? parsed
+      : (parsed.items ?? parsed.enrichments ?? parsed.restaurants ?? []);
 
     tops.forEach((r, i) => {
       if (enriched[i]) {
@@ -871,6 +910,37 @@ function haversine(lat1: number, lng1: number, lat2: number, lng2: number): numb
   const dLng = (lng2 - lng1) * Math.PI / 180;
   const a = Math.sin(dLat/2)**2 + Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) * Math.sin(dLng/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function displayTo24(t: string): string {
+  const m = t.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (!m) return "19:00";
+  let h = parseInt(m[1], 10);
+  const min = m[2];
+  const ampm = m[3].toUpperCase();
+  if (ampm === "PM" && h !== 12) h += 12;
+  if (ampm === "AM" && h === 12) h = 0;
+  return `${h.toString().padStart(2, "0")}:${min}`;
+}
+
+function buildSlotUrl(
+  platform: "resy" | "opentable" | "yelp",
+  base: string,
+  p: SearchParams,
+  slotTime: string,
+): string {
+  const t24 = displayTo24(slotTime);
+  const tNoColon = t24.replace(":", "");
+  switch (platform) {
+    case "resy":
+      return `${base}?date=${p.date}&seats=${p.partySize}&time=${tNoColon}`;
+    case "opentable":
+      return `${base}?dateTime=${p.date}T${t24}&covers=${p.partySize}`;
+    case "yelp":
+      return `${base}?covers=${p.partySize}&date=${p.date}&time=${tNoColon}`;
+    default:
+      return base;
+  }
 }
 
 function filterWindow(slots: TimeSlot[], requestedTime: string): TimeSlot[] {

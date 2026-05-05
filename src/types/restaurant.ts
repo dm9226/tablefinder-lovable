@@ -1,5 +1,6 @@
 export interface TimeSlot {
   time: string;
+  url?: string;   // platform booking URL pre-filled with this slot's exact time
   token?: string;
   type?: string;
 }
@@ -19,6 +20,7 @@ export interface Restaurant {
   platformUrl: string;
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
+  softVerified?: boolean;   // Yelp: reservation widget found but no extractable times
 }
 
 export interface SearchParams {
@@ -34,7 +36,8 @@ export interface SearchParams {
 }
 
 export interface SearchMeta {
-  date: string;
+  date: string;       // formatted display e.g. "Tonight"
+  dateRaw?: string;   // YYYY-MM-DD
   time: string;
   partySize: number;
   city: string;

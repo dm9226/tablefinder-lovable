@@ -79,7 +79,7 @@ export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearch
       </div>
       <div className="border border-border rounded-lg overflow-hidden bg-card">
         {results.map((r) => (
-          <RestaurantCard key={r.id} restaurant={r} />
+          <RestaurantCard key={r.id} restaurant={r} searchMeta={searchMeta} />
         ))}
       </div>
 

@@ -205,6 +205,36 @@ const Index = () => {
         <title>TableFinder — Find Restaurant Reservations Across Multiple Platforms</title>
         <meta name="description" content="Search Resy, OpenTable, and Yelp reservations in one place. Find available tables near you with natural language search." />
         <link rel="canonical" href="https://tablefinder.ai/" />
+        <script type="application/ld+json">{JSON.stringify({
+          "@context": "https://schema.org",
+          "@graph": [
+            {
+              "@type": "WebSite",
+              "@id": "https://tablefinder.ai/#website",
+              "url": "https://tablefinder.ai/",
+              "name": "TableFinder",
+              "description": "Search Resy, OpenTable, and Yelp reservations simultaneously with natural language.",
+              "potentialAction": {
+                "@type": "SearchAction",
+                "target": {
+                  "@type": "EntryPoint",
+                  "urlTemplate": "https://tablefinder.ai/?q={search_term_string}"
+                },
+                "query-input": "required name=search_term_string"
+              }
+            },
+            {
+              "@type": "Organization",
+              "@id": "https://tablefinder.ai/#organization",
+              "name": "TableFinder",
+              "url": "https://tablefinder.ai/",
+              "logo": {
+                "@type": "ImageObject",
+                "url": "https://tablefinder.ai/og-image.png"
+              }
+            }
+          ]
+        })}</script>
       </Helmet>
       <header className="pt-6 pb-3 px-4 text-center">
         <h1 className="font-heading text-4xl md:text-5xl font-bold text-foreground mb-2 tracking-tight">
