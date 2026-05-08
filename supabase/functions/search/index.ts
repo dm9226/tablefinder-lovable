@@ -986,8 +986,19 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     }
     // ──────────────────────────────────────────────────────────────────────────
 
-    const hasWidget = /\b(find\s+a\s+table|select\s+(a\s+)?time|request\s+a\s+reservation|book\s+a\s+table|takes?\s+reservations?|party\s+size|make\s+a\s+reservation|check\s+availability|available\s+times?|seats?\s+available|no\s+times?\s+available)\b/i.test(md);
-    if (!hasWidget) { console.log(`[verifyYelp] ${r.name}: no widget detected`); return null; }
+    // Reject pages where reservations are handled by Resy or OT, not Yelp.
+    // Yelp pages for restaurants like South City Kitchen say "Reserve on Resy"
+    // or "Book on OpenTable" — these are NOT Yelp reservations.
+    const usesOtherPlatform = /\b(reserve\s+on\s+resy|book\s+on\s+resy|resy\.com|reserve\s+on\s+opentable|book\s+on\s+opentable)\b/i.test(md);
+    if (usesOtherPlatform) {
+      console.log(`[verifyYelp] ${r.name}: redirects to Resy/OT — skipping as Yelp`);
+      return null;
+    }
+
+    // Require actual Yelp-native reservation UI signals — not just "Takes Reservations: Yes"
+    // which appears on all restaurants. Need signs of an actual booking widget.
+    const hasNativeWidget = /\b(select\s+(a\s+)?time|choose\s+(a\s+)?time|find\s+a\s+table|party\s+size|available\s+times?|no\s+times?\s+available|request\s+a\s+reservation)\b/i.test(md);
+    if (!hasNativeWidget) { console.log(`[verifyYelp] ${r.name}: no native Yelp widget`); return null; }
 
     const slots    = extractTimes(md);
     const windowed = filterWindow(slots, params.time);
@@ -1002,7 +1013,12 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     const addr = r._address || extractAddress(md) || undefined;
 
     if (windowed.length === 0) {
-      console.log(`[verifyYelp] ${r.name}: soft-verified (widget detected, no extractable times)`);
+      // Only soft-verify if there's strong evidence of a real Yelp booking widget
+      // (e.g. "no times available tonight" is still useful to show the user).
+      // Don't soft-verify if we just see generic text — too many false positives.
+      const strongEvidence = /\b(no\s+times?\s+available|sold\s+out|fully\s+booked|join\s+waitlist|no\s+availability)\b/i.test(md);
+      if (!strongEvidence) { console.log(`[verifyYelp] ${r.name}: widget text but no times and no strong evidence`); return null; }
+      console.log(`[verifyYelp] ${r.name}: soft-verified`);
       return { ...r, ...meta, timeSlots: [], softVerified: true, _address: addr };
     }
     const base          = r.platformUrl.split("?")[0];
