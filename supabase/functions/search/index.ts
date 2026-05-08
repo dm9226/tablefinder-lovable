@@ -20,8 +20,8 @@ const APIFY_API    = "https://api.apify.com/v2";
 const NOMINATIM    = "https://nominatim.openstreetmap.org";
 
 const GLOBAL_TIMEOUT   = 115_000;
-const DISCOVERY_BUDGET =  22_000;
-const VERIFY_BUDGET    =  16_000;
+const DISCOVERY_BUDGET =  12_000;
+const VERIFY_BUDGET    =  10_000;
 
 const CORS = {
   "Access-Control-Allow-Origin":  "*",
@@ -106,18 +106,27 @@ serve(async (req) => {
     const params = await parseQuery(query, lat, lng, location, AI_KEY);
     console.log(`[params] ${JSON.stringify(params)}`);
 
-    // Pipeline: each platform discovers then immediately verifies — no cross-platform wait
-    const verifyStart = Date.now();
-    const [
-      [resyVer, resyCands],
-      [otVer,   otCands],
-      [yelpVer, yelpCands],
-    ] = await Promise.all([
-      withTimeout(discoverAndVerify("resy",      params, FIRECRAWL, APIFY, start), DISCOVERY_BUDGET + VERIFY_BUDGET, [[], []]),
-      withTimeout(discoverAndVerify("opentable", params, FIRECRAWL, APIFY, start), DISCOVERY_BUDGET + VERIFY_BUDGET, [[], []]),
-      withTimeout(discoverAndVerify("yelp",      params, FIRECRAWL, APIFY, start), DISCOVERY_BUDGET + VERIFY_BUDGET, [[], []]),
+    // Discovery: all 3 platforms in parallel, hard-capped
+    const [resyCands, otCands, yelpCands] = await Promise.all([
+      withTimeout(discoverResy(params, FIRECRAWL),                   DISCOVERY_BUDGET, []),
+      withTimeout(discoverOpenTable(params, FIRECRAWL, APIFY),       DISCOVERY_BUDGET, []),
+      withTimeout(discoverYelp(params, FIRECRAWL),                   DISCOVERY_BUDGET, []),
     ]);
-    console.log(`[pipeline] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now() - verifyStart}ms`);
+    console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
+
+    // Allocate: Yelp capped at 5, others at 7
+    const resySlice  = resyCands.slice(0, 7);
+    const otSlice    = otCands.slice(0, 7);
+    const yelpSlice  = yelpCands.slice(0, 5);
+
+    // Verification: all 3 lanes in parallel, hard-capped
+    const verifyStart = Date.now();
+    const [resyVer, otVer, yelpVer] = await Promise.all([
+      withTimeout(verifyBatch(resySlice,  params, FIRECRAWL, start), VERIFY_BUDGET, []),
+      withTimeout(verifyBatch(otSlice,    params, FIRECRAWL, start), VERIFY_BUDGET, []),
+      withTimeout(verifyBatch(yelpSlice,  params, FIRECRAWL, start), VERIFY_BUDGET, []),
+    ]);
+    console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
     let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
 
@@ -135,10 +144,11 @@ serve(async (req) => {
       verified = await withTimeout(enrich(verified, params, AI_KEY), 6_000, verified);
     }
 
-    // Remaining candidates for optional second pass (candidates not yet verified)
+    // Remaining candidates for optional second pass
     const verifiedIds = new Set(verified.map(r => r.id));
+    const attempted   = new Set([...resySlice, ...otSlice, ...yelpSlice].map(r => r.id));
     const remaining = [...resyCands, ...otCands, ...yelpCands]
-      .filter(r => !verifiedIds.has(r.id))
+      .filter(r => !attempted.has(r.id) && !verifiedIds.has(r.id))
       .slice(0, 18);
 
     const meta: SearchMeta = {
