@@ -170,7 +170,7 @@ serve(async (req) => {
       params: meta,
       hasMore: remaining.length > 0,
       remainingCandidates: remaining,
-      _v: "geo-photon-3",
+      _v: "geo-photon-4",
     });
 
   } catch (err: any) {
@@ -828,7 +828,7 @@ async function geocodeAndRank(
       const timer = setTimeout(() => ctrl.abort(), 3000);
       try {
         const q = encodeURIComponent(`${r.name} ${geoCity} ${geoRegion}`);
-        const resp = await fetch(`${PHOTON}/api/?q=${q}&limit=1`, {
+        const resp = await fetch(`${PHOTON}/?q=${q}&limit=1`, {
           headers: { "User-Agent": "TableFinder/2.0" },
           signal: ctrl.signal,
         });
