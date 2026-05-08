@@ -149,6 +149,8 @@ const Index = () => {
           extended: true,
           remainingCandidates,
           extendedParams: lastParams,
+          lat: coords?.lat,
+          lng: coords?.lng,
         },
       });
 

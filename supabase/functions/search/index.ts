@@ -114,10 +114,10 @@ serve(async (req) => {
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
 
-    // Allocate: Yelp capped at 5, others at 7
-    const resySlice  = resyCands.slice(0, 7);
-    const otSlice    = otCands.slice(0, 7);
-    const yelpSlice  = yelpCands.slice(0, 5);
+    // Allocate: Yelp capped at 6, others at 10
+    const resySlice  = resyCands.slice(0, 10);
+    const otSlice    = otCands.slice(0, 10);
+    const yelpSlice  = yelpCands.slice(0, 6);
 
     // Verification: all 3 lanes in parallel, hard-capped
     const verifyStart = Date.now();
@@ -221,7 +221,27 @@ async function runExtendedSearch(
   const { remainingCandidates, extendedParams } = body;
   if (!remainingCandidates?.length) return [];
 
-  const params = extendedParams as SearchParams;
+  // extendedParams arrives from the frontend as SearchMeta (display strings).
+  // Normalise back to proper SearchParams before using.
+  const rawDate = extendedParams.dateRaw || extendedParams.date || new Date().toISOString().split("T")[0];
+  const rawTime = /^\d{2}:\d{2}$/.test(extendedParams.time ?? "")
+    ? extendedParams.time
+    : displayTo24(extendedParams.time ?? "7:00 PM");
+
+  const params: SearchParams = {
+    cuisine:     extendedParams.cuisine     ?? "",
+    cuisineType: extendedParams.cuisineType ?? "",
+    dishKeyword: extendedParams.dishKeyword ?? "",
+    date:        rawDate,
+    time:        rawTime,
+    partySize:   Number(extendedParams.partySize) || 2,
+    city:        extendedParams.city   ?? "",
+    state:       extendedParams.state  ?? "",
+    country:     extendedParams.country ?? "us",
+    lat:         body.lat ?? extendedParams.lat,
+    lng:         body.lng ?? extendedParams.lng,
+  };
+
   const batch = (remainingCandidates as Restaurant[]).slice(0, 18);
 
   const [resyVer, otVer, yelpVer] = await Promise.all([
@@ -532,7 +552,7 @@ async function verifyBatch(
 
   const results: Restaurant[] = [];
   const CONCURRENCY = 6;
-  const LANE_TARGET = 5;
+  const LANE_TARGET = 8;
 
   for (let i = 0; i < candidates.length; i += CONCURRENCY) {
     if (results.length >= LANE_TARGET) break;
@@ -561,8 +581,8 @@ async function verifyOne(
   // Resy: scrape the venue page
   if (r.platform === "resy") return verifyResy(r, params, fcKey);
 
-  // OpenTable: try JSON API first, then skip (Firecrawl fails on OT)
-  if (r.platform === "opentable") return verifyOT(r, params);
+  // OpenTable: try JSON API first, then Firecrawl scrape fallback
+  if (r.platform === "opentable") return verifyOT(r, params, fcKey);
 
   return null;
 }
@@ -620,70 +640,84 @@ async function verifyResy(r: Restaurant, params: SearchParams, fcKey: string): P
 
 // ── OpenTable verification ──
 
-async function verifyOT(r: Restaurant, params: SearchParams): Promise<Restaurant | null> {
-  // Primary path: OT's own JSON availability endpoint
-  // This works when called from non-datacenter IPs; may be blocked by Akamai on Supabase.
-  // If it fails, we skip this restaurant (Firecrawl OT scrape is also blocked by Akamai).
-  // Solution: add APIFY_API_TOKEN env var to use Apify actor for OT discovery+verification.
-  const rid = r._rid ?? (await resolveOTRid(r.platformUrl));
-  if (!rid) return null;
+async function verifyOT(r: Restaurant, params: SearchParams, fcKey: string): Promise<Restaurant | null> {
+  // Path 1: OT JSON availability API (fast, but blocked by Akamai on datacenter IPs)
+  const rid = r._rid ?? extractRid(r.platformUrl);
+  if (rid) {
+    try {
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), 5_000);
+      const resp = await fetch("https://www.opentable.com/dapi/booking/restaurant/availability", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Referer: r.platformUrl,
+          Origin: "https://www.opentable.com",
+        },
+        body: JSON.stringify({
+          rids: [Number(rid)],
+          dateTime: `${params.date}T${params.time}`,
+          partySize: params.partySize,
+          includeOffers: false,
+          requestPremium: "true",
+          forceNextAvailable: "false",
+        }),
+        signal: abort.signal,
+      });
+      clearTimeout(timer);
 
+      if (resp.ok) {
+        const data: any = await resp.json().catch(() => null);
+        if (data) {
+          const raw: any[] = [];
+          const push = (arr: any) => Array.isArray(arr) && raw.push(...arr);
+          push(data?.availability?.[rid]?.times);
+          push(data?.availability?.[rid]?.timeslots);
+          push(data?.availability?.times);
+          if (Array.isArray(data?.restaurants)) data.restaurants.forEach((rs: any) => { push(rs.slots); push(rs.times); });
+          push(data?.timeslots); push(data?.slots);
+          const windowed = filterWindow(parseOTSlots(raw), params.time);
+          if (windowed.length > 0) {
+            const base = r.platformUrl.split("?")[0];
+            return { ...r, timeSlots: windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) })) };
+          }
+        }
+      }
+    } catch { /* fall through to Firecrawl */ }
+  }
+
+  // Path 2: Firecrawl scrape — headless browser bypasses Akamai bot protection
+  if (!fcKey) return null;
   try {
-    const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), 6_000);
-
-    const resp = await fetch("https://www.opentable.com/dapi/booking/restaurant/availability", {
+    const resp = await fetch(`${FC_API}/scrape`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Referer: r.platformUrl,
-        Origin: "https://www.opentable.com",
-      },
-      body: JSON.stringify({
-        rids: [Number(rid)],
-        dateTime: `${params.date}T${params.time}`,
-        partySize: params.partySize,
-        includeOffers: false,
-        requestPremium: "true",
-        forceNextAvailable: "false",
-      }),
-      signal: abort.signal,
+      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ url: r.platformUrl, formats: ["markdown"], onlyMainContent: true, waitFor: 2000, timeout: 10000 }),
     });
-    clearTimeout(timer);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const md: string = data.data?.markdown ?? "";
+    if (md.length < 100) return null;
 
-    if (!resp.ok) {
-      console.log(`[OT JSON] ${r.name}: HTTP ${resp.status} — blocked (add APIFY_API_TOKEN for OT)`);
-      return null;
-    }
-
-    const json: any = await resp.json().catch(() => null);
-    if (!json) return null;
-
-    // Parse slots from various response shapes OT has used
-    const raw: any[] = [];
-    const push = (arr: any) => Array.isArray(arr) && raw.push(...arr);
-    push(json?.availability?.[rid]?.times);
-    push(json?.availability?.[rid]?.timeslots);
-    push(json?.availability?.times);
-    if (Array.isArray(json?.restaurants)) json.restaurants.forEach((rs: any) => { push(rs.slots); push(rs.times); });
-    push(json?.timeslots);
-    push(json?.slots);
-
-    const slots = parseOTSlots(raw);
+    const slots = extractTimes(md);
     const windowed = filterWindow(slots, params.time);
     if (windowed.length === 0) return null;
 
     const base = r.platformUrl.split("?")[0];
-    const slotsWithUrls = windowed.map(s => ({
-      ...s,
-      url: buildSlotUrl("opentable", base, params, s.time),
-    }));
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
 
-    return { ...r, timeSlots: slotsWithUrls };
+    const ratingM = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM  = md.match(/\(([\d,]+)\s*review/i);
+    return {
+      ...r,
+      timeSlots: slotsWithUrls,
+      rating:      ratingM ? parseFloat(ratingM[1]) : r.rating,
+      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
+    };
   } catch (err: any) {
-    if (err?.name !== "AbortError") console.log(`[OT JSON] ${r.name}: ${err?.message}`);
+    console.log(`[OT scrape] ${r.name}: ${err?.message}`);
     return null;
   }
 }
@@ -777,22 +811,20 @@ async function geocodeAndRank(
   const userLat = params.lat;
   const userLng = params.lng;
 
-  // If user has coordinates, skip Nominatim entirely — just compute distance for
-  // restaurants that already have coords from scraping, push the rest to end.
-  // Nominatim adds 5-10s of latency; not worth it when we already have user location.
-  if (userLat == null || userLng == null) {
-    // No user coords at all — try to geocode a small batch quickly
-    const needsGeo = restaurants.filter(r => r._lat == null && r._lng == null).slice(0, 4);
+  // Geocode restaurants that don't yet have coordinates — all in parallel, 2.5s cap each.
+  // This is required to show distance even when the user has their own coordinates.
+  const needsGeo = restaurants.filter(r => r._lat == null && r._lng == null);
+  if (needsGeo.length > 0) {
     await Promise.all(needsGeo.map(async r => {
       try {
         const query = encodeURIComponent(`${r.name}, ${params.city}, ${params.state || params.country}`);
         const resp = await fetch(`${NOMINATIM}/search?q=${query}&format=json&limit=1`, {
           headers: { "User-Agent": "TableFinder/2.0" },
-          signal: AbortSignal.timeout(3000),
+          signal: AbortSignal.timeout(2500),
         });
         const data = await resp.json();
         if (data?.[0]) { r._lat = parseFloat(data[0].lat); r._lng = parseFloat(data[0].lon); }
-      } catch { /* skip */ }
+      } catch { /* skip — distance stays null */ }
     }));
   }
 
