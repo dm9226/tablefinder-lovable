@@ -812,16 +812,22 @@ async function geocodeAndRank(
   const userLng = params.lng;
 
   // Geocode restaurants that don't yet have coordinates — all in parallel, 2.5s cap each.
-  // This is required to show distance even when the user has their own coordinates.
+  // Use the nearest metro city name (not the suburb) so Nominatim can find the venue.
+  const geoCity = (params.lat != null && params.lng != null)
+    ? (nearestResyMetro(params.lat, params.lng)?.name ?? params.city)
+    : params.city;
+  const geoRegion = params.state || params.country;
+
   const needsGeo = restaurants.filter(r => r._lat == null && r._lng == null);
   if (needsGeo.length > 0) {
     await Promise.all(needsGeo.map(async r => {
       try {
-        const query = encodeURIComponent(`${r.name}, ${params.city}, ${params.state || params.country}`);
-        const resp = await fetch(`${NOMINATIM}/search?q=${query}&format=json&limit=1`, {
+        const q = encodeURIComponent(`${r.name}, ${geoCity}, ${geoRegion}`);
+        const resp = await fetch(`${NOMINATIM}/search?q=${q}&format=json&limit=1`, {
           headers: { "User-Agent": "TableFinder/2.0" },
           signal: AbortSignal.timeout(2500),
         });
+        if (!resp.ok) return;
         const data = await resp.json();
         if (data?.[0]) { r._lat = parseFloat(data[0].lat); r._lng = parseFloat(data[0].lon); }
       } catch { /* skip — distance stays null */ }
