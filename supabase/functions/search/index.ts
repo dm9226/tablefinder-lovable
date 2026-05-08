@@ -821,16 +821,23 @@ async function geocodeAndRank(
   const needsGeo = restaurants.filter(r => r._lat == null && r._lng == null);
   if (needsGeo.length > 0) {
     await Promise.all(needsGeo.map(async r => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 2500);
       try {
         const q = encodeURIComponent(`${r.name}, ${geoCity}, ${geoRegion}`);
         const resp = await fetch(`${NOMINATIM}/search?q=${q}&format=json&limit=1`, {
-          headers: { "User-Agent": "TableFinder/2.0" },
-          signal: AbortSignal.timeout(2500),
+          headers: { "User-Agent": "TableFinder/2.0 contact@tablefinder.ai" },
+          signal: ctrl.signal,
         });
+        clearTimeout(timer);
         if (!resp.ok) return;
         const data = await resp.json();
-        if (data?.[0]) { r._lat = parseFloat(data[0].lat); r._lng = parseFloat(data[0].lon); }
-      } catch { /* skip — distance stays null */ }
+        if (data?.[0]) {
+          r._lat = parseFloat(data[0].lat);
+          r._lng  = parseFloat(data[0].lon);
+          console.log(`[geo] ${r.name} → ${r._lat},${r._lng}`);
+        }
+      } catch { clearTimeout(timer); /* distance stays null */ }
     }));
   }
 
