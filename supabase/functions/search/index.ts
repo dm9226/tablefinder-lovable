@@ -116,10 +116,10 @@ serve(async (req) => {
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
 
-    // Allocate: Yelp capped at 10, others at 15
-    const resySlice  = resyCands.slice(0, 15);
-    const otSlice    = otCands.slice(0, 15);
-    const yelpSlice  = yelpCands.slice(0, 10);
+    // Allocate: Yelp capped at 12, others at 18
+    const resySlice  = resyCands.slice(0, 18);
+    const otSlice    = otCands.slice(0, 18);
+    const yelpSlice  = yelpCands.slice(0, 12);
 
     // Verification: all 3 lanes in parallel, hard-capped
     const verifyStart = Date.now();
@@ -168,7 +168,7 @@ serve(async (req) => {
       params: meta,
       hasMore: remaining.length > 0,
       remainingCandidates: remaining,
-      _v: "v5-full-fix",
+      _v: "v6-ot-geo",
     });
 
   } catch (err: any) {
@@ -341,9 +341,10 @@ async function discoverResy(params: SearchParams, fcKey: string): Promise<Restau
   const queries = [
     `site:resy.com/cities/${slug}/venues/ ${metro}${cuisine} restaurant reservation`,
     `site:resy.com/cities/${slug}/venues/ ${metro}${cuisine} dinner reservation`,
+    `site:resy.com/cities/${slug}/venues/ ${metro} restaurant book table`,
   ];
 
-  const results = await firecrawlSearch(queries, fcKey, 8);
+  const results = await firecrawlSearch(queries, fcKey, 10);
   return results
     .map(r => normToResy(r, params))
     .filter(Boolean) as Restaurant[];
@@ -390,15 +391,21 @@ async function discoverOpenTable(params: SearchParams, fcKey: string, apifyToken
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
+  // NOTE: Google's site: operator does NOT reliably filter by sub-path.
+  // "site:opentable.com/r/" does NOT mean "pages under /r/" — it means pages
+  // whose URL starts with that prefix, which Google often ignores entirely.
+  // Instead we use site:domain + keyword targeting to surface /r/ pages.
   const queries = [
-    `site:${domain}/r/ ${city}${cuisine} restaurant reservation`,
-    `site:${domain}/r/ ${city}${cuisine} dinner reservation`,
+    `site:${domain} ${city}${cuisine} restaurant reservations -yelp -tripadvisor`,
+    `site:${domain} ${city}${cuisine} dinner book table -yelp`,
   ];
 
-  const results = await firecrawlSearch(queries, fcKey, 8);
-  return results
+  const results = await firecrawlSearch(queries, fcKey, 10);
+  const mapped = results
     .map(r => normToOT(r, params))
     .filter(Boolean) as Restaurant[];
+  console.log(`[OT discovery] ${results.length} raw → ${mapped.length} valid`);
+  return mapped;
 }
 
 async function discoverOTviaApify(params: SearchParams, token: string): Promise<Restaurant[]> {
@@ -479,12 +486,18 @@ async function discoverOTviaApify(params: SearchParams, token: string): Promise<
 function normToOT(fc: any, params: SearchParams): Restaurant | null {
   const url = fc.url ?? "";
   const domain = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
-  const m = url.match(/opentable\.com\/r\/([^/?#]+)/i) ?? url.match(/opentable\.co\.uk\/r\/([^/?#]+)/i);
-  if (!m) return null;
 
-  const slug = m[1];
-  const baseUrl = `https://www.${domain}/r/${slug}`;
-  const rid = extractRid(url);
+  // Match /r/slug (canonical) or /restaurant/profile/NNN (legacy numeric)
+  const mSlug = url.match(/opentable\.(?:com|co\.uk)\/r\/([^/?#]+)/i);
+  const mNum  = url.match(/opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
+  if (!mSlug && !mNum) return null;
+
+  const slug = mSlug ? mSlug[1] : mNum![1];
+  // Always canonicalise to /r/ path
+  const baseUrl = mSlug
+    ? `https://www.${domain}/r/${slug}`
+    : `https://www.${domain}/r/${slug}`;  // numeric: OT redirects /r/NNN → correct page
+  const rid = mNum ? mNum[1] : extractRid(url);
 
   return {
     id: `opentable-${slug}`,
@@ -514,9 +527,10 @@ async function discoverYelp(params: SearchParams, fcKey: string): Promise<Restau
   const queries = [
     `site:${domain}/reservations/ ${city}${state}${cuisine} restaurant`,
     `site:${domain}/reservations/ ${city}${state}${cuisine} dinner reservation`,
+    `site:${domain}/reservations/ ${city}${state} restaurant book table`,
   ];
 
-  const results = await firecrawlSearch(queries, fcKey, 8);
+  const results = await firecrawlSearch(queries, fcKey, 10);
   return results
     .map(r => normToYelp(r, params))
     .filter(Boolean) as Restaurant[];
@@ -652,16 +666,29 @@ async function verifyOT(r: Restaurant, params: SearchParams, fcKey: string): Pro
     const resp = await fetch(`${FC_API}/scrape`, {
       method: "POST",
       headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ url: r.platformUrl, formats: ["markdown"], onlyMainContent: true, waitFor: 2000, timeout: 10000 }),
+      body: JSON.stringify({ url: r.platformUrl, formats: ["markdown"], onlyMainContent: true, waitFor: 3000, timeout: 12000 }),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      console.log(`[OT scrape] ${r.name}: HTTP ${resp.status}`);
+      return null;
+    }
     const data = await resp.json();
     const md: string = data.data?.markdown ?? "";
+    console.log(`[OT scrape] ${r.name}: ${md.length} chars, first 200: ${md.slice(0, 200)}`);
     if (md.length < 100) return null;
+
+    // Check if OT blocked the request (Akamai challenge page)
+    if (/access denied|security check|enable javascript|are you a robot/i.test(md)) {
+      console.log(`[OT scrape] ${r.name}: blocked by Akamai`);
+      return null;
+    }
 
     const slots = extractTimes(md);
     const windowed = filterWindow(slots, params.time);
-    if (windowed.length === 0) return null;
+    if (windowed.length === 0) {
+      console.log(`[OT scrape] ${r.name}: no windowed slots (extracted ${slots.length} raw)`);
+      return null;
+    }
 
     const base = r.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
@@ -777,30 +804,72 @@ async function geocodeAndRank(
 
   const needsGeo = restaurants.filter(r => r._lat == null && r._lng == null);
   if (needsGeo.length > 0) {
+    // Build a bounding box ~1.5° around the user (≈100 miles) to constrain Photon results.
+    // This prevents Photon from returning a same-named venue in a different city.
+    const bboxParam = (userLat != null && userLng != null)
+      ? `&bbox=${(userLng - 1.5).toFixed(4)},${(userLat - 1.5).toFixed(4)},${(userLng + 1.5).toFixed(4)},${(userLat + 1.5).toFixed(4)}`
+      : "";
+
     await Promise.all(needsGeo.map(async r => {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 3000);
+      const timer = setTimeout(() => ctrl.abort(), 3500);
       try {
-        const q = encodeURIComponent(`${r.name} ${geoCity} ${geoRegion}`);
-        const resp = await fetch(`${PHOTON}/?q=${q}&limit=1`, {
+        // Try with city first; fall back to name-only + bbox if no result
+        const q1 = encodeURIComponent(`${r.name} ${geoCity} ${geoRegion}`);
+        const url1 = `${PHOTON}/?q=${q1}&limit=3${bboxParam}`;
+        let resp = await fetch(url1, {
           headers: { "User-Agent": "TableFinder/2.0" },
           signal: ctrl.signal,
         });
         clearTimeout(timer);
         if (!resp.ok) return;
-        const data = await resp.json();
-        const feat = data?.features?.[0];
-        if (feat) {
-          const [lng, lat] = feat.geometry.coordinates;
-          r._lat = lat;
-          r._lng  = lng;
+        let data = await resp.json();
+        let feats: any[] = data?.features ?? [];
+
+        // If no result with city name, retry with just the restaurant name + bbox
+        if (feats.length === 0 && bboxParam) {
+          const ctrl2 = new AbortController();
+          const timer2 = setTimeout(() => ctrl2.abort(), 2500);
+          try {
+            const q2 = encodeURIComponent(`${r.name} restaurant`);
+            const resp2 = await fetch(`${PHOTON}/?q=${q2}&limit=3${bboxParam}`, {
+              headers: { "User-Agent": "TableFinder/2.0" },
+              signal: ctrl2.signal,
+            });
+            clearTimeout(timer2);
+            if (resp2.ok) {
+              const d2 = await resp2.json();
+              feats = d2?.features ?? [];
+            }
+          } catch { clearTimeout(timer2); }
+        }
+
+        // Pick the closest result within 30 miles (sanity cap)
+        let bestFeat: any = null;
+        let bestDist = Infinity;
+        for (const feat of feats) {
+          if (!feat?.geometry?.coordinates) continue;
+          const [fLng, fLat] = feat.geometry.coordinates;
+          if (userLat != null && userLng != null) {
+            const d = haversine(userLat, userLng, fLat, fLng);
+            if (d < bestDist && d <= 30) { bestDist = d; bestFeat = feat; }
+          } else {
+            bestFeat = feat;
+            break;
+          }
+        }
+
+        if (bestFeat) {
+          const [fLng, fLat] = bestFeat.geometry.coordinates;
+          r._lat = fLat;
+          r._lng  = fLng;
           // Populate neighborhood from Photon if not already set
           if (!r.neighborhood) {
-            const p = feat.properties as any;
+            const p = bestFeat.properties as any;
             r.neighborhood = p.district ?? p.suburb ?? p.city ?? "";
           }
         }
-      } catch { clearTimeout(timer); /* distance stays null */ }
+      } catch { /* distance stays null */ }
     }));
   }
 
