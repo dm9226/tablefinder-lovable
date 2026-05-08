@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v13
+// TableFinder Search Edge Function — v14
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -106,22 +106,23 @@ serve(async (req) => {
     console.log(`[params] ${JSON.stringify(params)}`);
 
     // ── Discovery ─────────────────────────────────────────────────────────────
-    // All 4 platforms in parallel. withTimeout here uses real AbortControllers
-    // via abortableDiscover so HTTP requests actually cancel on timeout.
-    const [resyCands, otCands, yelpCands] = await Promise.all([
-      abortableDiscover(() => discoverResy(params, FIRECRAWL),             DISCOVER_MS),
-      abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS),
-      abortableDiscover(() => discoverYelp(params, FIRECRAWL),             DISCOVER_MS),
-    ]);
+    // Resy and OT block all bot/datacenter traffic — Resy returns a blank SPA
+    // shell, OT returns 403 from Akamai. Running discovery for those platforms
+    // wastes Firecrawl credits and adds latency with zero results every time.
+    // Yelp IS accessible and its verifyYelp step has OT/Resy bridges that surface
+    // cross-platform restaurants as soft-verified results.
+    const yelpCands = await abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS);
+    const resyCands: Restaurant[] = [];
+    const otCands:   Restaurant[] = APIFY
+      ? await abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS)
+      : [];
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
 
     const resySlice = resyCands.slice(0, 15);
     const otSlice   = otCands.slice(0, 15);
-    const yelpSlice = yelpCands.slice(0, 18); // 18 to include OT/Resy bridge candidates from general search
+    const yelpSlice = yelpCands.slice(0, 18);
 
     // ── Verification ──────────────────────────────────────────────────────────
-    // KEY FIX: verifyBatch now takes a budget and returns PARTIAL results — it
-    // never throws away verified restaurants due to a timeout.
     const verifyStart = Date.now();
     const [resyVer, otVer, yelpVer] = await Promise.all([
       verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS),
@@ -166,7 +167,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v13-yelp-as-universal-discovery",
+      _v:                  "v14-stop-wasting-credits",
       _debug: {
         elapsed_ms:  elapsed,
         discovery:   { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
