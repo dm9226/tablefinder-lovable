@@ -23,6 +23,8 @@ const GLOBAL_TIMEOUT   = 115_000;
 const DISCOVERY_BUDGET =  12_000;
 const VERIFY_BUDGET    =  10_000;
 
+const PHOTON = "https://photon.komoot.io/api";  // OSM geocoder, no rate limits
+
 const CORS = {
   "Access-Control-Allow-Origin":  "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -822,20 +824,21 @@ async function geocodeAndRank(
   if (needsGeo.length > 0) {
     await Promise.all(needsGeo.map(async r => {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 2500);
+      const timer = setTimeout(() => ctrl.abort(), 3000);
       try {
-        const q = encodeURIComponent(`${r.name}, ${geoCity}, ${geoRegion}`);
-        const resp = await fetch(`${NOMINATIM}/search?q=${q}&format=json&limit=1`, {
-          headers: { "User-Agent": "TableFinder/2.0 contact@tablefinder.ai" },
+        const q = encodeURIComponent(`${r.name} ${geoCity} ${geoRegion}`);
+        const resp = await fetch(`${PHOTON}/api/?q=${q}&limit=1`, {
+          headers: { "User-Agent": "TableFinder/2.0" },
           signal: ctrl.signal,
         });
         clearTimeout(timer);
         if (!resp.ok) return;
         const data = await resp.json();
-        if (data?.[0]) {
-          r._lat = parseFloat(data[0].lat);
-          r._lng  = parseFloat(data[0].lon);
-          console.log(`[geo] ${r.name} → ${r._lat},${r._lng}`);
+        const feat = data?.features?.[0];
+        if (feat) {
+          const [lng, lat] = feat.geometry.coordinates;
+          r._lat = lat;
+          r._lng  = lng;
         }
       } catch { clearTimeout(timer); /* distance stays null */ }
     }));
