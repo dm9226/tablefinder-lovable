@@ -170,6 +170,7 @@ serve(async (req) => {
       params: meta,
       hasMore: remaining.length > 0,
       remainingCandidates: remaining,
+      _v: "geo-photon-3",
     });
 
   } catch (err: any) {
