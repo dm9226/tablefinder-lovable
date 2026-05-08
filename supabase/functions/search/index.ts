@@ -27,7 +27,7 @@ const APIFY_API  = "https://api.apify.com/v2";
 const PHOTON     = "https://photon.komoot.io/api";
 
 const GLOBAL_TIMEOUT  = 115_000;
-const DISCOVER_MS     =  12_000;  // per-platform discovery budget
+const DISCOVER_MS     =  20_000;  // per-platform discovery budget (direct scrape ~11s + fallback ~5s)
 const VERIFY_MS       =  35_000;  // per-platform verification budget (was 10s — key fix)
 const GEOCODE_MS      =  10_000;  // geocodeAndRank hard cap
 const ENRICH_MS       =  10_000;  // AI enrichment hard cap
@@ -158,13 +158,19 @@ serve(async (req) => {
       country:   params.country,
     };
 
-    console.log(`[done] ${verified.length} results in ${Date.now()-start}ms`);
+    const elapsed = Date.now() - start;
+    console.log(`[done] ${verified.length} results in ${elapsed}ms`);
     return json({
       results:             verified.slice(0, 24),
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
       _v:                  "v10-direct-discovery",
+      _debug: {
+        elapsed_ms:  elapsed,
+        discovery:   { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
+        verified:    { resy: resyVer.length, ot: otVer.length, yelp: yelpVer.length },
+      },
     });
 
   } catch (err: any) {
@@ -593,12 +599,20 @@ function extractYelpReservationUrls(md: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(md)) !== null) {
     const slug = m[1].toLowerCase();
-    if (!seen.has(slug)) {
+    // Skip Yelp's internal hash-ID slugs (contain underscores, or have
+    // a long segment mixing many letters+digits, like "aso24hnzbuvzniv1mq")
+    if (!seen.has(slug) && !isGarbageYelpSlug(slug)) {
       seen.add(slug);
       urls.push(`https://www.yelp.com/reservations/${slug}`);
     }
   }
   return urls;
+}
+
+function isGarbageYelpSlug(slug: string): boolean {
+  if (slug.includes("_")) return true; // Yelp real slugs use hyphens only
+  // Hash-like segments: 12+ chars mixing letters and digits (e.g. "aso24hnzbuvzniv1mq")
+  return slug.split("-").some(seg => seg.length >= 10 && /\d/.test(seg) && /[a-z]/.test(seg));
 }
 
 function normToYelp(fc: any, params: SearchParams): Restaurant | null {
@@ -1397,9 +1411,16 @@ function cleanTitle(title: string | undefined, url: string, platform: string): s
     t = t.replace(/\s*[-–|]\s*$/, "").trim();
     if (t.length > 1) return t;
   }
+  // Fallback: derive name from URL slug
   const parts = url.split("/");
-  const slug  = parts[parts.length - 1] || "restaurant";
-  return slug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  const slug  = (parts[parts.length - 1] || "restaurant").split("?")[0];
+  return slug
+    .replace(/-\d+$/, "")   // strip trailing disambiguation numbers: "south-city-kitchen-2" → "south-city-kitchen"
+    .split("-")
+    .filter(w => w.length > 0)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ")
+    .trim() || "Restaurant";
 }
 
 function extractAddress(md: string): string {
