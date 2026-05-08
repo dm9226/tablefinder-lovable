@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v12
+// TableFinder Search Edge Function — v13
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -117,7 +117,7 @@ serve(async (req) => {
 
     const resySlice = resyCands.slice(0, 15);
     const otSlice   = otCands.slice(0, 15);
-    const yelpSlice = yelpCands.slice(0, 12);
+    const yelpSlice = yelpCands.slice(0, 18); // 18 to include OT/Resy bridge candidates from general search
 
     // ── Verification ──────────────────────────────────────────────────────────
     // KEY FIX: verifyBatch now takes a budget and returns PARTIAL results — it
@@ -166,7 +166,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v12-inurl-bridges",
+      _v:                  "v13-yelp-as-universal-discovery",
       _debug: {
         elapsed_ms:  elapsed,
         discovery:   { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -547,9 +547,13 @@ function normToOT(fc: any, params: SearchParams): Restaurant | null {
 }
 
 // ─── YELP DISCOVERY ───────────────────────────────────────────────────────────
-// PRIMARY: scrape Yelp's search with reservation_date/time/covers filter —
-// only shows restaurants that accept reservations for the requested time.
-// FALLBACK: Google-based site: search if direct scrape yields < 3 venues.
+// TWO parallel searches:
+//   1. Reservation-filtered (reservation_date/time/covers): returns ONLY native Yelp
+//      restaurants. These have confirmed availability for the requested slot.
+//   2. General top-rated (sortby=rating, no reservation filter): returns ALL restaurant
+//      types regardless of booking platform. OT and Resy restaurants appear here but
+//      not in search #1. This pool feeds the OT/Resy cross-platform bridges in verifyYelp.
+// Both results are merged (reservation-filtered first) before verification.
 
 async function discoverYelp(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
   const city   = (params.lat != null && params.lng != null)
@@ -557,69 +561,87 @@ async function discoverYelp(params: SearchParams, fcKey: string): Promise<Restau
     : params.city;
   const domain = params.country === "gb" ? "yelp.co.uk" : "yelp.com";
   const tNoCol = params.time.replace(":", "");
+  const loc    = encodeURIComponent(`${city}${params.state ? `, ${params.state}` : ""}`);
+  const term   = params.cuisine
+    ? `&find_desc=${encodeURIComponent(params.cuisine + " restaurant")}`
+    : "&find_desc=restaurants";
 
-  // Yelp reservation search — pre-filtered for date/time/party size
-  const loc      = encodeURIComponent(`${city}${params.state ? `, ${params.state}` : ""}`);
-  const term     = params.cuisine
-    ? `&term=${encodeURIComponent(params.cuisine + " restaurant")}`
-    : "&cflt=restaurants";
-  const searchUrl = `https://www.${domain}/search?find_loc=${loc}${term}&reservation_date=${params.date}&reservation_time=${tNoCol}&reservation_covers=${params.partySize}`;
-
-  try {
-    const ctrl  = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 11_000);
-    const resp  = await fetch(`${FC_API}/scrape`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
-      signal: ctrl.signal,
-      body: JSON.stringify({
-        url: searchUrl, formats: ["markdown"],
-        onlyMainContent: false,
-        waitFor: 3500,
-        timeout: 10000,
-      }),
-    });
-    clearTimeout(timer);
-    if (resp.ok) {
+  const scrapeYelp = async (url: string, label: string): Promise<string[]> => {
+    try {
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 11_000);
+      const resp  = await fetch(`${FC_API}/scrape`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+        signal: ctrl.signal,
+        body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: false, waitFor: 3500, timeout: 10000 }),
+      });
+      clearTimeout(timer);
+      if (!resp.ok) { console.log(`[Yelp ${label}] HTTP ${resp.status}`); return []; }
       const data = await resp.json();
       const md: string = data.data?.markdown ?? "";
       const urls = extractYelpReservationUrls(md);
-      if (urls.length >= 3) {
-        console.log(`[Yelp direct] ${urls.length} venues found`);
-        return urls.map(u => normToYelp({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
-      }
-      console.log(`[Yelp direct] only ${urls.length} venues (md=${md.length}) — falling back to Google`);
-    } else {
-      console.log(`[Yelp direct] HTTP ${resp.status} — falling back to Google`);
+      console.log(`[Yelp ${label}] ${urls.length} venues (md=${md.length})`);
+      return urls;
+    } catch (err: any) {
+      console.log(`[Yelp ${label}] ${err?.message}`); return [];
     }
-  } catch (err: any) {
-    console.log(`[Yelp direct] ${err?.message} — falling back to Google`);
+  };
+
+  // Search #1: reservation-filtered (native Yelp only)
+  const resvUrl = `https://www.${domain}/search?find_loc=${loc}${term.replace("find_desc=","term=")}&reservation_date=${params.date}&reservation_time=${tNoCol}&reservation_covers=${params.partySize}`;
+  // Search #2: general top-rated (ALL platforms — feeds OT/Resy bridges)
+  const topUrl  = `https://www.${domain}/search?find_loc=${loc}${term}&sortby=rating`;
+
+  const [resvUrls, topUrls] = await Promise.all([
+    scrapeYelp(resvUrl, "resv"),
+    scrapeYelp(topUrl,  "top"),
+  ]);
+
+  // Merge: resv first (native Yelp, high confidence), then top-rated additions
+  // (potential OT/Resy restaurants not in resv list)
+  const seen = new Set<string>();
+  const combined: string[] = [];
+  for (const u of [...resvUrls, ...topUrls]) {
+    const slug = u.split("/").pop() ?? "";
+    if (slug && !seen.has(slug)) { seen.add(slug); combined.push(u); }
   }
 
-  // Google fallback
+  if (combined.length >= 1) {
+    console.log(`[Yelp combined] ${combined.length} (resv=${resvUrls.length} top=${topUrls.length})`);
+    return combined.map(u => normToYelp({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+  }
+
+  // Google fallback (rarely needed given two direct scrapes above)
   const state   = params.state ? `, ${params.state}` : "";
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const queries = [
-    `site:${domain}/reservations/ ${city}${state}${cuisine} restaurant`,
-    `site:${domain}/reservations/ ${city}${state} restaurant dinner reservation`,
+    `inurl:${domain}/reservations/ ${city}${state}${cuisine} restaurant`,
+    `inurl:${domain}/reservations/ ${city}${state} restaurant dinner`,
   ];
   const results = await firecrawlSearch(queries, fcKey, 10);
   return results.map(r => normToYelp(r, params)).filter(Boolean) as Restaurant[];
 }
 
-// Extract Yelp reservation/biz URLs from a scraped markdown page
+// Extract Yelp reservation/biz URLs from a scraped markdown page.
+// Matches both absolute URLs and relative markdown hrefs (Yelp SPA renders /biz/ paths).
 function extractYelpReservationUrls(md: string): string[] {
   const seen = new Set<string>();
   const urls: string[] = [];
-  const re   = /https?:\/\/(?:www\.)?yelp\.(?:com|co\.uk)\/(?:reservations|biz)\/([^/?#\s"')]+)/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(md)) !== null) {
-    const slug = m[1].toLowerCase();
-    // Skip Yelp's internal hash-ID slugs (contain underscores, or have
-    // a long segment mixing many letters+digits, like "aso24hnzbuvzniv1mq")
-    if (!seen.has(slug) && !isGarbageYelpSlug(slug)) {
-      seen.add(slug);
-      urls.push(`https://www.yelp.com/reservations/${slug}`);
+
+  // Absolute: https://www.yelp.com/biz/atlas-restaurant-atlanta
+  const reAbs = /https?:\/\/(?:www\.)?yelp\.(?:com|co\.uk)\/(?:reservations|biz)\/([^/?#\s"')]+)/gi;
+  // Relative in markdown link syntax: (/biz/slug) or (/reservations/slug)
+  const reRel = /\(\/(?:reservations|biz)\/([^/?#\s"')]+)/gi;
+
+  for (const re of [reAbs, reRel]) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(md)) !== null) {
+      const slug = m[1].toLowerCase();
+      if (!seen.has(slug) && !isGarbageYelpSlug(slug)) {
+        seen.add(slug);
+        urls.push(`https://www.yelp.com/reservations/${slug}`);
+      }
     }
   }
   return urls;
