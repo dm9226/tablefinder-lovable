@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v11
+// TableFinder Search Edge Function — v12
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -8,7 +8,7 @@
 // Optional:
 //   APIFY_API_TOKEN  — enables OpenTable via Apify (most reliable OT path)
 //
-// v11 changes (bug fixes on top of v10):
+// v12 changes (process fixes on top of v11):
 //   • extractResyVenueUrls: now matches relative hrefs (/cities/slug/venues/slug)
 //     in addition to absolute URLs — React SPAs render relative links, Firecrawl
 //     preserves them as markdown ([text](/cities/...)), absolute regex missed them
@@ -166,7 +166,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v11-yelp-resy-fix",
+      _v:                  "v12-inurl-bridges",
       _debug: {
         elapsed_ms:  elapsed,
         discovery:   { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -349,12 +349,14 @@ async function discoverResy(params: SearchParams, fcKey: string): Promise<Restau
     console.log(`[Resy direct] ${err?.message} — falling back to Google`);
   }
 
-  // Google fallback — use site:resy.com without a path prefix; path-prefix site: queries
-  // are poorly supported by Firecrawl's underlying Google search and return 0 results.
+  // Google fallback — inurl: targets the exact URL path pattern that normToResy
+  // requires (/cities/slug/venues/slug). site: with path-prefix is unreliable in
+  // Firecrawl's search; site: without path returns homepage/category pages that
+  // normToResy filters out. inurl: reliably returns individual venue pages.
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const queries = [
-    `site:resy.com ${metro}${cuisine} restaurant reservation`,
-    `site:resy.com ${metro} dinner restaurant reservation`,
+    `inurl:resy.com/cities/${slug}/venues ${metro}${cuisine} restaurant`,
+    `inurl:resy.com/cities/${slug}/venues ${metro} restaurant reservation`,
   ];
   const results = await firecrawlSearch(queries, fcKey, 10);
   return results.map(r => normToResy(r, params)).filter(Boolean) as Restaurant[];
@@ -436,10 +438,13 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
+  // inurl: reliably targets pages whose URL contains the /r/ or /restaurant/profile/
+  // path. site: with a path prefix is unreliable in Firecrawl's Google search API;
+  // both site: and path-prefix queries return 0 usable results in practice.
   const queries = [
-    `site:${domain}/r/ ${city}${state}${cuisine} restaurant reservation`,
-    `site:${domain}/r/ ${city}${state} restaurant dinner reservation`,
-    `site:${domain}/restaurant/profile/ ${city}${state}${cuisine} restaurant`, // profile URLs contain rid
+    `inurl:${domain}/r/ ${city}${state}${cuisine} restaurant`,
+    `inurl:${domain}/r/ ${city}${state} restaurant dinner reservation`,
+    `inurl:${domain}/restaurant/profile/ ${city}${state}${cuisine} restaurant`,
   ];
 
   const results = await firecrawlSearch(queries, fcKey, 10);
@@ -983,26 +988,56 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     const md: string = data.data?.markdown ?? "";
     if (md.length < 100) { console.log(`[verifyYelp] ${r.name}: short markdown (${md.length})`); return null; }
 
-    // ── OT Widget Bridge ───────────────────────────────────────────────────────
-    // Many Yelp reservation pages show "Reserve on OpenTable" with a link
-    // containing the OT rid. We can use this to get OT slot data for free,
-    // without Apify, by scraping the OT widget canvas (lighter Akamai target).
+    // ── OT Bridge ─────────────────────────────────────────────────────────────
+    // Yelp reservation pages often embed an OT booking link with the restaurant's
+    // rid. Try the OT widget canvas first (hard result with slots). If Akamai
+    // blocks it, return a soft-verified OT result rather than dropping entirely —
+    // the rid is definitive proof this restaurant is on OpenTable.
     const otRidM = md.match(/opentable\.(?:com|co\.uk)[^\s"'<>]*[?&]rid=(\d+)/i)
                 ?? md.match(/opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
     if (otRidM) {
-      const rid       = otRidM[1];
-      const otResult  = await tryOTWidgetScrape(r.name, rid, params, fcKey);
-      if (otResult) return otResult; // Return as OT-platform result — best case!
-      // OT widget blocked/empty → fall through to Yelp result below
+      const rid      = otRidM[1];
+      const otResult = await tryOTWidgetScrape(r.name, rid, params, fcKey);
+      if (otResult) return otResult; // Hard OT result with time slots ✓
+      // Widget blocked by Akamai → emit soft-verified OT (shows "Check on OT" link)
+      const profileUrl = `https://www.opentable.com/restaurant/profile/${rid}`;
+      console.log(`[verifyYelp] ${r.name}: OT rid=${rid} found but widget blocked → OT soft-verified`);
+      return {
+        ...r,
+        id:          `opentable-${rid}`,
+        platform:    "opentable" as const,
+        platformUrl: addOTParams(profileUrl, params),
+        timeSlots:   [],
+        softVerified: true,
+        _rid: rid,
+      };
     }
-    // ──────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
 
-    // Reject pages where reservations are handled by Resy or OT, not Yelp.
-    // Yelp pages for restaurants like South City Kitchen say "Reserve on Resy"
-    // or "Book on OpenTable" — these are NOT Yelp reservations.
+    // ── Resy Bridge ───────────────────────────────────────────────────────────
+    // If the Yelp page links to a specific Resy venue URL, surface a soft-verified
+    // Resy result. This fires even when Resy Google discovery returns 0 (bot block).
+    const resyVenueM = md.match(/resy\.com\/cities\/([^/\s"']+)\/venues\/([^/?#\s"')]+)/i);
+    if (resyVenueM) {
+      const resyBase = `https://resy.com/cities/${resyVenueM[1]}/venues/${resyVenueM[2]}`;
+      const vSlug    = resyVenueM[2].toLowerCase();
+      console.log(`[verifyYelp] ${r.name}: Resy venue found → soft-verified Resy (${vSlug})`);
+      return {
+        ...r,
+        id:          `resy-${vSlug}`,
+        platform:    "resy" as const,
+        platformUrl: addResyParams(resyBase, params),
+        timeSlots:   [],
+        softVerified: true,
+      };
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Reject pages that mention Resy/OT by name but had no extractable URL above.
+    // (Generic "Reserve on Resy" text without a venue link — not enough to act on.)
     const usesOtherPlatform = /\b(reserve\s+on\s+resy|book\s+on\s+resy|resy\.com|reserve\s+on\s+opentable|book\s+on\s+opentable)\b/i.test(md);
     if (usesOtherPlatform) {
-      console.log(`[verifyYelp] ${r.name}: redirects to Resy/OT — skipping as Yelp`);
+      console.log(`[verifyYelp] ${r.name}: redirects to Resy/OT (no extractable URL) — skipping`);
       return null;
     }
 
