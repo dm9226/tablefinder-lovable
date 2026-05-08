@@ -116,10 +116,10 @@ serve(async (req) => {
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
 
-    // Allocate: Yelp capped at 6, others at 10
-    const resySlice  = resyCands.slice(0, 10);
-    const otSlice    = otCands.slice(0, 10);
-    const yelpSlice  = yelpCands.slice(0, 6);
+    // Allocate: Yelp capped at 10, others at 15
+    const resySlice  = resyCands.slice(0, 15);
+    const otSlice    = otCands.slice(0, 15);
+    const yelpSlice  = yelpCands.slice(0, 10);
 
     // Verification: all 3 lanes in parallel, hard-capped
     const verifyStart = Date.now();
@@ -136,22 +136,20 @@ serve(async (req) => {
     const softVerifiedResults = verified.filter(r => r.softVerified).slice(0, 3);
     const hardVerified = verified.filter(r => !r.softVerified);
 
-    // Geocode and rank hard-verified by distance, then append soft-verified at end
-    const ranked = await geocodeAndRank(hardVerified, params, AI_KEY);
+    // Geocode + enrich in parallel — both are optional enrichments with hard caps
+    const [ranked] = await Promise.all([
+      geocodeAndRank(hardVerified, params, AI_KEY),
+      withTimeout(enrich(hardVerified, params, AI_KEY), 10_000, hardVerified),
+    ]);
     verified = [...ranked, ...softVerifiedResults];
 
-    // Enrich only if we're well under budget — skip to keep initial results fast
-    // (Enrichment adds 5-8s; descriptions appear in the extended-search second pass)
-    if (Date.now() - start < 12_000) {
-      verified = await withTimeout(enrich(verified, params, AI_KEY), 6_000, verified);
-    }
-
-    // Remaining candidates for optional second pass
+    // Remaining candidates for optional second pass (deduped)
     const verifiedIds = new Set(verified.map(r => r.id));
     const attempted   = new Set([...resySlice, ...otSlice, ...yelpSlice].map(r => r.id));
-    const remaining = [...resyCands, ...otCands, ...yelpCands]
-      .filter(r => !attempted.has(r.id) && !verifiedIds.has(r.id))
-      .slice(0, 18);
+    const remaining = dedup(
+      [...resyCands, ...otCands, ...yelpCands]
+        .filter(r => !attempted.has(r.id) && !verifiedIds.has(r.id))
+    ).slice(0, 18);
 
     const meta: SearchMeta = {
       date: formatDisplayDate(params.date),
@@ -170,7 +168,7 @@ serve(async (req) => {
       params: meta,
       hasMore: remaining.length > 0,
       remainingCandidates: remaining,
-      _v: "geo-photon-4",
+      _v: "v5-full-fix",
     });
 
   } catch (err: any) {
@@ -254,8 +252,11 @@ async function runExtendedSearch(
   ]);
 
   let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
-  verified = await geocodeAndRank(verified, params, AI_KEY);
-  return verified;
+  const [ranked] = await Promise.all([
+    geocodeAndRank(verified, params, AI_KEY),
+    withTimeout(enrich(verified, params, AI_KEY), 10_000, verified),
+  ]);
+  return ranked;
 }
 
 // ─── QUERY PARSING ────────────────────────────────────────────────────────────
@@ -362,7 +363,7 @@ function normToResy(fc: any, params: SearchParams): Restaurant | null {
     id: `resy-${slug}`,
     name: cleanTitle(fc.title, url, "resy"),
     cuisine: params.cuisine || "Restaurant",
-    neighborhood: extractNeighborhood(fc.title, fc.description, params.city),
+    neighborhood: extractNeighborhood(fc.title, fc.description),
     platform: "resy",
     platformUrl: bookingUrl,
     timeSlots: [],
@@ -489,7 +490,7 @@ function normToOT(fc: any, params: SearchParams): Restaurant | null {
     id: `opentable-${slug}`,
     name: cleanTitle(fc.title, url, "opentable"),
     cuisine: params.cuisine || "Restaurant",
-    neighborhood: extractNeighborhood(fc.title, fc.description, params.city),
+    neighborhood: extractNeighborhood(fc.title, fc.description),
     platform: "opentable",
     platformUrl: addOTParams(baseUrl, params),
     timeSlots: [],
@@ -534,7 +535,7 @@ function normToYelp(fc: any, params: SearchParams): Restaurant | null {
     id: `yelp-${slug}`,
     name: cleanTitle(fc.title, url, "yelp"),
     cuisine: params.cuisine || "Restaurant",
-    neighborhood: extractNeighborhood(fc.title, fc.description, params.city),
+    neighborhood: extractNeighborhood(fc.title, fc.description),
     platform: "yelp",
     platformUrl: addYelpParams(canonUrl, params),
     timeSlots: [],
@@ -644,54 +645,8 @@ async function verifyResy(r: Restaurant, params: SearchParams, fcKey: string): P
 // ── OpenTable verification ──
 
 async function verifyOT(r: Restaurant, params: SearchParams, fcKey: string): Promise<Restaurant | null> {
-  // Path 1: OT JSON availability API (fast, but blocked by Akamai on datacenter IPs)
-  const rid = r._rid ?? extractRid(r.platformUrl);
-  if (rid) {
-    try {
-      const abort = new AbortController();
-      const timer = setTimeout(() => abort.abort(), 5_000);
-      const resp = await fetch("https://www.opentable.com/dapi/booking/restaurant/availability", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Referer: r.platformUrl,
-          Origin: "https://www.opentable.com",
-        },
-        body: JSON.stringify({
-          rids: [Number(rid)],
-          dateTime: `${params.date}T${params.time}`,
-          partySize: params.partySize,
-          includeOffers: false,
-          requestPremium: "true",
-          forceNextAvailable: "false",
-        }),
-        signal: abort.signal,
-      });
-      clearTimeout(timer);
-
-      if (resp.ok) {
-        const data: any = await resp.json().catch(() => null);
-        if (data) {
-          const raw: any[] = [];
-          const push = (arr: any) => Array.isArray(arr) && raw.push(...arr);
-          push(data?.availability?.[rid]?.times);
-          push(data?.availability?.[rid]?.timeslots);
-          push(data?.availability?.times);
-          if (Array.isArray(data?.restaurants)) data.restaurants.forEach((rs: any) => { push(rs.slots); push(rs.times); });
-          push(data?.timeslots); push(data?.slots);
-          const windowed = filterWindow(parseOTSlots(raw), params.time);
-          if (windowed.length > 0) {
-            const base = r.platformUrl.split("?")[0];
-            return { ...r, timeSlots: windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) })) };
-          }
-        }
-      }
-    } catch { /* fall through to Firecrawl */ }
-  }
-
-  // Path 2: Firecrawl scrape — headless browser bypasses Akamai bot protection
+  // OT's JSON API is permanently blocked by Akamai on Supabase datacenter IPs.
+  // Use Firecrawl scrape — headless browser with residential proxies bypasses it.
   if (!fcKey) return null;
   try {
     const resp = await fetch(`${FC_API}/scrape`, {
@@ -710,7 +665,6 @@ async function verifyOT(r: Restaurant, params: SearchParams, fcKey: string): Pro
 
     const base = r.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
-
     const ratingM = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
     const reviewM  = md.match(/\(([\d,]+)\s*review/i);
     return {
@@ -840,6 +794,11 @@ async function geocodeAndRank(
           const [lng, lat] = feat.geometry.coordinates;
           r._lat = lat;
           r._lng  = lng;
+          // Populate neighborhood from Photon if not already set
+          if (!r.neighborhood) {
+            const p = feat.properties as any;
+            r.neighborhood = p.district ?? p.suburb ?? p.city ?? "";
+          }
         }
       } catch { clearTimeout(timer); /* distance stays null */ }
     }));
@@ -872,7 +831,7 @@ async function geocodeAndRank(
 async function enrich(restaurants: Restaurant[], params: SearchParams, aiKey: string): Promise<Restaurant[]> {
   if (restaurants.length === 0 || !aiKey) return restaurants;
 
-  const tops = restaurants.slice(0, 6);
+  const tops = restaurants.slice(0, 12);
   const prompt = `For each restaurant, provide a one-sentence evocative description and 1-3 vibe tags.
 Vibe tags pick from: Romantic, Lively, Date Night, Outdoor Seating, Chef's Table, Wine Bar, Hidden Gem, Business Dinner, Rooftop, Casual, Fine Dining, Family Friendly.
 
@@ -1056,8 +1015,8 @@ function filterWindow(slots: TimeSlot[], requestedTime: string): TimeSlot[] {
       if (ampm === "am" && h === 12) h = 0;
       return { slot: s, mins: h * 60 + mn };
     })
-    .filter(x => x && Math.min(Math.abs(x.mins - reqMins), 1440 - Math.abs(x.mins - reqMins)) <= 120)
-    .sort((a, b) => Math.min(Math.abs(a!.mins - reqMins), 1440 - Math.abs(a!.mins - reqMins)) - Math.min(Math.abs(b!.mins - reqMins), 1440 - Math.abs(b!.mins - reqMins)))
+    .filter(x => x && Math.abs(x.mins - reqMins) <= 120)
+    .sort((a, b) => Math.abs(a!.mins - reqMins) - Math.abs(b!.mins - reqMins))
     .slice(0, 5)
     .sort((a, b) => a!.mins - b!.mins)
     .map(x => x!.slot);
@@ -1066,12 +1025,13 @@ function filterWindow(slots: TimeSlot[], requestedTime: string): TimeSlot[] {
 function extractTimes(text: string): TimeSlot[] {
   const slots: TimeSlot[] = [];
   const seen = new Set<string>();
-  const re = /\b(\d{1,2}):(\d{2})\s*(am|pm)\b/gi;
-  let m;
-  while ((m = re.exec(text)) !== null) {
+
+  // 12h format: "7:30 PM" / "7:30pm"
+  const re12 = /\b(\d{1,2}):(\d{2})\s*(am|pm)\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re12.exec(text)) !== null) {
     const ctx = text.slice(Math.max(0, m.index - 60), m.index + m[0].length + 60).toLowerCase();
     if (/notify|sold\s*out|waitlist|unavailable/i.test(ctx)) continue;
-
     let h = +m[1];
     const mn = +m[2];
     const ampm = m[3].toLowerCase();
@@ -1081,6 +1041,19 @@ function extractTimes(text: string): TimeSlot[] {
     const t = `${displayH}:${mn.toString().padStart(2, "0")} ${h >= 12 ? "PM" : "AM"}`;
     if (!seen.has(t)) { seen.add(t); slots.push({ time: t }); }
   }
+
+  // 24h format: "18:30" — used by OpenTable and some other platforms
+  const re24 = /\b([01]?\d|2[0-3]):([0-5]\d)\b(?!\s*(?:am|pm))/gi;
+  while ((m = re24.exec(text)) !== null) {
+    const ctx = text.slice(Math.max(0, m.index - 60), m.index + m[0].length + 60).toLowerCase();
+    if (/notify|sold\s*out|waitlist|unavailable/i.test(ctx)) continue;
+    const h = +m[1], mn = +m[2];
+    if (h < 6) continue; // skip midnight/early-morning false positives
+    const displayH = h % 12 || 12;
+    const t = `${displayH}:${mn.toString().padStart(2, "0")} ${h >= 12 ? "PM" : "AM"}`;
+    if (!seen.has(t)) { seen.add(t); slots.push({ time: t }); }
+  }
+
   return slots;
 }
 
@@ -1131,7 +1104,7 @@ function parseTimeFromDT(dt: string): string | null {
 
 function cleanTitle(title: string | undefined, url: string, platform: string): string {
   if (title) {
-    const t = title
+    let t = title
       .replace(/\s*[|–-]\s*(Resy|OpenTable|Yelp).*$/i, "")
       .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "")
       .replace(/\s+on\s+(OpenTable|Resy|Yelp)$/i, "")
@@ -1140,6 +1113,12 @@ function cleanTitle(title: string | undefined, url: string, platform: string): s
       .replace(/\s+reservation(s)?.*$/i, "")
       .replace(/\s*-\s*[A-Za-z\s]+,?\s*[A-Z]{2}$/i, "")
       .trim();
+    // Yelp-specific: strip trailing category list "- Bars, Seafood, ..."
+    if (platform === "yelp") {
+      t = t.replace(/\s*[-–]\s*[A-Za-z &']+(?:,\s*[A-Za-z &']+)+\s*$/, "").trim();
+    }
+    // Strip any bare trailing separator
+    t = t.replace(/\s*[-–|]\s*$/, "").trim();
     if (t.length > 1) return t;
   }
   const parts = url.split("/");
@@ -1147,11 +1126,11 @@ function cleanTitle(title: string | undefined, url: string, platform: string): s
   return slug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
-function extractNeighborhood(title?: string, desc?: string, fallback?: string): string {
+function extractNeighborhood(title?: string, desc?: string): string {
   const text = `${title || ""} ${desc || ""}`;
   const m = text.match(/[-–|]\s*([A-Za-z\s]+),\s*([A-Z]{2})\b/);
   if (m) return m[1].trim();
-  return fallback || "";
+  return ""; // neighborhood populated later from Photon geocode
 }
 
 function slugify(s: string): string {
