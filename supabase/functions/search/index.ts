@@ -106,25 +106,18 @@ serve(async (req) => {
     const params = await parseQuery(query, lat, lng, location, AI_KEY);
     console.log(`[params] ${JSON.stringify(params)}`);
 
-    // Discovery: all 3 platforms in parallel
-    const [resyCands, otCands, yelpCands] = await Promise.all([
-      withTimeout(discoverResy(params, FIRECRAWL),      DISCOVERY_BUDGET, []),
-      withTimeout(discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVERY_BUDGET, []),
-      withTimeout(discoverYelp(params, FIRECRAWL),      DISCOVERY_BUDGET, []),
-    ]);
-    console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length}`);
-
-    // Proportional allocation: up to 24 for verification (Yelp capped at 6)
-    const toVerify = allocate(resyCands, otCands, yelpCands, 24);
-
-    // Verification: parallel lanes with time budget
+    // Pipeline: each platform discovers then immediately verifies — no cross-platform wait
     const verifyStart = Date.now();
-    const [resyVer, otVer, yelpVer] = await Promise.all([
-      withTimeout(verifyBatch(toVerify.filter(r => r.platform === "resy"),      params, FIRECRAWL, start), VERIFY_BUDGET, []),
-      withTimeout(verifyBatch(toVerify.filter(r => r.platform === "opentable"), params, FIRECRAWL, start), VERIFY_BUDGET, []),
-      withTimeout(verifyBatch(toVerify.filter(r => r.platform === "yelp"),      params, FIRECRAWL, start), VERIFY_BUDGET, []),
+    const [
+      [resyVer, resyCands],
+      [otVer,   otCands],
+      [yelpVer, yelpCands],
+    ] = await Promise.all([
+      withTimeout(discoverAndVerify("resy",      params, FIRECRAWL, APIFY, start), DISCOVERY_BUDGET + VERIFY_BUDGET, [[], []]),
+      withTimeout(discoverAndVerify("opentable", params, FIRECRAWL, APIFY, start), DISCOVERY_BUDGET + VERIFY_BUDGET, [[], []]),
+      withTimeout(discoverAndVerify("yelp",      params, FIRECRAWL, APIFY, start), DISCOVERY_BUDGET + VERIFY_BUDGET, [[], []]),
     ]);
-    console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now() - verifyStart}ms`);
+    console.log(`[pipeline] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now() - verifyStart}ms`);
 
     let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
 
@@ -136,15 +129,15 @@ serve(async (req) => {
     const ranked = await geocodeAndRank(hardVerified, params, AI_KEY);
     verified = [...ranked, ...softVerifiedResults];
 
-    // Enrich top results (descriptions + vibe tags) if time allows
-    if (Date.now() - start < 30_000) {
-      verified = await enrich(verified, params, AI_KEY);
+    // Enrich top results (descriptions + vibe tags) — run concurrently with a hard 8s cap
+    if (Date.now() - start < 20_000) {
+      verified = await withTimeout(enrich(verified, params, AI_KEY), 8_000, verified);
     }
 
-    // Remaining candidates for optional second pass
+    // Remaining candidates for optional second pass (candidates not yet verified)
     const verifiedIds = new Set(verified.map(r => r.id));
     const remaining = [...resyCands, ...otCands, ...yelpCands]
-      .filter(r => !toVerify.some(v => v.id === r.id) && !verifiedIds.has(r.id))
+      .filter(r => !verifiedIds.has(r.id))
       .slice(0, 18);
 
     const meta: SearchMeta = {
@@ -172,6 +165,42 @@ serve(async (req) => {
     return json({ error: err?.message ?? "Search failed. Please try again." }, 500);
   }
 });
+
+// ─── PIPELINE: DISCOVER + VERIFY PER PLATFORM ────────────────────────────────
+// Pipelines discovery directly into verification so each platform doesn't wait
+// for the others to finish discovery before its own verification starts.
+
+async function discoverAndVerify(
+  platform: "resy" | "opentable" | "yelp",
+  params: SearchParams,
+  fcKey: string,
+  apifyToken: string,
+  globalStart: number,
+): Promise<[Restaurant[], Restaurant[]]> {
+  // Discover
+  let candidates: Restaurant[] = [];
+  try {
+    if (platform === "resy")      candidates = await withTimeout(discoverResy(params, fcKey),                   DISCOVERY_BUDGET, []);
+    if (platform === "opentable") candidates = await withTimeout(discoverOpenTable(params, fcKey, apifyToken),  DISCOVERY_BUDGET, []);
+    if (platform === "yelp")      candidates = await withTimeout(discoverYelp(params, fcKey),                   DISCOVERY_BUDGET, []);
+  } catch { candidates = []; }
+
+  console.log(`[discover:${platform}] ${candidates.length} candidates`);
+
+  // Allocate — Yelp capped at 6, others at 9
+  const cap = platform === "yelp" ? 6 : 9;
+  const toVerify = candidates.slice(0, cap);
+
+  // Verify immediately
+  const verified = await withTimeout(
+    verifyBatch(toVerify, params, fcKey, globalStart),
+    VERIFY_BUDGET,
+    [],
+  );
+  console.log(`[verify:${platform}] ${verified.length}/${toVerify.length} verified`);
+
+  return [verified, candidates];
+}
 
 // ─── EXTENDED SEARCH ─────────────────────────────────────────────────────────
 
