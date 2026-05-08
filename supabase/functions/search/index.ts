@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v10
+// TableFinder Search Edge Function — v11
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -8,14 +8,15 @@
 // Optional:
 //   APIFY_API_TOKEN  — enables OpenTable via Apify (most reliable OT path)
 //
-// v10 changes:
-//   • Resy discovery: scrapes Resy's OWN search page (pre-filtered for date/time/size)
-//     instead of Google — only returns restaurants with confirmed availability
-//   • Yelp discovery: scrapes Yelp's search with reservation filter directly
-//   • OT: adds Jina AI reader (r.jina.ai) — completely different infrastructure
-//     from Firecrawl, may bypass Akamai blacklists on OT pages
-//   • Tock removed from active pipeline
-//   • Resy waitFor 1500ms, Yelp waitFor 3000ms
+// v11 changes (bug fixes on top of v10):
+//   • extractResyVenueUrls: now matches relative hrefs (/cities/slug/venues/slug)
+//     in addition to absolute URLs — React SPAs render relative links, Firecrawl
+//     preserves them as markdown ([text](/cities/...)), absolute regex missed them
+//   • Resy Google fallback: changed site:resy.com/cities/${slug}/venues/ to
+//     site:resy.com — path-prefix site: queries are unsupported by Firecrawl search
+//   • verifyYelp: removed hasNativeWidget gate (Firecrawl can't render Yelp's JS
+//     time-picker → gate rejected all 14 candidates); soft-verify now triggers on
+//     any reservation-related language instead of requiring "no times available" etc.
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 
@@ -165,7 +166,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v10-direct-discovery",
+      _v:                  "v11-yelp-resy-fix",
       _debug: {
         elapsed_ms:  elapsed,
         discovery:   { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -348,27 +349,37 @@ async function discoverResy(params: SearchParams, fcKey: string): Promise<Restau
     console.log(`[Resy direct] ${err?.message} — falling back to Google`);
   }
 
-  // Google fallback
+  // Google fallback — use site:resy.com without a path prefix; path-prefix site: queries
+  // are poorly supported by Firecrawl's underlying Google search and return 0 results.
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const queries = [
-    `site:resy.com/cities/${slug}/venues/ ${metro}${cuisine} restaurant reservation`,
-    `site:resy.com/cities/${slug}/venues/ ${metro} restaurant dinner reservation`,
+    `site:resy.com ${metro}${cuisine} restaurant reservation`,
+    `site:resy.com ${metro} dinner restaurant reservation`,
   ];
   const results = await firecrawlSearch(queries, fcKey, 10);
   return results.map(r => normToResy(r, params)).filter(Boolean) as Restaurant[];
 }
 
-// Extract all Resy venue URLs from a scraped markdown page
+// Extract all Resy venue URLs from a scraped markdown page.
+// React SPAs typically render relative hrefs, which Firecrawl preserves in markdown
+// as [text](/cities/slug/venues/slug). We match both absolute and relative forms.
 function extractResyVenueUrls(md: string): string[] {
   const seen = new Set<string>();
   const urls: string[] = [];
-  const re   = /https?:\/\/resy\.com\/cities\/([^/\s"']+)\/venues\/([^/?#\s"')]+)/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(md)) !== null) {
-    const slug = m[2].toLowerCase();
-    if (!RESY_SKIP.has(slug) && !seen.has(slug)) {
-      seen.add(slug);
-      urls.push(`https://resy.com/cities/${m[1]}/venues/${m[2]}`);
+
+  // Absolute URLs: https://resy.com/cities/atlanta-ga/venues/atlas
+  const reAbs = /https?:\/\/resy\.com\/cities\/([^/\s"']+)\/venues\/([^/?#\s"')]+)/gi;
+  // Relative paths in markdown link syntax: (/cities/atlanta-ga/venues/atlas)
+  const reRel = /\(\/cities\/([^/\s"']+)\/venues\/([^/?#\s"')]+)/gi;
+
+  for (const re of [reAbs, reRel]) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(md)) !== null) {
+      const vSlug = m[2].toLowerCase();
+      if (!RESY_SKIP.has(vSlug) && !seen.has(vSlug)) {
+        seen.add(vSlug);
+        urls.push(`https://resy.com/cities/${m[1]}/venues/${m[2]}`);
+      }
     }
   }
   return urls;
@@ -995,10 +1006,10 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       return null;
     }
 
-    // Require actual Yelp-native reservation UI signals — not just "Takes Reservations: Yes"
-    // which appears on all restaurants. Need signs of an actual booking widget.
-    const hasNativeWidget = /\b(select\s+(a\s+)?time|choose\s+(a\s+)?time|find\s+a\s+table|party\s+size|available\s+times?|no\s+times?\s+available|request\s+a\s+reservation)\b/i.test(md);
-    if (!hasNativeWidget) { console.log(`[verifyYelp] ${r.name}: no native Yelp widget`); return null; }
+    // NOTE: We do NOT gate on native widget text here. Firecrawl can't render Yelp's
+    // JS time-picker even with waitFor:3000, so phrases like "select a time" / "party size"
+    // never appear in the markdown. Candidates already came from Yelp's own reservation
+    // search URL and passed the usesOtherPlatform filter — that's sufficient evidence.
 
     const slots    = extractTimes(md);
     const windowed = filterWindow(slots, params.time);
@@ -1013,12 +1024,12 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     const addr = r._address || extractAddress(md) || undefined;
 
     if (windowed.length === 0) {
-      // Only soft-verify if there's strong evidence of a real Yelp booking widget
-      // (e.g. "no times available tonight" is still useful to show the user).
-      // Don't soft-verify if we just see generic text — too many false positives.
-      const strongEvidence = /\b(no\s+times?\s+available|sold\s+out|fully\s+booked|join\s+waitlist|no\s+availability)\b/i.test(md);
-      if (!strongEvidence) { console.log(`[verifyYelp] ${r.name}: widget text but no times and no strong evidence`); return null; }
-      console.log(`[verifyYelp] ${r.name}: soft-verified`);
+      // Soft-verify: the time-picker widget likely didn't render (JS-heavy), but the
+      // restaurant was found via Yelp's own reservation search URL and doesn't redirect
+      // to Resy/OT. Accept if there's any reservation-related language on the page.
+      const hasAnyReservationHint = /\b(reservation|book\s+a\s+table|waitlist|party\s+of|guests?|dining|dine\s+in)\b/i.test(md);
+      if (!hasAnyReservationHint) { console.log(`[verifyYelp] ${r.name}: no reservation language — skipping`); return null; }
+      console.log(`[verifyYelp] ${r.name}: soft-verified (widget likely not rendered)`);
       return { ...r, ...meta, timeSlots: [], softVerified: true, _address: addr };
     }
     const base          = r.platformUrl.split("?")[0];
