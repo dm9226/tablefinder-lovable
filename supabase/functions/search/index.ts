@@ -20,8 +20,8 @@ const APIFY_API    = "https://api.apify.com/v2";
 const NOMINATIM    = "https://nominatim.openstreetmap.org";
 
 const GLOBAL_TIMEOUT   = 115_000;
-const DISCOVERY_BUDGET =  40_000;
-const VERIFY_BUDGET    =  28_000;
+const DISCOVERY_BUDGET =  22_000;
+const VERIFY_BUDGET    =  16_000;
 
 const CORS = {
   "Access-Control-Allow-Origin":  "*",
@@ -137,7 +137,7 @@ serve(async (req) => {
     verified = [...ranked, ...softVerifiedResults];
 
     // Enrich top results (descriptions + vibe tags) if time allows
-    if (Date.now() - start < 95_000) {
+    if (Date.now() - start < 30_000) {
       verified = await enrich(verified, params, AI_KEY);
     }
 
@@ -319,7 +319,10 @@ async function discoverOpenTable(params: SearchParams, fcKey: string, apifyToken
   }
 
   // Otherwise fall back to Firecrawl search (Google index of OT pages)
-  const city = params.city;
+  // Use metro city name when coordinates available
+  const city = (params.lat != null && params.lng != null)
+    ? (nearestResyMetro(params.lat, params.lng)?.name ?? params.city)
+    : params.city;
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
@@ -435,7 +438,11 @@ function normToOT(fc: any, params: SearchParams): Restaurant | null {
 // ─── YELP DISCOVERY ───────────────────────────────────────────────────────────
 
 async function discoverYelp(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
-  const city = params.city;
+  // Use metro city name when coordinates available (avoids poor results for suburbs)
+  const metroCity = (params.lat != null && params.lng != null)
+    ? (nearestResyMetro(params.lat, params.lng)?.name ?? params.city)
+    : params.city;
+  const city = metroCity;
   const state = params.state ? `, ${params.state}` : "";
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain = params.country === "gb" ? "yelp.co.uk" : "yelp.com";
@@ -484,7 +491,7 @@ async function verifyBatch(
   if (candidates.length === 0) return [];
 
   const results: Restaurant[] = [];
-  const CONCURRENCY = 4;
+  const CONCURRENCY = 6;
   const LANE_TARGET = 6;
 
   for (let i = 0; i < candidates.length; i += CONCURRENCY) {
@@ -527,7 +534,7 @@ async function verifyResy(r: Restaurant, params: SearchParams, fcKey: string): P
     const resp = await fetch(`${FC_API}/scrape`, {
       method: "POST",
       headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ url: r.platformUrl, formats: ["markdown"], onlyMainContent: true, waitFor: 1500, timeout: 12000 }),
+      body: JSON.stringify({ url: r.platformUrl, formats: ["markdown"], onlyMainContent: true, waitFor: 500, timeout: 8000 }),
     });
     if (!resp.ok) return null;
     const data = await resp.json();
@@ -676,7 +683,7 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     const resp = await fetch(`${FC_API}/scrape`, {
       method: "POST",
       headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ url: r.platformUrl, formats: ["markdown"], onlyMainContent: true, waitFor: 1500, timeout: 12000 }),
+      body: JSON.stringify({ url: r.platformUrl, formats: ["markdown"], onlyMainContent: true, waitFor: 500, timeout: 8000 }),
     });
     if (!resp.ok) return null;
     const data = await resp.json();
@@ -730,24 +737,26 @@ async function geocodeAndRank(
   const userLat = params.lat;
   const userLng = params.lng;
 
-  // Batch geocode restaurants that need it (up to 6 at a time, Nominatim throttle)
-  const needsGeo = restaurants.filter(r => r._lat == null && r._lng == null);
-  const BATCH = 4;
-  for (let i = 0; i < needsGeo.length; i += BATCH) {
-    await Promise.all(needsGeo.slice(i, i + BATCH).map(async r => {
+  // If user has coordinates, skip Nominatim entirely — just compute distance for
+  // restaurants that already have coords from scraping, push the rest to end.
+  // Nominatim adds 5-10s of latency; not worth it when we already have user location.
+  if (userLat == null || userLng == null) {
+    // No user coords at all — try to geocode a small batch quickly
+    const needsGeo = restaurants.filter(r => r._lat == null && r._lng == null).slice(0, 4);
+    await Promise.all(needsGeo.map(async r => {
       try {
         const query = encodeURIComponent(`${r.name}, ${params.city}, ${params.state || params.country}`);
         const resp = await fetch(`${NOMINATIM}/search?q=${query}&format=json&limit=1`, {
           headers: { "User-Agent": "TableFinder/2.0" },
+          signal: AbortSignal.timeout(3000),
         });
         const data = await resp.json();
         if (data?.[0]) { r._lat = parseFloat(data[0].lat); r._lng = parseFloat(data[0].lon); }
       } catch { /* skip */ }
     }));
-    if (i + BATCH < needsGeo.length) await sleep(300); // Nominatim rate limit
   }
 
-  // Compute distances and sort
+  // Compute distances
   for (const r of restaurants) {
     if (userLat != null && userLng != null && r._lat != null && r._lng != null) {
       r.distanceMiles = haversine(userLat, userLng, r._lat, r._lng);
@@ -774,7 +783,7 @@ async function geocodeAndRank(
 async function enrich(restaurants: Restaurant[], params: SearchParams, aiKey: string): Promise<Restaurant[]> {
   if (restaurants.length === 0 || !aiKey) return restaurants;
 
-  const tops = restaurants.slice(0, 12);
+  const tops = restaurants.slice(0, 6);
   const prompt = `For each restaurant, provide a one-sentence evocative description and 1-3 vibe tags.
 Vibe tags pick from: Romantic, Lively, Date Night, Outdoor Seating, Chef's Table, Wine Bar, Hidden Gem, Business Dinner, Rooftop, Casual, Fine Dining, Family Friendly.
 
