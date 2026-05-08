@@ -58,6 +58,7 @@ interface Restaurant {
   _slug?: string;
   _rid?: string;
   _preVerified?: boolean;
+  _address?: string;        // street address extracted during verification, used as geocoding fallback
 }
 
 interface SearchParams {
@@ -168,7 +169,7 @@ serve(async (req) => {
       params: meta,
       hasMore: remaining.length > 0,
       remainingCandidates: remaining,
-      _v: "v6-ot-geo",
+      _v: "v7-ot-search-page",
     });
 
   } catch (err: any) {
@@ -383,28 +384,95 @@ async function discoverOpenTable(params: SearchParams, fcKey: string, apifyToken
     return discoverOTviaApify(params, apifyToken);
   }
 
-  // Otherwise fall back to Firecrawl search (Google index of OT pages)
-  // Use metro city name when coordinates available
+  // Primary: scrape OT's own search-results page.
+  // Google-index search for opentable.com returns homepages/search pages, not
+  // individual /r/ pages — OT individual pages are not well-indexed. Scraping
+  // the search results page directly gives us restaurant cards with /r/ links.
+  if (params.lat != null && params.lng != null) {
+    const fromPage = await discoverOTviaSearchPage(params, fcKey);
+    if (fromPage.length > 0) return fromPage;
+    console.log("[OT search page] returned 0, falling back to web search");
+  }
+
+  // Fallback: web search (last resort — usually returns 0 for OT)
+  return discoverOTviaWebSearch(params, fcKey);
+}
+
+async function discoverOTviaSearchPage(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
+  const cuisine = params.cuisine ? encodeURIComponent(params.cuisine) : "";
+  const searchUrl = [
+    `https://www.opentable.com/s`,
+    `?covers=${params.partySize}`,
+    `&dateTime=${params.date}T${params.time}`,
+    `&latitude=${params.lat!.toFixed(4)}`,
+    `&longitude=${params.lng!.toFixed(4)}`,
+    `&radius=10`,
+    cuisine ? `&term=${cuisine}` : "",
+  ].join("");
+
+  try {
+    const resp = await fetch(`${FC_API}/scrape`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: searchUrl,
+        formats: ["markdown", "links"],
+        onlyMainContent: false,   // need full page to capture restaurant card links
+        waitFor: 4000,
+        timeout: 14000,
+      }),
+    });
+    if (!resp.ok) {
+      console.log(`[OT search page] HTTP ${resp.status}`);
+      return [];
+    }
+    const data = await resp.json();
+    const md: string = data.data?.markdown ?? "";
+    const rawLinks: any[] = data.data?.links ?? [];
+    const links: string[] = rawLinks.map(l => (typeof l === "string" ? l : l.url ?? "")).filter(Boolean);
+
+    console.log(`[OT search page] ${md.length} chars, ${links.length} links, url=${searchUrl}`);
+
+    if (md.length < 200) return [];
+    if (/access denied|security check|enable javascript|are you a robot/i.test(md)) {
+      console.log("[OT search page] Akamai block detected");
+      return [];
+    }
+
+    // Collect /r/ URLs from the links array (most reliable)
+    const otUrls = links.filter(l => /opentable\.com\/r\/[a-z0-9][a-z0-9-]{2,}/i.test(l));
+
+    // Also regex-scan the markdown text for any /r/ slugs
+    const mdMatches = [...md.matchAll(/opentable\.com\/r\/([a-z0-9][a-z0-9-]{2,})/gi)]
+      .map(m => `https://www.opentable.com/r/${m[1]}`);
+
+    const allUrls = [...new Set([...otUrls, ...mdMatches])];
+    console.log(`[OT search page] ${allUrls.length} unique /r/ URLs found`);
+
+    return allUrls
+      .map(url => normToOT({ url, title: "", description: "" }, params))
+      .filter(Boolean) as Restaurant[];
+  } catch (err) {
+    console.error("[OT search page]", err);
+    return [];
+  }
+}
+
+async function discoverOTviaWebSearch(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
   const city = (params.lat != null && params.lng != null)
     ? (nearestResyMetro(params.lat, params.lng)?.name ?? params.city)
     : params.city;
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
-  // NOTE: Google's site: operator does NOT reliably filter by sub-path.
-  // "site:opentable.com/r/" does NOT mean "pages under /r/" — it means pages
-  // whose URL starts with that prefix, which Google often ignores entirely.
-  // Instead we use site:domain + keyword targeting to surface /r/ pages.
   const queries = [
-    `site:${domain} ${city}${cuisine} restaurant reservations -yelp -tripadvisor`,
-    `site:${domain} ${city}${cuisine} dinner book table -yelp`,
+    `site:${domain} ${city}${cuisine} restaurant reservations`,
+    `site:${domain} ${city}${cuisine} dinner book table`,
   ];
 
   const results = await firecrawlSearch(queries, fcKey, 10);
-  const mapped = results
-    .map(r => normToOT(r, params))
-    .filter(Boolean) as Restaurant[];
-  console.log(`[OT discovery] ${results.length} raw → ${mapped.length} valid`);
+  const mapped = results.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
+  console.log(`[OT web search] ${results.length} raw → ${mapped.length} valid`);
   return mapped;
 }
 
@@ -646,9 +714,10 @@ async function verifyResy(r: Restaurant, params: SearchParams, fcKey: string): P
 
     return {
       ...r,
-      timeSlots: slotsWithUrls,
-      rating:      ratingM  ? parseFloat(ratingM[1])                       : r.rating,
-      reviewCount: reviewM  ? parseInt(reviewM[1].replace(/,/g, ""))        : r.reviewCount,
+      timeSlots:   slotsWithUrls,
+      rating:      ratingM ? parseFloat(ratingM[1])                  : r.rating,
+      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, ""))  : r.reviewCount,
+      _address:    r._address || extractAddress(md) || undefined,
     };
   } catch (err) {
     console.error(`[verifyResy] ${r.name}:`, err);
@@ -696,9 +765,10 @@ async function verifyOT(r: Restaurant, params: SearchParams, fcKey: string): Pro
     const reviewM  = md.match(/\(([\d,]+)\s*review/i);
     return {
       ...r,
-      timeSlots: slotsWithUrls,
+      timeSlots:   slotsWithUrls,
       rating:      ratingM ? parseFloat(ratingM[1]) : r.rating,
       reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
+      _address:    r._address || extractAddress(md) || undefined,
     };
   } catch (err: any) {
     console.log(`[OT scrape] ${r.name}: ${err?.message}`);
@@ -765,9 +835,11 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       priceRange:  priceM  ? priceM[1]                                 : r.priceRange,
     };
 
+    const addr = r._address || extractAddress(md) || undefined;
+
     if (windowed.length === 0) {
       // Reservation widget found but no extractable times — soft-verified fallback
-      return { ...r, ...meta, timeSlots: [], softVerified: true };
+      return { ...r, ...meta, timeSlots: [], softVerified: true, _address: addr };
     }
 
     const base = r.platformUrl.split("?")[0];
@@ -776,7 +848,7 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       url: buildSlotUrl("yelp", base, params, s.time),
     }));
 
-    return { ...r, ...meta, timeSlots: slotsWithUrls };
+    return { ...r, ...meta, timeSlots: slotsWithUrls, _address: addr };
   } catch (err) {
     console.error(`[verifyYelp] ${r.name}:`, err);
     return null;
@@ -857,6 +929,33 @@ async function geocodeAndRank(
             bestFeat = feat;
             break;
           }
+        }
+
+        // Address-based fallback: if Photon couldn't find by name, try the street address
+        if (!bestFeat && r._address) {
+          const ctrl4 = new AbortController();
+          const timer4 = setTimeout(() => ctrl4.abort(), 2500);
+          try {
+            const qa = encodeURIComponent(r._address);
+            const resp4 = await fetch(`${PHOTON}/?q=${qa}&limit=1${bboxParam}`, {
+              headers: { "User-Agent": "TableFinder/2.0" },
+              signal: ctrl4.signal,
+            });
+            clearTimeout(timer4);
+            if (resp4.ok) {
+              const d4 = await resp4.json();
+              const f4 = d4?.features?.[0];
+              if (f4) {
+                const [fLng, fLat] = f4.geometry.coordinates;
+                if (userLat != null && userLng != null) {
+                  const d = haversine(userLat, userLng, fLat, fLng);
+                  if (d <= 30) bestFeat = f4;
+                } else {
+                  bestFeat = f4;
+                }
+              }
+            }
+          } catch { clearTimeout(timer4); }
         }
 
         if (bestFeat) {
@@ -1193,6 +1292,16 @@ function cleanTitle(title: string | undefined, url: string, platform: string): s
   const parts = url.split("/");
   const slug = parts[parts.length - 1] || "restaurant";
   return slug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+/** Pull a street address out of scraped markdown — used as geocoding fallback. */
+function extractAddress(md: string): string {
+  // "471 Boulevard NE, Atlanta, GA 30307" / "123 Main St NE, Atlanta, GA"
+  const m = md.match(
+    /\b(\d{2,5})\s+([\w][^,\n]{3,40}(?:St|Ave|Blvd|Dr|Rd|Way|Ln|Pl|Ct|Pkwy|Hwy|Cir|Ter|NE|NW|SE|SW)\.?)(?:,?\s+(?:NE|NW|SE|SW))?[,\s]+([A-Za-z][A-Za-z\s]{2,25}),\s*([A-Z]{2})\b/i
+  );
+  if (m) return `${m[1]} ${m[2].trim()}, ${m[3].trim()}, ${m[4]}`;
+  return "";
 }
 
 function extractNeighborhood(title?: string, desc?: string): string {
