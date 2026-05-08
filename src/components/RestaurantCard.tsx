@@ -5,6 +5,14 @@ const PLATFORM_STYLES: Record<string, string> = {
   resy: "bg-red-500/15 text-red-400",
   opentable: "bg-emerald-500/15 text-emerald-400",
   yelp: "bg-orange-500/15 text-orange-400",
+  tock: "bg-purple-500/15 text-purple-400",
+};
+
+const PLATFORM_LABELS: Record<string, string> = {
+  resy:      "Resy",
+  opentable: "OT",
+  yelp:      "Yelp",
+  tock:      "Tock",
 };
 
 interface RestaurantCardProps {
@@ -39,7 +47,7 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
           <span
             className={`shrink-0 px-1.5 py-0.5 rounded text-xs font-body font-semibold uppercase tracking-wider ${PLATFORM_STYLES[restaurant.platform] || ""}`}
           >
-            {restaurant.platform === "opentable" ? "OT" : restaurant.platform}
+            {PLATFORM_LABELS[restaurant.platform] ?? restaurant.platform}
           </span>
           <h3 className="font-heading text-base font-semibold text-foreground truncate">
             <a
@@ -132,7 +140,7 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
               rel="noopener"
               className="text-xs text-yellow-500 hover:text-yellow-400 transition-colors font-body focus:outline-none focus-visible:underline"
             >
-              Check availability on Yelp →
+              Check availability on {PLATFORM_LABELS[restaurant.platform] ?? restaurant.platform} →
             </a>
             <span className="text-xs text-muted-foreground font-body">(times not confirmed)</span>
           </div>

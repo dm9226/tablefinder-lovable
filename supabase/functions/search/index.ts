@@ -1,12 +1,18 @@
-// TableFinder Search Edge Function — v8
-// Platforms: Resy (Firecrawl), OpenTable (Apify only), Yelp (Firecrawl)
+// TableFinder Search Edge Function — v9
+// Platforms: Resy (Firecrawl), OpenTable (Apify OR widget-canvas bypass), Yelp (Firecrawl), Tock (Firecrawl)
 //
 // Required env vars:
 //   FIRECRAWL_API_KEY
 //   LOVABLE_API_KEY
 //
 // Optional:
-//   APIFY_API_TOKEN  — enables OpenTable via Apify (only reliable OT path)
+//   APIFY_API_TOKEN  — enables OpenTable via Apify (most reliable OT path)
+//
+// New in v9:
+//   • Tock (exploretock.com) added as 4th platform — no Akamai, scrape-friendly
+//   • OT widget canvas bypass — scrapes opentable.com/widget/reservation/canvas
+//     which is cross-origin accessible (embedded on restaurant sites) and has
+//     lighter Akamai rules than the main restaurant pages
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 
@@ -22,7 +28,7 @@ const DISCOVER_MS     =  12_000;  // per-platform discovery budget
 const VERIFY_MS       =  35_000;  // per-platform verification budget (was 10s — key fix)
 const GEOCODE_MS      =  10_000;  // geocodeAndRank hard cap
 const ENRICH_MS       =  10_000;  // AI enrichment hard cap
-const VERIFY_CONCUR   =       3;  // concurrent scrapes per platform (was 6 — reduces rate-limiting)
+const VERIFY_CONCUR   =       2;  // concurrent scrapes per platform (4 platforms × 2 = 8 peak — safe rate limit)
 const VERIFY_MAX      =       8;  // max verified results per platform
 
 const CORS = {
@@ -44,7 +50,7 @@ interface Restaurant {
   priceRange?: string;
   description?: string;
   vibeTags?: string[];
-  platform: "resy" | "opentable" | "yelp";
+  platform: "resy" | "opentable" | "yelp" | "tock";
   platformUrl: string;
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
@@ -52,7 +58,8 @@ interface Restaurant {
   _lat?: number; _lng?: number;
   _slug?: string; _rid?: string;
   _preVerified?: boolean;
-  _address?: string;  // extracted from scraped markdown; geocoding fallback
+  _address?: string;   // extracted from scraped markdown; geocoding fallback
+  _widgetUrl?: string; // OT widget canvas URL (lighter Akamai target than main page)
 }
 
 interface SearchParams {
@@ -95,31 +102,34 @@ serve(async (req) => {
     console.log(`[params] ${JSON.stringify(params)}`);
 
     // ── Discovery ─────────────────────────────────────────────────────────────
-    // All 3 platforms in parallel. withTimeout here uses real AbortControllers
+    // All 4 platforms in parallel. withTimeout here uses real AbortControllers
     // via abortableDiscover so HTTP requests actually cancel on timeout.
-    const [resyCands, otCands, yelpCands] = await Promise.all([
-      abortableDiscover(() => discoverResy(params, FIRECRAWL),        DISCOVER_MS),
+    const [resyCands, otCands, yelpCands, tockCands] = await Promise.all([
+      abortableDiscover(() => discoverResy(params, FIRECRAWL),             DISCOVER_MS),
       abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS),
-      abortableDiscover(() => discoverYelp(params, FIRECRAWL),        DISCOVER_MS),
+      abortableDiscover(() => discoverYelp(params, FIRECRAWL),             DISCOVER_MS),
+      abortableDiscover(() => discoverTock(params, FIRECRAWL),             DISCOVER_MS),
     ]);
-    console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
+    console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} tock=${tockCands.length} at ${Date.now()-start}ms`);
 
     const resySlice = resyCands.slice(0, 15);
     const otSlice   = otCands.slice(0, 15);
     const yelpSlice = yelpCands.slice(0, 12);
+    const tockSlice = tockCands.slice(0, 10);
 
     // ── Verification ──────────────────────────────────────────────────────────
     // KEY FIX: verifyBatch now takes a budget and returns PARTIAL results — it
     // never throws away verified restaurants due to a timeout.
     const verifyStart = Date.now();
-    const [resyVer, otVer, yelpVer] = await Promise.all([
+    const [resyVer, otVer, yelpVer, tockVer] = await Promise.all([
       verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS),
       verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS),
       verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS),
+      verifyBatch(tockSlice,  params, FIRECRAWL, VERIFY_MS),
     ]);
-    console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
+    console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} tock=${tockVer.length} in ${Date.now()-verifyStart}ms`);
 
-    let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
+    let verified = dedup([...resyVer, ...otVer, ...yelpVer, ...tockVer]);
     const softVerified  = verified.filter(r => r.softVerified).slice(0, 3);
     const hardVerified  = verified.filter(r => !r.softVerified);
 
@@ -132,9 +142,9 @@ serve(async (req) => {
 
     // Remaining candidates for optional second pass
     const verifiedIds = new Set(verified.map(r => r.id));
-    const attempted   = new Set([...resySlice, ...otSlice, ...yelpSlice].map(r => r.id));
+    const attempted   = new Set([...resySlice, ...otSlice, ...yelpSlice, ...tockSlice].map(r => r.id));
     const remaining   = dedup(
-      [...resyCands, ...otCands, ...yelpCands]
+      [...resyCands, ...otCands, ...yelpCands, ...tockCands]
         .filter(r => !attempted.has(r.id) && !verifiedIds.has(r.id))
     ).slice(0, 18);
 
@@ -154,7 +164,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v8-reliable",
+      _v:                  "v9-tock-ot-widget",
     });
 
   } catch (err: any) {
@@ -203,13 +213,14 @@ async function runExtendedSearch(
   };
 
   const batch = (remainingCandidates as Restaurant[]).slice(0, 18);
-  const [resyVer, otVer, yelpVer] = await Promise.all([
+  const [resyVer, otVer, yelpVer, tockVer] = await Promise.all([
     verifyBatch(batch.filter(r => r.platform === "resy"),      params, FIRECRAWL, VERIFY_MS),
     verifyBatch(batch.filter(r => r.platform === "opentable"), params, FIRECRAWL, VERIFY_MS),
     verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS),
+    verifyBatch(batch.filter(r => r.platform === "tock"),      params, FIRECRAWL, VERIFY_MS),
   ]);
 
-  let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
+  let verified = dedup([...resyVer, ...otVer, ...yelpVer, ...tockVer]);
   const [ranked] = await Promise.all([
     withTimeout(geocodeAndRank(verified, params), GEOCODE_MS, verified),
     withTimeout(enrich(verified, params, AI_KEY), ENRICH_MS,  verified),
@@ -329,17 +340,50 @@ const RESY_SKIP = new Set([
 ]);
 
 // ─── OPENTABLE DISCOVERY ──────────────────────────────────────────────────────
-// OpenTable is blocked by Akamai on Supabase datacenter IPs.
-// The ONLY reliable path is the Apify actor (uses residential proxies).
-// Without Apify, OT will always return 0 — the web search approach never
-// surfaces individual /r/ restaurant pages from Google's index.
+// Akamai blocks datacenter IPs from the main OT restaurant pages.
+// Two approaches:
+//   1. Apify (residential proxies) — most reliable, requires paid token
+//   2. Widget canvas bypass — scrapes opentable.com/widget/reservation/canvas?rid=NNN
+//      which is embedded cross-origin on restaurant sites and has lighter Akamai rules.
+//      We discover restaurants via Google (Firecrawl /search, no Akamai) then verify
+//      via the widget endpoint rather than the main page.
 
 async function discoverOpenTable(params: SearchParams, fcKey: string, apifyToken: string): Promise<Restaurant[]> {
   if (apifyToken) return discoverOTviaApify(params, apifyToken);
-  // No Apify — OT is unavailable. Skip cleanly rather than wasting Firecrawl
-  // credits on scrapes that Akamai will block.
-  console.log("[OT] no Apify token — skipping (Akamai blocks all Firecrawl paths)");
-  return [];
+  // No Apify — fall back to widget canvas approach.
+  // Discovery via Google search (no Akamai issue), verification via widget canvas.
+  console.log("[OT] no Apify — trying widget canvas bypass");
+  return discoverOTviaWidgetCanvas(params, fcKey);
+}
+
+async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
+  const city    = (params.lat != null && params.lng != null)
+    ? (nearestResyMetro(params.lat, params.lng)?.name ?? params.city)
+    : params.city;
+  const state   = params.state ? `, ${params.state}` : "";
+  const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
+  const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
+
+  const queries = [
+    `site:${domain}/r/ ${city}${state}${cuisine} restaurant reservation`,
+    `site:${domain}/r/ ${city}${state} restaurant dinner reservation`,
+    `site:${domain}/restaurant/profile/ ${city}${state}${cuisine} restaurant`, // profile URLs contain rid
+  ];
+
+  const results = await firecrawlSearch(queries, fcKey, 10);
+  const candidates = results.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
+
+  // For each candidate with a rid, add the widget canvas URL for verification.
+  // The widget canvas endpoint must be cross-origin accessible (it's embedded on
+  // restaurant websites worldwide) and typically has lighter Akamai protection.
+  for (const c of candidates) {
+    if (c._rid) {
+      const dt = `${params.date}T${params.time}`;
+      c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
+    }
+  }
+  console.log(`[OT widget] ${candidates.length} candidates (with rids: ${candidates.filter(c => c._rid).length})`);
+  return candidates;
 }
 
 async function discoverOTviaApify(params: SearchParams, token: string): Promise<Restaurant[]> {
@@ -464,6 +508,113 @@ function normToYelp(fc: any, params: SearchParams): Restaurant | null {
   };
 }
 
+// ─── TOCK DISCOVERY ───────────────────────────────────────────────────────────
+// Tock (exploretock.com) is a reservation platform with no Akamai protection.
+// It's popular for tasting-menu / ticketed dining and upscale restaurants.
+// URL pattern: exploretock.com/[slug]
+// Booking params: ?date=YYYY-MM-DD&time=HH:MM&size=N
+
+async function discoverTock(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
+  const city    = (params.lat != null && params.lng != null)
+    ? (nearestResyMetro(params.lat, params.lng)?.name ?? params.city)
+    : params.city;
+  const state   = params.state ? `, ${params.state}` : "";
+  const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
+
+  const queries = [
+    `site:exploretock.com ${city}${state}${cuisine} restaurant reservation`,
+    `site:exploretock.com ${city}${state} restaurant dinner`,
+  ];
+
+  const results = await firecrawlSearch(queries, fcKey, 10);
+  return results.map(r => normToTock(r, params)).filter(Boolean) as Restaurant[];
+}
+
+function normToTock(fc: any, params: SearchParams): Restaurant | null {
+  const url = fc.url ?? "";
+  // Tock URL: exploretock.com/[slug] or exploretock.com/[slug]/experiences/...
+  const m = url.match(/exploretock\.com\/([^/?#]+)/i);
+  if (!m) return null;
+  const slug = m[1].toLowerCase();
+  if (TOCK_SKIP.has(slug)) return null;
+  const baseUrl    = `https://www.exploretock.com/${slug}`;
+  const bookingUrl = addTockParams(baseUrl, params);
+  return {
+    id: `tock-${slug}`,
+    name: cleanTitle(fc.title, url, "tock"),
+    cuisine: params.cuisine || "Restaurant",
+    neighborhood: extractNeighborhood(fc.title, fc.description),
+    platform: "tock" as const,
+    platformUrl: bookingUrl,
+    timeSlots: [],
+    distanceMiles: null,
+    _slug: slug,
+  };
+}
+
+const TOCK_SKIP = new Set([
+  "about","press","legal","careers","help","contact","gift",
+  "explore","blog","privacy","terms","faq","venues","search",
+  "how-it-works","restaurant","restaurants","experiences","merch",
+]);
+
+async function verifyTock(r: Restaurant, params: SearchParams, fcKey: string): Promise<Restaurant | null> {
+  try {
+    const resp = await fetch(`${FC_API}/scrape`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: r.platformUrl, formats: ["markdown"],
+        onlyMainContent: true,
+        waitFor: 2500,   // Tock is a React SPA; give it time to render
+        timeout: 9000,
+      }),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const md: string = data.data?.markdown ?? "";
+    if (md.length < 80) return null;
+
+    // Check for reservation / booking indicators
+    const hasReservations = /\b(select\s+(a\s+)?time|find\s+a\s+table|choose\s+(a\s+)?time|available|book\s+(a\s+)?table|make\s+a\s+reservation|tickets?|experiences?|no\s+experiences|request\s+a\s+time)\b/i.test(md);
+    if (!hasReservations) return null;
+
+    const slots    = extractTimes(md);
+    const windowed = filterWindow(slots, params.time);
+    const ratingM  = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM  = md.match(/\(([\d,]+)\s*review/i);
+    const priceM   = md.match(/(\$+)\s*(?:·|•|,|\s)/);
+    const addr     = r._address || extractAddress(md) || undefined;
+
+    const meta = {
+      rating:      ratingM ? parseFloat(ratingM[1])                 : r.rating,
+      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
+      priceRange:  priceM  ? priceM[1]                              : r.priceRange,
+    };
+
+    if (windowed.length === 0) {
+      // Tock often requires date selection — soft-verify if the booking widget exists
+      return { ...r, ...meta, timeSlots: [], softVerified: true, _address: addr };
+    }
+    const base          = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("tock", base, params, s.time) }));
+    return { ...r, ...meta, timeSlots: slotsWithUrls, _address: addr };
+  } catch (err) {
+    console.error(`[verifyTock] ${r.name}:`, err);
+    return null;
+  }
+}
+
+function addTockParams(base: string, p: SearchParams): string {
+  try {
+    const u = new URL(base);
+    u.searchParams.set("date", p.date);
+    u.searchParams.set("time", p.time);
+    u.searchParams.set("size", String(p.partySize));
+    return u.toString();
+  } catch { return base; }
+}
+
 // ─── VERIFICATION ─────────────────────────────────────────────────────────────
 
 /**
@@ -503,9 +654,10 @@ async function verifyBatch(
 
 async function verifyOne(r: Restaurant, params: SearchParams, fcKey: string): Promise<Restaurant | null> {
   if (r._preVerified && r.timeSlots.length > 0) return r;
-  if (r.platform === "yelp")      return verifyYelp(r, params, fcKey);
   if (r.platform === "resy")      return verifyResy(r, params, fcKey);
   if (r.platform === "opentable") return verifyOT(r, params, fcKey);
+  if (r.platform === "yelp")      return verifyYelp(r, params, fcKey);
+  if (r.platform === "tock")      return verifyTock(r, params, fcKey);
   return null;
 }
 
@@ -518,31 +670,37 @@ async function verifyResy(r: Restaurant, params: SearchParams, fcKey: string): P
       headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         url: r.platformUrl, formats: ["markdown"],
-        onlyMainContent: true, waitFor: 500, timeout: 8000,
+        onlyMainContent: true,
+        waitFor: 1500,  // Resy is a React SPA — 500ms was too short
+        timeout: 9000,
       }),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) { console.log(`[verifyResy] ${r.name}: HTTP ${resp.status}`); return null; }
     const data = await resp.json();
     const md: string = data.data?.markdown ?? "";
-    if (md.length < 100) return null;
+    if (md.length < 100) { console.log(`[verifyResy] ${r.name}: short markdown (${md.length})`); return null; }
 
+    // Bail if page is purely notify/waitlist with zero time slots visible
     if (/\bnotify\b/i.test(md) && !/\b\d{1,2}:\d{2}\s*(am|pm)\b/i.test(md)) return null;
 
+    // Try to narrow to the relevant meal section; fall back to full page
     const mealLabel = getMealLabel(params.time);
     const mealRegex = new RegExp(`## (?:${mealLabel}|all\\s*day)([\\s\\S]*?)(?=##|$)`, "i");
     const mealMatch = md.match(mealRegex);
     const section   = mealMatch ? mealMatch[1] : md;
-    if (mealMatch && /\bnotify\b/i.test(section)) return null;
 
     const slots    = extractTimes(section);
     const windowed = filterWindow(slots, params.time);
-    if (windowed.length === 0) return null;
+    if (windowed.length === 0) {
+      console.log(`[verifyResy] ${r.name}: no slots in window (section len=${section.length})`);
+      return null;
+    }
 
-    const base         = r.platformUrl.split("?")[0];
+    const base          = r.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("resy", base, params, s.time) }));
     const ratingM = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
     const reviewM = md.match(/\(([\d,]+)\s*review/i);
-
+    console.log(`[verifyResy] ${r.name}: ${windowed.length} slots ✓`);
     return {
       ...r,
       timeSlots:   slotsWithUrls,
@@ -557,46 +715,66 @@ async function verifyResy(r: Restaurant, params: SearchParams, fcKey: string): P
 }
 
 // ── OpenTable ─────────────────────────────────────────────────────────────────
-// Akamai blocks Firecrawl on OT pages. verifyOT is only reachable for
-// Apify-sourced candidates (which are already _preVerified).
+// Akamai blocks Firecrawl on main OT restaurant pages.
+// Strategy: if _widgetUrl is set (widget canvas endpoint), try that first —
+// it's cross-origin accessible by design and may have lighter Akamai protection.
+// Apify-sourced candidates are already _preVerified so this function is skipped.
 
 async function verifyOT(r: Restaurant, params: SearchParams, fcKey: string): Promise<Restaurant | null> {
   if (!fcKey) return null;
-  try {
-    const resp = await fetch(`${FC_API}/scrape`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: r.platformUrl, formats: ["markdown"],
-        onlyMainContent: true, waitFor: 3000, timeout: 10000,
-      }),
-    });
-    if (!resp.ok) { console.log(`[OT scrape] ${r.name}: HTTP ${resp.status}`); return null; }
-    const data = await resp.json();
-    const md: string = data.data?.markdown ?? "";
-    if (md.length < 100) return null;
-    if (/access denied|security check|enable javascript|are you a robot/i.test(md)) {
-      console.log(`[OT scrape] ${r.name}: Akamai blocked`);
-      return null;
+
+  // Try widget canvas first (lighter Akamai protection), then fall back to main page.
+  const urlsToTry = r._widgetUrl
+    ? [r._widgetUrl, r.platformUrl]
+    : [r.platformUrl];
+
+  for (const scrapeUrl of urlsToTry) {
+    const isWidget = scrapeUrl === r._widgetUrl;
+    try {
+      const resp = await fetch(`${FC_API}/scrape`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: scrapeUrl, formats: ["markdown"],
+          onlyMainContent: false,
+          waitFor: isWidget ? 3500 : 3000,
+          timeout: 10000,
+        }),
+      });
+      if (!resp.ok) {
+        console.log(`[OT ${isWidget ? "widget" : "main"}] ${r.name}: HTTP ${resp.status}`);
+        continue; // try next URL
+      }
+      const data = await resp.json();
+      const md: string = data.data?.markdown ?? "";
+      if (md.length < 50) continue;
+      if (/access denied|security check|enable javascript|are you a robot|just a moment/i.test(md)) {
+        console.log(`[OT ${isWidget ? "widget" : "main"}] ${r.name}: Akamai blocked`);
+        continue;
+      }
+      const slots    = extractTimes(md);
+      const windowed = filterWindow(slots, params.time);
+      if (windowed.length === 0) {
+        console.log(`[OT ${isWidget ? "widget" : "main"}] ${r.name}: no matching slots in markdown (len=${md.length})`);
+        continue;
+      }
+      const base         = r.platformUrl.split("?")[0];
+      const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
+      const ratingM = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+      const reviewM = md.match(/\(([\d,]+)\s*review/i);
+      console.log(`[OT ${isWidget ? "widget" : "main"}] ${r.name}: ${windowed.length} slots ✓`);
+      return {
+        ...r,
+        timeSlots:   slotsWithUrls,
+        rating:      ratingM ? parseFloat(ratingM[1]) : r.rating,
+        reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
+        _address:    r._address || extractAddress(md) || undefined,
+      };
+    } catch (err: any) {
+      console.log(`[OT ${isWidget ? "widget" : "main"}] ${r.name}: ${err?.message}`);
     }
-    const slots    = extractTimes(md);
-    const windowed = filterWindow(slots, params.time);
-    if (windowed.length === 0) return null;
-    const base         = r.platformUrl.split("?")[0];
-    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
-    const ratingM = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
-    const reviewM = md.match(/\(([\d,]+)\s*review/i);
-    return {
-      ...r,
-      timeSlots:   slotsWithUrls,
-      rating:      ratingM ? parseFloat(ratingM[1]) : r.rating,
-      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
-      _address:    r._address || extractAddress(md) || undefined,
-    };
-  } catch (err: any) {
-    console.log(`[OT scrape] ${r.name}: ${err?.message}`);
-    return null;
   }
+  return null;
 }
 
 // ── Yelp ──────────────────────────────────────────────────────────────────────
@@ -609,17 +787,31 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       body: JSON.stringify({
         url: r.platformUrl, formats: ["markdown"],
         onlyMainContent: true,
-        waitFor: 2000,  // was 500 — Yelp JS widget needs more time to render
-        timeout: 8000,
+        waitFor: 3000,  // Yelp JS widget is slow — 2000ms was sometimes too short
+        timeout: 10000,
       }),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) { console.log(`[verifyYelp] ${r.name}: HTTP ${resp.status}`); return null; }
     const data = await resp.json();
     const md: string = data.data?.markdown ?? "";
-    if (md.length < 100) return null;
+    if (md.length < 100) { console.log(`[verifyYelp] ${r.name}: short markdown (${md.length})`); return null; }
 
-    const hasWidget = /\b(find\s+a\s+table|select\s+(a\s+)?time|request\s+a\s+reservation|book\s+a\s+table|takes?\s+reservations?|party\s+size|make\s+a\s+reservation|check\s+availability)\b/i.test(md);
-    if (!hasWidget) return null;
+    // ── OT Widget Bridge ───────────────────────────────────────────────────────
+    // Many Yelp reservation pages show "Reserve on OpenTable" with a link
+    // containing the OT rid. We can use this to get OT slot data for free,
+    // without Apify, by scraping the OT widget canvas (lighter Akamai target).
+    const otRidM = md.match(/opentable\.(?:com|co\.uk)[^\s"'<>]*[?&]rid=(\d+)/i)
+                ?? md.match(/opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
+    if (otRidM) {
+      const rid       = otRidM[1];
+      const otResult  = await tryOTWidgetScrape(r.name, rid, params, fcKey);
+      if (otResult) return otResult; // Return as OT-platform result — best case!
+      // OT widget blocked/empty → fall through to Yelp result below
+    }
+    // ──────────────────────────────────────────────────────────────────────────
+
+    const hasWidget = /\b(find\s+a\s+table|select\s+(a\s+)?time|request\s+a\s+reservation|book\s+a\s+table|takes?\s+reservations?|party\s+size|make\s+a\s+reservation|check\s+availability|available\s+times?|seats?\s+available|no\s+times?\s+available)\b/i.test(md);
+    if (!hasWidget) { console.log(`[verifyYelp] ${r.name}: no widget detected`); return null; }
 
     const slots    = extractTimes(md);
     const windowed = filterWindow(slots, params.time);
@@ -634,13 +826,75 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     const addr = r._address || extractAddress(md) || undefined;
 
     if (windowed.length === 0) {
+      console.log(`[verifyYelp] ${r.name}: soft-verified (widget detected, no extractable times)`);
       return { ...r, ...meta, timeSlots: [], softVerified: true, _address: addr };
     }
-    const base         = r.platformUrl.split("?")[0];
+    const base          = r.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
+    console.log(`[verifyYelp] ${r.name}: ${windowed.length} slots ✓`);
     return { ...r, ...meta, timeSlots: slotsWithUrls, _address: addr };
   } catch (err) {
     console.error(`[verifyYelp] ${r.name}:`, err);
+    return null;
+  }
+}
+
+/**
+ * Scrape the OT widget canvas endpoint — cross-origin accessible since it's
+ * embedded on restaurant websites. May bypass Akamai's stricter datacenter IP
+ * rules that block the main OpenTable restaurant pages.
+ */
+async function tryOTWidgetScrape(
+  name: string, rid: string, params: SearchParams, fcKey: string
+): Promise<Restaurant | null> {
+  const dt        = `${params.date}T${params.time}`;
+  const widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
+  try {
+    const resp = await fetch(`${FC_API}/scrape`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: widgetUrl, formats: ["markdown"],
+        onlyMainContent: false,
+        waitFor: 3500,
+        timeout: 10000,
+      }),
+    });
+    if (!resp.ok) { console.log(`[OT widget] ${name}: HTTP ${resp.status}`); return null; }
+    const data = await resp.json();
+    const md: string = data.data?.markdown ?? "";
+    if (md.length < 50) return null;
+    if (/access denied|security check|enable javascript|are you a robot|just a moment/i.test(md)) {
+      console.log(`[OT widget] ${name}: Akamai blocked`);
+      return null;
+    }
+    const slots    = extractTimes(md);
+    const windowed = filterWindow(slots, params.time);
+    if (windowed.length === 0) {
+      console.log(`[OT widget] ${name}: no slots found (md len=${md.length})`);
+      return null;
+    }
+    const baseOTUrl     = `https://www.opentable.com/r/${slugify(name)}`;
+    const otBookingUrl  = addOTParams(baseOTUrl, params);
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", baseOTUrl, params, s.time) }));
+    const ratingM = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM = md.match(/\(([\d,]+)\s*review/i);
+    console.log(`[OT widget] ${name}: ${windowed.length} slots ✓ (rid=${rid})`);
+    return {
+      id:           `opentable-${rid}`,
+      name,
+      cuisine:      params.cuisine || "Restaurant",
+      neighborhood: "",
+      platform:     "opentable" as const,
+      platformUrl:  otBookingUrl,
+      timeSlots:    slotsWithUrls,
+      distanceMiles: null,
+      rating:       ratingM ? parseFloat(ratingM[1]) : undefined,
+      reviewCount:  reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : undefined,
+      _rid: rid,
+    };
+  } catch (err: any) {
+    console.log(`[OT widget] ${name}: ${err?.message}`);
     return null;
   }
 }
@@ -857,12 +1111,13 @@ function displayTo24(t: string): string {
   return `${h.toString().padStart(2, "0")}:${m[2]}`;
 }
 
-function buildSlotUrl(platform: "resy"|"opentable"|"yelp", base: string, p: SearchParams, slotTime: string): string {
+function buildSlotUrl(platform: "resy"|"opentable"|"yelp"|"tock", base: string, p: SearchParams, slotTime: string): string {
   const t24      = displayTo24(slotTime);
   const tNoColon = t24.replace(":", "");
   if (platform === "resy")      return `${base}?date=${p.date}&seats=${p.partySize}&time=${tNoColon}`;
   if (platform === "opentable") return `${base}?dateTime=${p.date}T${t24}&covers=${p.partySize}`;
   if (platform === "yelp")      return `${base}?covers=${p.partySize}&date=${p.date}&time=${tNoColon}`;
+  if (platform === "tock")      return `${base}?date=${p.date}&time=${t24}&size=${p.partySize}`;
   return base;
 }
 
