@@ -169,7 +169,7 @@ serve(async (req) => {
       params: meta,
       hasMore: remaining.length > 0,
       remainingCandidates: remaining,
-      _v: "v7-ot-search-page",
+      _v: "v7b-ot-deadline",
     });
 
   } catch (err: any) {
@@ -410,18 +410,22 @@ async function discoverOTviaSearchPage(params: SearchParams, fcKey: string): Pro
     cuisine ? `&term=${cuisine}` : "",
   ].join("");
 
+  const ctrl = new AbortController();
+  const hardDeadline = setTimeout(() => ctrl.abort(), 9000); // abort before 12s discovery budget
   try {
     const resp = await fetch(`${FC_API}/scrape`, {
       method: "POST",
       headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+      signal: ctrl.signal,
       body: JSON.stringify({
         url: searchUrl,
         formats: ["markdown", "links"],
         onlyMainContent: false,   // need full page to capture restaurant card links
-        waitFor: 4000,
-        timeout: 14000,
+        waitFor: 2500,
+        timeout: 8000,   // must finish well within the 12s DISCOVERY_BUDGET wrapper
       }),
     });
+    clearTimeout(hardDeadline);
     if (!resp.ok) {
       console.log(`[OT search page] HTTP ${resp.status}`);
       return [];
@@ -452,8 +456,10 @@ async function discoverOTviaSearchPage(params: SearchParams, fcKey: string): Pro
     return allUrls
       .map(url => normToOT({ url, title: "", description: "" }, params))
       .filter(Boolean) as Restaurant[];
-  } catch (err) {
-    console.error("[OT search page]", err);
+  } catch (err: any) {
+    clearTimeout(hardDeadline);
+    if (err?.name === "AbortError") console.log("[OT search page] aborted (deadline)");
+    else console.error("[OT search page]", err);
     return [];
   }
 }
