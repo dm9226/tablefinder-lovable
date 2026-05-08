@@ -129,9 +129,10 @@ serve(async (req) => {
     const ranked = await geocodeAndRank(hardVerified, params, AI_KEY);
     verified = [...ranked, ...softVerifiedResults];
 
-    // Enrich top results (descriptions + vibe tags) — run concurrently with a hard 8s cap
-    if (Date.now() - start < 20_000) {
-      verified = await withTimeout(enrich(verified, params, AI_KEY), 8_000, verified);
+    // Enrich only if we're well under budget — skip to keep initial results fast
+    // (Enrichment adds 5-8s; descriptions appear in the extended-search second pass)
+    if (Date.now() - start < 12_000) {
+      verified = await withTimeout(enrich(verified, params, AI_KEY), 6_000, verified);
     }
 
     // Remaining candidates for optional second pass (candidates not yet verified)
@@ -187,8 +188,8 @@ async function discoverAndVerify(
 
   console.log(`[discover:${platform}] ${candidates.length} candidates`);
 
-  // Allocate — Yelp capped at 6, others at 9
-  const cap = platform === "yelp" ? 6 : 9;
+  // Allocate — Yelp capped at 5, others at 7
+  const cap = platform === "yelp" ? 5 : 7;
   const toVerify = candidates.slice(0, cap);
 
   // Verify immediately
@@ -521,7 +522,7 @@ async function verifyBatch(
 
   const results: Restaurant[] = [];
   const CONCURRENCY = 6;
-  const LANE_TARGET = 6;
+  const LANE_TARGET = 5;
 
   for (let i = 0; i < candidates.length; i += CONCURRENCY) {
     if (results.length >= LANE_TARGET) break;
