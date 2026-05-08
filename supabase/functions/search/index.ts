@@ -1,5 +1,5 @@
-// TableFinder Search Edge Function — v9
-// Platforms: Resy (Firecrawl), OpenTable (Apify OR widget-canvas bypass), Yelp (Firecrawl), Tock (Firecrawl)
+// TableFinder Search Edge Function — v10
+// Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
 //   FIRECRAWL_API_KEY
@@ -8,11 +8,14 @@
 // Optional:
 //   APIFY_API_TOKEN  — enables OpenTable via Apify (most reliable OT path)
 //
-// New in v9:
-//   • Tock (exploretock.com) added as 4th platform — no Akamai, scrape-friendly
-//   • OT widget canvas bypass — scrapes opentable.com/widget/reservation/canvas
-//     which is cross-origin accessible (embedded on restaurant sites) and has
-//     lighter Akamai rules than the main restaurant pages
+// v10 changes:
+//   • Resy discovery: scrapes Resy's OWN search page (pre-filtered for date/time/size)
+//     instead of Google — only returns restaurants with confirmed availability
+//   • Yelp discovery: scrapes Yelp's search with reservation filter directly
+//   • OT: adds Jina AI reader (r.jina.ai) — completely different infrastructure
+//     from Firecrawl, may bypass Akamai blacklists on OT pages
+//   • Tock removed from active pipeline
+//   • Resy waitFor 1500ms, Yelp waitFor 3000ms
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 
@@ -28,7 +31,7 @@ const DISCOVER_MS     =  12_000;  // per-platform discovery budget
 const VERIFY_MS       =  35_000;  // per-platform verification budget (was 10s — key fix)
 const GEOCODE_MS      =  10_000;  // geocodeAndRank hard cap
 const ENRICH_MS       =  10_000;  // AI enrichment hard cap
-const VERIFY_CONCUR   =       2;  // concurrent scrapes per platform (4 platforms × 2 = 8 peak — safe rate limit)
+const VERIFY_CONCUR   =       3;  // concurrent scrapes per platform (3 platforms × 3 = 9 peak — safe rate limit)
 const VERIFY_MAX      =       8;  // max verified results per platform
 
 const CORS = {
@@ -50,7 +53,7 @@ interface Restaurant {
   priceRange?: string;
   description?: string;
   vibeTags?: string[];
-  platform: "resy" | "opentable" | "yelp" | "tock";
+  platform: "resy" | "opentable" | "yelp";
   platformUrl: string;
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
@@ -104,32 +107,29 @@ serve(async (req) => {
     // ── Discovery ─────────────────────────────────────────────────────────────
     // All 4 platforms in parallel. withTimeout here uses real AbortControllers
     // via abortableDiscover so HTTP requests actually cancel on timeout.
-    const [resyCands, otCands, yelpCands, tockCands] = await Promise.all([
+    const [resyCands, otCands, yelpCands] = await Promise.all([
       abortableDiscover(() => discoverResy(params, FIRECRAWL),             DISCOVER_MS),
       abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS),
       abortableDiscover(() => discoverYelp(params, FIRECRAWL),             DISCOVER_MS),
-      abortableDiscover(() => discoverTock(params, FIRECRAWL),             DISCOVER_MS),
     ]);
-    console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} tock=${tockCands.length} at ${Date.now()-start}ms`);
+    console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
 
     const resySlice = resyCands.slice(0, 15);
     const otSlice   = otCands.slice(0, 15);
     const yelpSlice = yelpCands.slice(0, 12);
-    const tockSlice = tockCands.slice(0, 10);
 
     // ── Verification ──────────────────────────────────────────────────────────
     // KEY FIX: verifyBatch now takes a budget and returns PARTIAL results — it
     // never throws away verified restaurants due to a timeout.
     const verifyStart = Date.now();
-    const [resyVer, otVer, yelpVer, tockVer] = await Promise.all([
+    const [resyVer, otVer, yelpVer] = await Promise.all([
       verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS),
       verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS),
       verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS),
-      verifyBatch(tockSlice,  params, FIRECRAWL, VERIFY_MS),
     ]);
-    console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} tock=${tockVer.length} in ${Date.now()-verifyStart}ms`);
+    console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
-    let verified = dedup([...resyVer, ...otVer, ...yelpVer, ...tockVer]);
+    let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
     const softVerified  = verified.filter(r => r.softVerified).slice(0, 3);
     const hardVerified  = verified.filter(r => !r.softVerified);
 
@@ -142,9 +142,9 @@ serve(async (req) => {
 
     // Remaining candidates for optional second pass
     const verifiedIds = new Set(verified.map(r => r.id));
-    const attempted   = new Set([...resySlice, ...otSlice, ...yelpSlice, ...tockSlice].map(r => r.id));
+    const attempted   = new Set([...resySlice, ...otSlice, ...yelpSlice].map(r => r.id));
     const remaining   = dedup(
-      [...resyCands, ...otCands, ...yelpCands, ...tockCands]
+      [...resyCands, ...otCands, ...yelpCands]
         .filter(r => !attempted.has(r.id) && !verifiedIds.has(r.id))
     ).slice(0, 18);
 
@@ -164,7 +164,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v9-tock-ot-widget",
+      _v:                  "v10-direct-discovery",
     });
 
   } catch (err: any) {
@@ -213,14 +213,13 @@ async function runExtendedSearch(
   };
 
   const batch = (remainingCandidates as Restaurant[]).slice(0, 18);
-  const [resyVer, otVer, yelpVer, tockVer] = await Promise.all([
+  const [resyVer, otVer, yelpVer] = await Promise.all([
     verifyBatch(batch.filter(r => r.platform === "resy"),      params, FIRECRAWL, VERIFY_MS),
     verifyBatch(batch.filter(r => r.platform === "opentable"), params, FIRECRAWL, VERIFY_MS),
     verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS),
-    verifyBatch(batch.filter(r => r.platform === "tock"),      params, FIRECRAWL, VERIFY_MS),
   ]);
 
-  let verified = dedup([...resyVer, ...otVer, ...yelpVer, ...tockVer]);
+  let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
   const [ranked] = await Promise.all([
     withTimeout(geocodeAndRank(verified, params), GEOCODE_MS, verified),
     withTimeout(enrich(verified, params, AI_KEY), ENRICH_MS,  verified),
@@ -298,19 +297,75 @@ function extractCityFromLocation(loc?: string): string {
 }
 
 // ─── RESY DISCOVERY ───────────────────────────────────────────────────────────
+// PRIMARY: scrape Resy's own search page — pre-filtered for the exact date/time/party size.
+// Only restaurants with confirmed availability appear. No Google index dependency.
+// Resy does NOT use Akamai, so Firecrawl can access it freely.
+// FALLBACK: Google-based site: search if the direct scrape yields < 3 venues.
 
 async function discoverResy(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
-  const slug    = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
-  const metro   = resyCityName(params.city, params.state, params.lat, params.lng);
-  const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
+  const slug   = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
+  const metro  = resyCityName(params.city, params.state, params.lat, params.lng);
+  const tNoCol = params.time.replace(":", "");
 
+  // Direct Resy search URL — only shows restaurants available on this date/time/size
+  const cuiQ   = params.cuisine ? `&cuisine=${encodeURIComponent(params.cuisine)}` : "";
+  const searchUrl = `https://resy.com/cities/${slug}/venues?seats=${params.partySize}&date=${params.date}&time=${tNoCol}${cuiQ}`;
+
+  try {
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 11_000);
+    const resp  = await fetch(`${FC_API}/scrape`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        url: searchUrl, formats: ["markdown"],
+        onlyMainContent: false,
+        waitFor: 4000,   // Resy is a React SPA — needs time to render venue list
+        timeout: 10000,
+      }),
+    });
+    clearTimeout(timer);
+    if (resp.ok) {
+      const data = await resp.json();
+      const md: string = data.data?.markdown ?? "";
+      const urls = extractResyVenueUrls(md);
+      if (urls.length >= 3) {
+        console.log(`[Resy direct] ${urls.length} venues found`);
+        return urls.map(u => normToResy({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+      }
+      console.log(`[Resy direct] only ${urls.length} venues (md=${md.length}) — falling back to Google`);
+    } else {
+      console.log(`[Resy direct] HTTP ${resp.status} — falling back to Google`);
+    }
+  } catch (err: any) {
+    console.log(`[Resy direct] ${err?.message} — falling back to Google`);
+  }
+
+  // Google fallback
+  const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const queries = [
     `site:resy.com/cities/${slug}/venues/ ${metro}${cuisine} restaurant reservation`,
     `site:resy.com/cities/${slug}/venues/ ${metro} restaurant dinner reservation`,
   ];
-
   const results = await firecrawlSearch(queries, fcKey, 10);
   return results.map(r => normToResy(r, params)).filter(Boolean) as Restaurant[];
+}
+
+// Extract all Resy venue URLs from a scraped markdown page
+function extractResyVenueUrls(md: string): string[] {
+  const seen = new Set<string>();
+  const urls: string[] = [];
+  const re   = /https?:\/\/resy\.com\/cities\/([^/\s"']+)\/venues\/([^/?#\s"')]+)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(md)) !== null) {
+    const slug = m[2].toLowerCase();
+    if (!RESY_SKIP.has(slug) && !seen.has(slug)) {
+      seen.add(slug);
+      urls.push(`https://resy.com/cities/${m[1]}/venues/${m[2]}`);
+    }
+  }
+  return urls;
 }
 
 function normToResy(fc: any, params: SearchParams): Restaurant | null {
@@ -470,22 +525,80 @@ function normToOT(fc: any, params: SearchParams): Restaurant | null {
 }
 
 // ─── YELP DISCOVERY ───────────────────────────────────────────────────────────
+// PRIMARY: scrape Yelp's search with reservation_date/time/covers filter —
+// only shows restaurants that accept reservations for the requested time.
+// FALLBACK: Google-based site: search if direct scrape yields < 3 venues.
 
 async function discoverYelp(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
-  const city    = (params.lat != null && params.lng != null)
+  const city   = (params.lat != null && params.lng != null)
     ? (nearestResyMetro(params.lat, params.lng)?.name ?? params.city)
     : params.city;
+  const domain = params.country === "gb" ? "yelp.co.uk" : "yelp.com";
+  const tNoCol = params.time.replace(":", "");
+
+  // Yelp reservation search — pre-filtered for date/time/party size
+  const loc      = encodeURIComponent(`${city}${params.state ? `, ${params.state}` : ""}`);
+  const term     = params.cuisine
+    ? `&term=${encodeURIComponent(params.cuisine + " restaurant")}`
+    : "&cflt=restaurants";
+  const searchUrl = `https://www.${domain}/search?find_loc=${loc}${term}&reservation_date=${params.date}&reservation_time=${tNoCol}&reservation_covers=${params.partySize}`;
+
+  try {
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 11_000);
+    const resp  = await fetch(`${FC_API}/scrape`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        url: searchUrl, formats: ["markdown"],
+        onlyMainContent: false,
+        waitFor: 3500,
+        timeout: 10000,
+      }),
+    });
+    clearTimeout(timer);
+    if (resp.ok) {
+      const data = await resp.json();
+      const md: string = data.data?.markdown ?? "";
+      const urls = extractYelpReservationUrls(md);
+      if (urls.length >= 3) {
+        console.log(`[Yelp direct] ${urls.length} venues found`);
+        return urls.map(u => normToYelp({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+      }
+      console.log(`[Yelp direct] only ${urls.length} venues (md=${md.length}) — falling back to Google`);
+    } else {
+      console.log(`[Yelp direct] HTTP ${resp.status} — falling back to Google`);
+    }
+  } catch (err: any) {
+    console.log(`[Yelp direct] ${err?.message} — falling back to Google`);
+  }
+
+  // Google fallback
   const state   = params.state ? `, ${params.state}` : "";
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
-  const domain  = params.country === "gb" ? "yelp.co.uk" : "yelp.com";
-
   const queries = [
     `site:${domain}/reservations/ ${city}${state}${cuisine} restaurant`,
     `site:${domain}/reservations/ ${city}${state} restaurant dinner reservation`,
   ];
-
   const results = await firecrawlSearch(queries, fcKey, 10);
   return results.map(r => normToYelp(r, params)).filter(Boolean) as Restaurant[];
+}
+
+// Extract Yelp reservation/biz URLs from a scraped markdown page
+function extractYelpReservationUrls(md: string): string[] {
+  const seen = new Set<string>();
+  const urls: string[] = [];
+  const re   = /https?:\/\/(?:www\.)?yelp\.(?:com|co\.uk)\/(?:reservations|biz)\/([^/?#\s"')]+)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(md)) !== null) {
+    const slug = m[1].toLowerCase();
+    if (!seen.has(slug)) {
+      seen.add(slug);
+      urls.push(`https://www.yelp.com/reservations/${slug}`);
+    }
+  }
+  return urls;
 }
 
 function normToYelp(fc: any, params: SearchParams): Restaurant | null {
@@ -657,7 +770,6 @@ async function verifyOne(r: Restaurant, params: SearchParams, fcKey: string): Pr
   if (r.platform === "resy")      return verifyResy(r, params, fcKey);
   if (r.platform === "opentable") return verifyOT(r, params, fcKey);
   if (r.platform === "yelp")      return verifyYelp(r, params, fcKey);
-  if (r.platform === "tock")      return verifyTock(r, params, fcKey);
   return null;
 }
 
@@ -774,7 +886,57 @@ async function verifyOT(r: Restaurant, params: SearchParams, fcKey: string): Pro
       console.log(`[OT ${isWidget ? "widget" : "main"}] ${r.name}: ${err?.message}`);
     }
   }
-  return null;
+
+  // Path 3: Jina AI reader — different infrastructure/IPs from Firecrawl.
+  // Akamai's IP blacklists target datacenter ranges used by Firecrawl/cloud scrapers.
+  // Jina (r.jina.ai) runs its own headless browser fleet with separate IP space.
+  // Free for basic use, no API key needed.
+  return verifyOTviaJina(r, params);
+}
+
+async function verifyOTviaJina(r: Restaurant, params: SearchParams): Promise<Restaurant | null> {
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12_000);
+  try {
+    const resp = await fetch(`https://r.jina.ai/${r.platformUrl}`, {
+      headers: {
+        "Accept":          "text/plain",
+        "User-Agent":      "Mozilla/5.0 (compatible; TableFinder/2.0)",
+        "X-Return-Format": "markdown",
+      },
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) { console.log(`[OT Jina] ${r.name}: HTTP ${resp.status}`); return null; }
+    const md = await resp.text();
+    if (md.length < 100) return null;
+    if (/access denied|security check|are you a robot|just a moment|enable javascript/i.test(md)) {
+      console.log(`[OT Jina] ${r.name}: blocked`);
+      return null;
+    }
+    const slots    = extractTimes(md);
+    const windowed = filterWindow(slots, params.time);
+    if (windowed.length === 0) {
+      console.log(`[OT Jina] ${r.name}: no slots (md=${md.length})`);
+      return null;
+    }
+    const base          = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
+    const ratingM = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM = md.match(/\(([\d,]+)\s*review/i);
+    console.log(`[OT Jina] ${r.name}: ${windowed.length} slots ✓`);
+    return {
+      ...r,
+      timeSlots:   slotsWithUrls,
+      rating:      ratingM ? parseFloat(ratingM[1]) : r.rating,
+      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
+      _address:    r._address || extractAddress(md) || undefined,
+    };
+  } catch (err: any) {
+    clearTimeout(timer);
+    if (err?.name !== "AbortError") console.log(`[OT Jina] ${r.name}: ${err?.message}`);
+    return null;
+  }
 }
 
 // ── Yelp ──────────────────────────────────────────────────────────────────────
@@ -1111,13 +1273,12 @@ function displayTo24(t: string): string {
   return `${h.toString().padStart(2, "0")}:${m[2]}`;
 }
 
-function buildSlotUrl(platform: "resy"|"opentable"|"yelp"|"tock", base: string, p: SearchParams, slotTime: string): string {
+function buildSlotUrl(platform: "resy"|"opentable"|"yelp", base: string, p: SearchParams, slotTime: string): string {
   const t24      = displayTo24(slotTime);
   const tNoColon = t24.replace(":", "");
   if (platform === "resy")      return `${base}?date=${p.date}&seats=${p.partySize}&time=${tNoColon}`;
   if (platform === "opentable") return `${base}?dateTime=${p.date}T${t24}&covers=${p.partySize}`;
   if (platform === "yelp")      return `${base}?covers=${p.partySize}&date=${p.date}&time=${tNoColon}`;
-  if (platform === "tock")      return `${base}?date=${p.date}&time=${t24}&size=${p.partySize}`;
   return base;
 }
 

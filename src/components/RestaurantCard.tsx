@@ -2,17 +2,15 @@ import { Restaurant, TimeSlot, SearchMeta } from "@/types/restaurant";
 import { Star, MapPin, Clock, AlertTriangle } from "lucide-react";
 
 const PLATFORM_STYLES: Record<string, string> = {
-  resy: "bg-red-500/15 text-red-400",
+  resy:      "bg-red-500/15 text-red-400",
   opentable: "bg-emerald-500/15 text-emerald-400",
-  yelp: "bg-orange-500/15 text-orange-400",
-  tock: "bg-purple-500/15 text-purple-400",
+  yelp:      "bg-orange-500/15 text-orange-400",
 };
 
 const PLATFORM_LABELS: Record<string, string> = {
   resy:      "Resy",
   opentable: "OT",
   yelp:      "Yelp",
-  tock:      "Tock",
 };
 
 interface RestaurantCardProps {
