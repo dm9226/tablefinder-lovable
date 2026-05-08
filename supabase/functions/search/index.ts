@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v14
+// TableFinder Search Edge Function — v15
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -6,17 +6,17 @@
 //   LOVABLE_API_KEY
 //
 // Optional:
-//   APIFY_API_TOKEN  — enables OpenTable via Apify (most reliable OT path)
+//   APIFY_API_TOKEN        — enables OpenTable via Apify
+//   BROWSERBASE_API_KEY    — enables Resy + OT via real browser (CDP)
+//   BROWSERBASE_PROJECT_ID — required alongside BROWSERBASE_API_KEY
 //
-// v12 changes (process fixes on top of v11):
-//   • extractResyVenueUrls: now matches relative hrefs (/cities/slug/venues/slug)
-//     in addition to absolute URLs — React SPAs render relative links, Firecrawl
-//     preserves them as markdown ([text](/cities/...)), absolute regex missed them
-//   • Resy Google fallback: changed site:resy.com/cities/${slug}/venues/ to
-//     site:resy.com — path-prefix site: queries are unsupported by Firecrawl search
-//   • verifyYelp: removed hasNativeWidget gate (Firecrawl can't render Yelp's JS
-//     time-picker → gate rejected all 14 candidates); soft-verify now triggers on
-//     any reservation-related language instead of requiring "no times available" etc.
+// v15 changes:
+//   • bbLoad(): Deno-native CDP WebSocket client for Browserbase (no npm deps)
+//   • discoverResyViaBB(): real browser renders Resy SPA → actual venue links
+//   • discoverOTViaBB(): real browser + residential proxy bypasses Akamai on OT
+//   • verifyResyViaBB() / verifyOTViaBB(): page-level verification via real browser
+//   • Discovery pipeline now runs all 3 platforms in parallel when BB keys present
+//   • verifyBatch/verifyOne accept optional bbKey + bbProject, prefer BB for Resy/OT
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 
@@ -88,12 +88,14 @@ serve(async (req) => {
   const start = Date.now();
   try {
     const body = await req.json();
-    const FIRECRAWL = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
-    const AI_KEY    = Deno.env.get("LOVABLE_API_KEY") ?? "";
-    const APIFY     = Deno.env.get("APIFY_API_TOKEN") ?? "";
+    const FIRECRAWL  = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
+    const AI_KEY     = Deno.env.get("LOVABLE_API_KEY") ?? "";
+    const APIFY      = Deno.env.get("APIFY_API_TOKEN") ?? "";
+    const BB_KEY     = Deno.env.get("BROWSERBASE_API_KEY") ?? "";
+    const BB_PROJECT = Deno.env.get("BROWSERBASE_PROJECT_ID") ?? "";
 
     if (body.extended === true) {
-      const extra = await runExtendedSearch(body, FIRECRAWL, AI_KEY, APIFY);
+      const extra = await runExtendedSearch(body, FIRECRAWL, AI_KEY, APIFY, BB_KEY, BB_PROJECT);
       return json({ results: extra });
     }
 
@@ -106,16 +108,20 @@ serve(async (req) => {
     console.log(`[params] ${JSON.stringify(params)}`);
 
     // ── Discovery ─────────────────────────────────────────────────────────────
-    // Resy and OT block all bot/datacenter traffic — Resy returns a blank SPA
-    // shell, OT returns 403 from Akamai. Running discovery for those platforms
-    // wastes Firecrawl credits and adds latency with zero results every time.
-    // Yelp IS accessible and its verifyYelp step has OT/Resy bridges that surface
-    // cross-platform restaurants as soft-verified results.
-    const yelpCands = await abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS);
-    const resyCands: Restaurant[] = [];
-    const otCands:   Restaurant[] = APIFY
-      ? await abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS)
-      : [];
+    // When Browserbase keys are present, all three platforms run in parallel via
+    // real browser (CDP). Otherwise: Resy = 0 (SPA blocks bots), OT = Apify if
+    // configured else 0 (Akamai blocks bots), Yelp = always via Firecrawl.
+    const [resyCands, otCands, yelpCands] = await Promise.all([
+      BB_KEY && BB_PROJECT
+        ? abortableDiscover(() => discoverResyViaBB(params, BB_KEY, BB_PROJECT), DISCOVER_MS)
+        : Promise.resolve([] as Restaurant[]),
+      BB_KEY && BB_PROJECT
+        ? abortableDiscover(() => discoverOTViaBB(params, BB_KEY, BB_PROJECT), DISCOVER_MS)
+        : APIFY
+          ? abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS)
+          : Promise.resolve([] as Restaurant[]),
+      abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS),
+    ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
 
     const resySlice = resyCands.slice(0, 15);
@@ -125,8 +131,8 @@ serve(async (req) => {
     // ── Verification ──────────────────────────────────────────────────────────
     const verifyStart = Date.now();
     const [resyVer, otVer, yelpVer] = await Promise.all([
-      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS),
-      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS),
+      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS, BB_KEY, BB_PROJECT),
+      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS, BB_KEY, BB_PROJECT),
       verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS),
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
@@ -167,11 +173,12 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v14-stop-wasting-credits",
+      _v:                  "v15-browserbase-real-browser",
       _debug: {
         elapsed_ms:  elapsed,
         discovery:   { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
         verified:    { resy: resyVer.length, ot: otVer.length, yelp: yelpVer.length },
+        bb_enabled:  !!(BB_KEY && BB_PROJECT),
       },
     });
 
@@ -196,7 +203,7 @@ async function abortableDiscover(
 // ─── EXTENDED SEARCH ─────────────────────────────────────────────────────────
 
 async function runExtendedSearch(
-  body: any, FIRECRAWL: string, AI_KEY: string, APIFY: string
+  body: any, FIRECRAWL: string, AI_KEY: string, APIFY: string, BB_KEY: string, BB_PROJECT: string,
 ): Promise<Restaurant[]> {
   const { remainingCandidates, extendedParams } = body;
   if (!remainingCandidates?.length) return [];
@@ -222,8 +229,8 @@ async function runExtendedSearch(
 
   const batch = (remainingCandidates as Restaurant[]).slice(0, 18);
   const [resyVer, otVer, yelpVer] = await Promise.all([
-    verifyBatch(batch.filter(r => r.platform === "resy"),      params, FIRECRAWL, VERIFY_MS),
-    verifyBatch(batch.filter(r => r.platform === "opentable"), params, FIRECRAWL, VERIFY_MS),
+    verifyBatch(batch.filter(r => r.platform === "resy"),      params, FIRECRAWL, VERIFY_MS, BB_KEY, BB_PROJECT),
+    verifyBatch(batch.filter(r => r.platform === "opentable"), params, FIRECRAWL, VERIFY_MS, BB_KEY, BB_PROJECT),
     verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS),
   ]);
 
@@ -302,6 +309,125 @@ function fallbackParams(lat?: number, lng?: number, location?: string): SearchPa
 function extractCityFromLocation(loc?: string): string {
   if (!loc) return "";
   return loc.split(",")[0]?.trim() || "";
+}
+
+// ─── BROWSERBASE CDP CLIENT ───────────────────────────────────────────────────
+// Raw CDP over WebSocket — no Puppeteer/Playwright needed (Deno built-in WebSocket).
+// Flow: create BB session → connect browser-level CDP → Target.getTargets →
+//       Target.attachToTarget(flatten:true) → Page.navigate → wait → Runtime.evaluate
+// evalExpr defaults to document.body.innerText; pass a custom expression to get
+// JSON-serialized DOM data (e.g. link hrefs for discovery).
+
+async function bbLoad(
+  url: string,
+  bbKey: string,
+  bbProject: string,
+  opts: { waitMs?: number; useProxy?: boolean; timeoutMs?: number; evalExpr?: string } = {},
+): Promise<string> {
+  const { waitMs = 4000, useProxy = false, timeoutMs = 25_000, evalExpr } = opts;
+
+  // Step 1: Create Browserbase session
+  const sessResp = await fetch("https://api.browserbase.com/v1/sessions", {
+    method: "POST",
+    headers: { "x-bb-api-key": bbKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: bbProject,
+      browserSettings: { solveCaptchas: true },
+      ...(useProxy ? { proxies: [{ type: "browserbase" }] } : {}),
+    }),
+  });
+  if (!sessResp.ok) throw new Error(`BB create session: ${sessResp.status}`);
+  const sessData = await sessResp.json();
+  const sessionId: string = sessData.id;
+  console.log(`[BB] session ${sessionId} created (proxy=${useProxy})`);
+
+  // Step 2: CDP WebSocket
+  let msgId = 0;
+  const pending = new Map<number, [(v: any) => void, (e: Error) => void]>();
+
+  const ws = new WebSocket(
+    `wss://connect.browserbase.com?apiKey=${bbKey}&sessionId=${sessionId}`
+  );
+
+  function cdpSend(method: string, params: any = {}, sid?: string): Promise<any> {
+    return new Promise((res, rej) => {
+      const id = ++msgId;
+      pending.set(id, [res, rej]);
+      const msg: any = { id, method, params };
+      if (sid) msg.sessionId = sid;
+      ws.send(JSON.stringify(msg));
+    });
+  }
+
+  let outerResolve!: (v: string) => void;
+  let outerReject!:  (e: any)   => void;
+  const resultP = new Promise<string>((res, rej) => { outerResolve = res; outerReject = rej; });
+
+  const timer = setTimeout(() => {
+    ws.close();
+    outerReject(new Error(`bbLoad timeout ${timeoutMs}ms — ${url}`));
+  }, timeoutMs);
+
+  ws.onmessage = (evt: MessageEvent) => {
+    try {
+      const msg = JSON.parse(evt.data as string);
+      if (msg.id && pending.has(msg.id)) {
+        const [res, rej] = pending.get(msg.id)!;
+        pending.delete(msg.id);
+        msg.error ? rej(new Error(msg.error.message ?? "CDP error")) : res(msg.result);
+      }
+    } catch { /* ignore non-JSON events */ }
+  };
+
+  ws.onerror = () => { clearTimeout(timer); outerReject(new Error("BB WebSocket error")); };
+
+  ws.onopen = async () => {
+    try {
+      // Get the initial page target (Browserbase opens one blank page per session)
+      const { targetInfos } = await cdpSend("Target.getTargets");
+      const page = (targetInfos as any[]).find((t: any) => t.type === "page");
+      if (!page) throw new Error("BB: no page target found");
+
+      // Attach with flattened sessions — subsequent CDP commands include sessionId field
+      const { sessionId: pageSid } = await cdpSend("Target.attachToTarget", {
+        targetId: page.targetId,
+        flatten: true,
+      });
+
+      // Navigate to target URL
+      await cdpSend("Page.navigate", { url }, pageSid);
+
+      // Wait for React/SPA JS to render (Resy needs ~5s, OT needs ~5s)
+      await new Promise(r => setTimeout(r, waitMs));
+
+      // Evaluate JS expression in page context
+      const expr = evalExpr ?? "document.body.innerText";
+      const { result: evalResult } = await cdpSend("Runtime.evaluate", {
+        expression: expr,
+        returnByValue: true,
+        awaitPromise: true,
+      }, pageSid);
+
+      clearTimeout(timer);
+      ws.close();
+      outerResolve(String(evalResult?.value ?? ""));
+    } catch (e: any) {
+      clearTimeout(timer);
+      ws.close();
+      outerReject(e);
+    }
+  };
+
+  try {
+    return await resultP;
+  } finally {
+    // Release session (non-blocking — billed time stops on release)
+    fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+      method: "POST",
+      headers: { "x-bb-api-key": bbKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "REQUEST_RELEASE" }),
+    }).catch(() => {});
+  }
 }
 
 // ─── RESY DISCOVERY ───────────────────────────────────────────────────────────
@@ -414,6 +540,32 @@ const RESY_SKIP = new Set([
   "blog","careers","press","terms","privacy",
 ]);
 
+// Real-browser Resy discovery via Browserbase CDP.
+// Resy is a React SPA — datacenter scrapers only ever see an empty HTML shell.
+// A real browser executes the JS bundle and renders the full venue list with
+// actual anchor hrefs. DOM querySelectorAll reliably extracts them.
+async function discoverResyViaBB(
+  params: SearchParams, bbKey: string, bbProject: string,
+): Promise<Restaurant[]> {
+  const slug   = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
+  const tNoCol = params.time.replace(":", "");
+  const cuiQ   = params.cuisine ? `&cuisine=${encodeURIComponent(params.cuisine)}` : "";
+  const searchUrl = `https://resy.com/cities/${slug}/venues?seats=${params.partySize}&date=${params.date}&time=${tNoCol}${cuiQ}`;
+
+  try {
+    const linksJson = await bbLoad(searchUrl, bbKey, bbProject, {
+      waitMs: 5000,
+      evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/venues/"]')).map(a=>a.href).filter(h=>/\\/cities\\/[^/]+\\/venues\\/[^/?#]+$/.test(h)))].slice(0,20))`,
+    });
+    const links: string[] = JSON.parse(linksJson || "[]");
+    console.log(`[Resy BB] ${links.length} venues discovered`);
+    return links.map(u => normToResy({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+  } catch (err: any) {
+    console.log(`[Resy BB] discovery error: ${err?.message}`);
+    return [];
+  }
+}
+
 // ─── OPENTABLE DISCOVERY ──────────────────────────────────────────────────────
 // Akamai blocks datacenter IPs from the main OT restaurant pages.
 // Two approaches:
@@ -521,6 +673,34 @@ async function discoverOTviaApify(params: SearchParams, token: string): Promise<
     }).filter(r => r.name);
   } catch (err) {
     console.error("[Apify OT]", err);
+    return [];
+  }
+}
+
+// Real-browser OT discovery via Browserbase CDP + residential proxy.
+// OT uses Akamai bot-protection keyed on datacenter IP ranges.
+// Browserbase's residential proxy IPs bypass Akamai's blacklist because they
+// route through real ISPs indistinguishable from organic user traffic.
+async function discoverOTViaBB(
+  params: SearchParams, bbKey: string, bbProject: string,
+): Promise<Restaurant[]> {
+  const domain = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
+  const dt     = `${params.date}T${params.time}`;
+  const cityQ  = encodeURIComponent(params.city + (params.state ? `, ${params.state}` : ""));
+  const cuiQ   = params.cuisine ? `&term=${encodeURIComponent(params.cuisine)}` : "";
+  const searchUrl = `https://www.${domain}/s/?covers=${params.partySize}&dateTime=${dt}&term=${cityQ}${cuiQ}`;
+
+  try {
+    const linksJson = await bbLoad(searchUrl, bbKey, bbProject, {
+      waitMs: 5000,
+      useProxy: true,
+      evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/r/"],a[href*="/restaurant/profile/"]')).map(a=>a.href))].slice(0,20))`,
+    });
+    const links: string[] = JSON.parse(linksJson || "[]");
+    console.log(`[OT BB] ${links.length} restaurants discovered`);
+    return links.map(u => normToOT({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+  } catch (err: any) {
+    console.log(`[OT BB] discovery error: ${err?.message}`);
     return [];
   }
 }
@@ -794,6 +974,8 @@ async function verifyBatch(
   params: SearchParams,
   fcKey: string,
   budgetMs: number,
+  bbKey = "",
+  bbProject = "",
 ): Promise<Restaurant[]> {
   if (candidates.length === 0) return [];
 
@@ -808,7 +990,7 @@ async function verifyBatch(
     const batch      = candidates.slice(i, i + VERIFY_CONCUR);
     const perScrapeMs = Math.min(remaining - 500, 10_000); // leave 500ms margin
     const settled    = await Promise.allSettled(
-      batch.map(r => withTimeout(verifyOne(r, params, fcKey), perScrapeMs, null))
+      batch.map(r => withTimeout(verifyOne(r, params, fcKey, bbKey, bbProject), perScrapeMs, null))
     );
     for (const s of settled) {
       if (s.status === "fulfilled" && s.value !== null) results.push(s.value);
@@ -818,10 +1000,17 @@ async function verifyBatch(
   return results;
 }
 
-async function verifyOne(r: Restaurant, params: SearchParams, fcKey: string): Promise<Restaurant | null> {
+async function verifyOne(
+  r: Restaurant, params: SearchParams, fcKey: string,
+  bbKey = "", bbProject = "",
+): Promise<Restaurant | null> {
   if (r._preVerified && r.timeSlots.length > 0) return r;
-  if (r.platform === "resy")      return verifyResy(r, params, fcKey);
-  if (r.platform === "opentable") return verifyOT(r, params, fcKey);
+  if (r.platform === "resy")      return bbKey && bbProject
+    ? verifyResyViaBB(r, params, bbKey, bbProject)
+    : verifyResy(r, params, fcKey);
+  if (r.platform === "opentable") return bbKey && bbProject
+    ? verifyOTViaBB(r, params, bbKey, bbProject)
+    : verifyOT(r, params, fcKey);
   if (r.platform === "yelp")      return verifyYelp(r, params, fcKey);
   return null;
 }
@@ -875,6 +1064,39 @@ async function verifyResy(r: Restaurant, params: SearchParams, fcKey: string): P
     };
   } catch (err) {
     console.error(`[verifyResy] ${r.name}:`, err);
+    return null;
+  }
+}
+
+// Real-browser Resy venue verification — renders the booking page JS and extracts
+// actual time slot buttons from innerText.
+async function verifyResyViaBB(
+  r: Restaurant, params: SearchParams, bbKey: string, bbProject: string,
+): Promise<Restaurant | null> {
+  try {
+    const text = await bbLoad(r.platformUrl, bbKey, bbProject, { waitMs: 4000 });
+    if (text.length < 100) { console.log(`[Resy BB verify] ${r.name}: short text (${text.length})`); return null; }
+    if (/\bnotify\b/i.test(text) && !/\b\d{1,2}:\d{2}\s*(am|pm)\b/i.test(text)) return null;
+
+    const slots    = extractTimes(text);
+    const windowed = filterWindow(slots, params.time);
+    if (windowed.length === 0) {
+      console.log(`[Resy BB verify] ${r.name}: no slots in window`);
+      return null;
+    }
+    const base          = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("resy", base, params, s.time) }));
+    const ratingM = text.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM = text.match(/\(([\d,]+)\s*review/i);
+    console.log(`[Resy BB verify] ${r.name}: ${windowed.length} slots ✓`);
+    return {
+      ...r,
+      timeSlots:   slotsWithUrls,
+      rating:      ratingM ? parseFloat(ratingM[1])                 : r.rating,
+      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
+    };
+  } catch (err: any) {
+    console.log(`[Resy BB verify] ${r.name}: ${err?.message}`);
     return null;
   }
 }
@@ -988,6 +1210,43 @@ async function verifyOTviaJina(r: Restaurant, params: SearchParams): Promise<Res
   } catch (err: any) {
     clearTimeout(timer);
     if (err?.name !== "AbortError") console.log(`[OT Jina] ${r.name}: ${err?.message}`);
+    return null;
+  }
+}
+
+// Real-browser OT verification — residential proxy bypasses Akamai on restaurant pages.
+async function verifyOTViaBB(
+  r: Restaurant, params: SearchParams, bbKey: string, bbProject: string,
+): Promise<Restaurant | null> {
+  try {
+    const text = await bbLoad(r.platformUrl, bbKey, bbProject, {
+      waitMs: 4000,
+      useProxy: true,
+    });
+    if (text.length < 50) { console.log(`[OT BB verify] ${r.name}: short text`); return null; }
+    if (/access denied|security check|are you a robot|just a moment/i.test(text)) {
+      console.log(`[OT BB verify] ${r.name}: Akamai blocked even with proxy`);
+      return null;
+    }
+    const slots    = extractTimes(text);
+    const windowed = filterWindow(slots, params.time);
+    if (windowed.length === 0) {
+      console.log(`[OT BB verify] ${r.name}: no slots`);
+      return null;
+    }
+    const base          = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
+    const ratingM = text.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM = text.match(/\(([\d,]+)\s*review/i);
+    console.log(`[OT BB verify] ${r.name}: ${windowed.length} slots ✓`);
+    return {
+      ...r,
+      timeSlots:   slotsWithUrls,
+      rating:      ratingM ? parseFloat(ratingM[1])                 : r.rating,
+      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
+    };
+  } catch (err: any) {
+    console.log(`[OT BB verify] ${r.name}: ${err?.message}`);
     return null;
   }
 }
