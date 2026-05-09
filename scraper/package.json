@@ -1,0 +1,10 @@
+{
+  "name": "tablefinder-scraper",
+  "version": "1.0.0",
+  "description": "Headless Chrome scraper for TableFinder — runs on AWS Lambda",
+  "main": "handler.js",
+  "dependencies": {
+    "@sparticuz/chromium": "^131.0.0",
+    "playwright-core": "^1.44.0"
+  }
+}
