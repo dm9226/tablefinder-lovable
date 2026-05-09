@@ -460,13 +460,13 @@ async function discoverResyViaBB(
   params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant[]> {
   const slug   = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
-  const tNoCol = params.time.replace(":", "");
+  // Resy search page: /search?date=...&seats=... (not /venues? which 404s)
   const cuiQ   = params.cuisine ? `&cuisine=${encodeURIComponent(params.cuisine)}` : "";
-  const searchUrl = `https://resy.com/cities/${slug}/venues?seats=${params.partySize}&date=${params.date}&time=${tNoCol}${cuiQ}`;
+  const searchUrl = `https://resy.com/cities/${slug}/search?date=${params.date}&seats=${params.partySize}${cuiQ}`;
 
   try {
     const linksJson = await lambdaLoad(searchUrl, scraperUrl, scraperSecret, {
-      waitMs: 5000,
+      waitMs: 6000,
       evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/venues/"]')).map(a=>a.href).filter(h=>/\\/cities\\/[^/]+\\/venues\\/[^/?#]+$/.test(h)))].slice(0,20))`,
     });
     const links: string[] = JSON.parse(linksJson || "[]");
