@@ -467,7 +467,7 @@ async function discoverResyViaBB(
   try {
     const linksJson = await lambdaLoad(searchUrl, scraperUrl, scraperSecret, {
       waitMs: 6000,
-      evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/venues/"]')).map(a=>a.href).filter(h=>/\\/cities\\/[^/]+\\/venues\\/[^/?#]+$/.test(h)))].slice(0,20))`,
+      evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/venues/"]')).map(a=>a.href.split('?')[0]).filter(h=>/\\/cities\\/[^/]+\\/venues\\/[^/?#]+$/.test(h)))].slice(0,20))`,
     });
     const links: string[] = JSON.parse(linksJson || "[]");
     console.log(`[Resy Lambda] ${links.length} venues discovered`);
