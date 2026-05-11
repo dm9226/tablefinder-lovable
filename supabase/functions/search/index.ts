@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17-final4",
+      _v:                  "v18b",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -730,30 +730,41 @@ async function discoverOTViaBB(
       useProxy: false,
       timeoutMs: 28_000,
       evalExpr: `JSON.stringify((() => {
-        // Try Next.js structured data first
+        // Check __NEXT_DATA__ keys so we know what's available (for debugging)
         const nd = document.getElementById('__NEXT_DATA__');
-        if (nd) return {type:'nextdata', data: nd.textContent.substring(0,8000)};
-        // Fallback: extract restaurant cards from DOM
-        const cards = Array.from(document.querySelectorAll('a[href*="/r/"]'))
-          .filter(a => /opentable\\.(com|co\\.uk)\\/r\\//.test(a.href))
-          .map(a => {
-            let el = a, times = [];
-            for (let i=0; i<10; i++) {
-              el = el.parentElement; if (!el) break;
-              times = Array.from(el.querySelectorAll('button,span,[class*="time"]'))
-                .map(x=>x.textContent.trim())
-                .filter(t=>/^\\d{1,2}:\\d{2}\\s*(AM|PM)$/i.test(t));
-              if (times.length) break;
-            }
-            return {url: a.href.split('#')[0], name: a.textContent.trim().substring(0,80), times:[...new Set(times)].slice(0,8)};
-          })
-          .filter((r,i,a)=>r.url&&a.findIndex(x=>x.url===r.url)===i)
-          .slice(0,20);
-        return {type:'dom', cards};
+        const ndKeys = nd ? Object.keys(JSON.parse(nd.textContent)?.props?.pageProps ?? {}) : [];
+        // Extract restaurant cards from DOM
+        // Strategy: find the card-level container for each /r/ link (article, li, or
+        // large div), then collect ALL time buttons within that container.
+        const links = Array.from(document.querySelectorAll('a[href*="/r/"]'))
+          .filter(a => /opentable\\.(com|co\\.uk)\\/r\\//.test(a.href));
+        const cards = links.map(a => {
+          const url = a.href.split('#')[0].split('?')[0];
+          // Walk up to find article/li (card boundary) or a div with ≥3 children
+          let container = a.parentElement;
+          for (let i=0; i<15 && container; i++) {
+            const tag = container.tagName;
+            if (tag==='ARTICLE' || tag==='LI') break;
+            if (container.childElementCount >= 3) break;
+            container = container.parentElement;
+          }
+          if (!container) container = a;
+          // Collect all time-like buttons in the card
+          const times = Array.from(container.querySelectorAll('button,a[role="button"],span'))
+            .map(x=>x.textContent.trim())
+            .filter(t=>/^\\d{1,2}:\\d{2}\\s*(AM|PM)$/i.test(t));
+          // Prefer a heading element for the name; fall back to link text
+          const heading = container.querySelector('h2,h3,[class*="name"],[class*="Name"]');
+          const name = (heading?.textContent ?? a.textContent ?? '').trim().substring(0,80);
+          return {url, name, times:[...new Set(times)].slice(0,8)};
+        })
+        .filter((r,i,a)=>r.url&&a.findIndex(x=>x.url===r.url)===i)
+        .slice(0,20);
+        return {type:'dom', cards, ndKeys};
       })())`,
     });
     const parsed = JSON.parse(raw || "{}");
-    (globalThis as any).__otVerifyDebug = `type=${parsed.type}|raw=${raw.substring(0,400)}`;
+    (globalThis as any).__otVerifyDebug = `type=${parsed.type}|ndKeys=${JSON.stringify(parsed.ndKeys??[])}|cards=${parsed.cards?.length??0}|first=${JSON.stringify(parsed.cards?.[0]??null)}`;
 
     let restaurants: Restaurant[] = [];
 
@@ -1881,10 +1892,12 @@ function cleanTitle(title: string | undefined, url: string, platform: string): s
   }
   // Fallback: derive name from URL slug
   const parts = url.split("/");
-  const slug  = (parts[parts.length - 1] || "restaurant").split("?")[0];
+  const rawSlug = (parts[parts.length - 1] || "restaurant").split("?")[0];
+  // Decode %20 and other URL encoding before humanising
+  const slug = decodeURIComponent(rawSlug);
   return slug
     .replace(/-\d+$/, "")   // strip trailing disambiguation numbers: "south-city-kitchen-2" → "south-city-kitchen"
-    .split("-")
+    .split(/[-\s]+/)
     .filter(w => w.length > 0)
     .map(w => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ")
