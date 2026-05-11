@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v28
+// TableFinder Search Edge Function — v29
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -125,18 +125,9 @@ serve(async (req) => {
         console.log("[Resy] API returned 0 — falling back to Firecrawl");
         return discoverResy(params, FIRECRAWL);
       }, DISCOVER_MS),
-      // OT: Try Lambda first (real Chrome bypasses some Akamai checks), but Akamai
-      // still blocks Lambda on the OT search page with HTTP 500. When Lambda returns 0,
-      // fall back to Firecrawl Google search (site:opentable.com) which finds restaurant
-      // page URLs containing rids — then verifyOTviaRestref handles availability.
-      abortableDiscover(async () => {
-        if (SCRAPER_URL && SCRAPER_SECRET) {
-          const lambdaResults = await discoverOTviaLambda(params, SCRAPER_URL, SCRAPER_SECRET);
-          if (lambdaResults.length > 0) return lambdaResults;
-          console.log("[OT] Lambda returned 0 — falling back to Firecrawl discovery");
-        }
-        return discoverOTviaWidgetCanvas(params, FIRECRAWL);
-      }, DISCOVER_MS),
+      // OT: Lambda is permanently blocked by Akamai on the search page (HTTP 500 every time).
+      // Go directly to Firecrawl-based discovery.
+      abortableDiscover(() => discoverOTviaWidgetCanvas(params, FIRECRAWL), DISCOVER_MS),
       abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS),
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
@@ -195,7 +186,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v28",
+      _v:                  "v29",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -886,18 +877,18 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
   // ── Approach 1: Scrape OT city listing page ─────────────────────────────────
-  // opentable.com/{city}-restaurant-reservations is a static SEO page with
-  // hundreds of /r/slug links — lighter Akamai rules than the SPA search page.
+  // opentable.com/{city}-restaurant-reservations is a static SEO page.
+  // Akamai usually blocks this, so timeout is short (5s) to fail fast.
   const citySlug    = city.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
   const cityPageUrl = `https://www.${domain}/${citySlug}-restaurant-reservations`;
   try {
     const ctrl  = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 12_000);
+    const timer = setTimeout(() => ctrl.abort(), 5_000);
     const scResp = await fetch(`${FC_API}/scrape`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
       signal:  ctrl.signal,
-      body:    JSON.stringify({ url: cityPageUrl, formats: ["markdown"], onlyMainContent: true, timeout: 10000 }),
+      body:    JSON.stringify({ url: cityPageUrl, formats: ["markdown"], onlyMainContent: true, timeout: 4000 }),
     });
     clearTimeout(timer);
     if (scResp.ok) {
@@ -914,99 +905,103 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
       console.log(`[OT city] ${links.length} URLs from city page (md_len=${md.length})`);
       if (links.length >= 3) {
         const cands = links.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
+        const dt2   = `${params.date}T${params.time}`;
         for (const c of cands) {
-          if (c._rid) {
-            c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${params.date}T${params.time}&styleid=5&disablegt=true`;
-          }
+          if (c._rid) c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${dt2}&styleid=5&disablegt=true`;
         }
         return cands;
       }
     }
-  } catch { /* fall through to Google approach */ }
+  } catch { /* fall through */ }
 
-  // ── Approach 2: site:opentable.com/r direct Google search ───────────────────
-  // Ask Google for pages under opentable.com/r/ for this city — item.url IS the OT page.
-  const directQueries = [
-    `site:opentable.com/r ${city}${state}${cuisine}`,
-    `site:opentable.com/r ${city}${state} restaurant`,
-  ];
-  const directRaw   = await firecrawlSearch(directQueries, fcKey, 12);
-  const directItems = directRaw
-    .filter(r => /opentable\.(?:com|co\.uk)\/(r\/|restaurant\/profile\/)/i.test(r.url ?? ""))
-    .map(r => normToOT(r, params))
-    .filter(Boolean) as Restaurant[];
-  console.log(`[OT direct] ${directRaw.length} raw → ${directItems.length} OT URLs`);
-  if (directItems.length >= 3) {
-    const dt = `${params.date}T${params.time}`;
-    for (const c of directItems) {
-      if (c._rid) c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
-    }
+  // ── Approaches 2 + 3 run in parallel to fit within the discovery budget ──────
+
+  // Approach 2: site:opentable.com/r query — Google returns OT restaurant page
+  // URLs directly as item.url (no snippet parsing needed).
+  const directP = (async () => {
+    const directQueries = [
+      `site:opentable.com/r ${city}${state}${cuisine}`,
+      `site:opentable.com/r ${city}${state} restaurant`,
+    ];
+    const directRaw   = await firecrawlSearch(directQueries, fcKey, 12);
+    const directItems = directRaw
+      .filter(r => /opentable\.(?:com|co\.uk)\/(r\/|restaurant\/profile\/)/i.test(r.url ?? ""))
+      .map(r => normToOT(r, params))
+      .filter(Boolean) as Restaurant[];
+    console.log(`[OT direct] ${directRaw.length} raw → ${directItems.length} OT URLs`);
     return directItems;
-  }
+  })();
 
-  // ── Approach 3: Firecrawl search + full-page scrape for embedded OT links ────
-  // Search for restaurant/media pages; scrapeOptions returns full markdown (not snippet).
-  // Restaurant websites embed OT booking widgets — full markdown reveals ?rid=XXXXX params.
-  const scrapeQueries = [
-    `${city}${state}${cuisine} restaurant opentable reservation booking`,
-    `${city}${state} restaurant "reserve on opentable"`,
-  ];
-  const scrapeOTSeen  = new Set<string>();
-  const scrapeOTItems: Array<{ url: string; title?: string }> = [];
+  // Approach 3: Firecrawl search with full-page scraping.
+  // scrapeOptions returns full markdown (not just snippet) so we can extract
+  // embedded OT widget URLs containing ?rid=XXXXX from restaurant websites.
+  const scrapeP = (async () => {
+    const scrapeQueries = [
+      `${city}${state}${cuisine} restaurant opentable reservation booking`,
+      `${city}${state} restaurant "reserve on opentable"`,
+    ];
+    const scrapeOTSeen  = new Set<string>();
+    const scrapeOTItems: Array<{ url: string; title?: string }> = [];
 
-  await Promise.all(scrapeQueries.map(async (query) => {
-    const ctrl  = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 22_000);
-    try {
-      const resp = await fetch(`${FC_API}/search`, {
-        method:  "POST",
-        headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
-        signal:  ctrl.signal,
-        body:    JSON.stringify({ query, limit: 8, scrapeOptions: { formats: ["markdown"] } }),
-      });
-      clearTimeout(timer);
-      if (!resp.ok) { console.warn(`[OT scrape] HTTP ${resp.status}`); return; }
-      const data  = await resp.json();
-      const items: any[] = Array.isArray(data) ? data
-        : (Array.isArray(data.data) ? data.data
-        : (Array.isArray(data.results) ? data.results
-        : (Array.isArray(data.data?.results) ? data.data.results : [])));
-      console.log(`[OT scrape] "${query.slice(0, 50)}": ${items.length} pages`);
-      for (const item of items) {
-        const md = item.markdown ?? item.content ?? "";
-        // Extract OT URLs with rid query param (embedded widget links)
-        const reRid  = /https?:\/\/(?:www\.)?opentable\.(?:com|co\.uk)\/r\/([^?\s"'<>\)]+)[^\s"'<>]*[?&]rid=(\d+)/gi;
-        // Extract /restaurant/profile/RID paths
-        const reProf = /opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/gi;
-        // Plain /r/slug links (no rid — Lambda can still scrape them)
-        const reSlug = /https?:\/\/(?:www\.)?opentable\.(?:com|co\.uk)\/r\/([^?\s"'<>\)]+)/gi;
-        let m;
-        while ((m = reRid.exec(md))  !== null) {
-          const u = `https://www.opentable.com/r/${m[1]}?rid=${m[2]}`;
-          if (!scrapeOTSeen.has(u)) { scrapeOTSeen.add(u); scrapeOTItems.push({ url: u, title: item.title }); }
+    await Promise.all(scrapeQueries.map(async (query) => {
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 14_000);
+      try {
+        const resp = await fetch(`${FC_API}/search`, {
+          method:  "POST",
+          headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+          signal:  ctrl.signal,
+          body:    JSON.stringify({ query, limit: 8, scrapeOptions: { formats: ["markdown"] } }),
+        });
+        clearTimeout(timer);
+        if (!resp.ok) { console.warn(`[OT scrape] HTTP ${resp.status}`); return; }
+        const data  = await resp.json();
+        const items: any[] = Array.isArray(data) ? data
+          : (Array.isArray(data.data) ? data.data
+          : (Array.isArray(data.results) ? data.results
+          : (Array.isArray(data.data?.results) ? data.data.results : [])));
+        console.log(`[OT scrape] "${query.slice(0, 50)}": ${items.length} pages`);
+        for (const item of items) {
+          const md = item.markdown ?? item.content ?? "";
+          const reRid  = /https?:\/\/(?:www\.)?opentable\.(?:com|co\.uk)\/r\/([^?\s"'<>\)]+)[^\s"'<>]*[?&]rid=(\d+)/gi;
+          const reProf = /opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/gi;
+          const reSlug = /https?:\/\/(?:www\.)?opentable\.(?:com|co\.uk)\/r\/([^?\s"'<>\)]+)/gi;
+          let m;
+          while ((m = reRid.exec(md))  !== null) {
+            const u = `https://www.opentable.com/r/${m[1]}?rid=${m[2]}`;
+            if (!scrapeOTSeen.has(u)) { scrapeOTSeen.add(u); scrapeOTItems.push({ url: u, title: item.title }); }
+          }
+          while ((m = reProf.exec(md)) !== null) {
+            const u = `https://www.opentable.com/restaurant/profile/${m[1]}`;
+            if (!scrapeOTSeen.has(u)) { scrapeOTSeen.add(u); scrapeOTItems.push({ url: u, title: item.title }); }
+          }
+          while ((m = reSlug.exec(md)) !== null) {
+            const u = `https://www.opentable.com/r/${m[1]}`;
+            if (!scrapeOTSeen.has(u)) { scrapeOTSeen.add(u); scrapeOTItems.push({ url: u, title: item.title }); }
+          }
         }
-        while ((m = reProf.exec(md)) !== null) {
-          const u = `https://www.opentable.com/restaurant/profile/${m[1]}`;
-          if (!scrapeOTSeen.has(u)) { scrapeOTSeen.add(u); scrapeOTItems.push({ url: u, title: item.title }); }
-        }
-        while ((m = reSlug.exec(md)) !== null) {
-          const u = `https://www.opentable.com/r/${m[1]}`;
-          if (!scrapeOTSeen.has(u)) { scrapeOTSeen.add(u); scrapeOTItems.push({ url: u, title: item.title }); }
-        }
+      } catch (err: any) {
+        clearTimeout(timer);
+        console.warn(`[OT scrape] ${err?.message}`);
       }
-    } catch (err: any) {
-      clearTimeout(timer);
-      console.warn(`[OT scrape] ${err?.message}`);
-    }
-  }));
+    }));
 
-  console.log(`[OT scrape] ${scrapeOTItems.length} OT URLs extracted from full-page scrape`);
-  const candidates = scrapeOTItems.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
+    console.log(`[OT scrape] ${scrapeOTItems.length} OT URLs from full-page scrape`);
+    return scrapeOTItems.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
+  })();
+
+  // Merge results from both parallel approaches
+  const [directItems, scrapeItems] = await Promise.all([directP, scrapeP]);
+  const merged   = new Map<string, Restaurant>();
+  for (const r of [...directItems, ...scrapeItems]) {
+    if (r.id && !merged.has(r.id)) merged.set(r.id, r);
+  }
+  const candidates = [...merged.values()];
   const dt = `${params.date}T${params.time}`;
   for (const c of candidates) {
     if (c._rid) c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
   }
-  console.log(`[OT scrape] ${candidates.length} candidates (with rids: ${candidates.filter(c => c._rid).length})`);
+  console.log(`[OT discovery] ${candidates.length} total (direct=${directItems.length} scrape=${scrapeItems.length} rids=${candidates.filter(c=>c._rid).length})`);
   return candidates;
 }
 
