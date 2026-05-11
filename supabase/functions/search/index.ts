@@ -725,15 +725,75 @@ async function discoverOTViaBB(
   const searchUrl = `https://www.${domain}/s/?covers=${params.partySize}&dateTime=${dt}&term=${cityQ}${cuiQ}`;
 
   try {
-    const linksJson = await bbLoad(searchUrl, bbKey, bbProject, {
+    const raw = await bbLoad(searchUrl, bbKey, bbProject, {
       waitMs: 6000,
       useProxy: false,
       timeoutMs: 28_000,
-      evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/r/"]')).map(a=>a.href.split('#')[0]).filter(h=>/opentable\\.(?:com|co\\.uk)\\/r\\//.test(h)))].slice(0,20))`,
+      evalExpr: `JSON.stringify((() => {
+        // Try Next.js structured data first
+        const nd = document.getElementById('__NEXT_DATA__');
+        if (nd) return {type:'nextdata', data: nd.textContent.substring(0,8000)};
+        // Fallback: extract restaurant cards from DOM
+        const cards = Array.from(document.querySelectorAll('a[href*="/r/"]'))
+          .filter(a => /opentable\\.(com|co\\.uk)\\/r\\//.test(a.href))
+          .map(a => {
+            let el = a, times = [];
+            for (let i=0; i<10; i++) {
+              el = el.parentElement; if (!el) break;
+              times = Array.from(el.querySelectorAll('button,span,[class*="time"]'))
+                .map(x=>x.textContent.trim())
+                .filter(t=>/^\\d{1,2}:\\d{2}\\s*(AM|PM)$/i.test(t));
+              if (times.length) break;
+            }
+            return {url: a.href.split('#')[0], name: a.textContent.trim().substring(0,80), times:[...new Set(times)].slice(0,8)};
+          })
+          .filter((r,i,a)=>r.url&&a.findIndex(x=>x.url===r.url)===i)
+          .slice(0,20);
+        return {type:'dom', cards};
+      })())`,
     });
-    const links: string[] = JSON.parse(linksJson || "[]");
-    console.log(`[OT BB] ${links.length} restaurants discovered`);
-    return links.map(u => normToOT({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+    const parsed = JSON.parse(raw || "{}");
+    (globalThis as any).__otVerifyDebug = `type=${parsed.type}|raw=${raw.substring(0,400)}`;
+
+    let restaurants: Restaurant[] = [];
+
+    if (parsed.type === "nextdata") {
+      // Parse Next.js data for restaurants + slots
+      try {
+        const nd = JSON.parse(parsed.data);
+        const searchResults = nd?.props?.pageProps?.searchResults
+          ?? nd?.props?.pageProps?.restaurants
+          ?? nd?.props?.pageProps?.results
+          ?? [];
+        console.log(`[OT BB] nextdata: ${searchResults.length} results`);
+        (globalThis as any).__otVerifyDebug = `nextdata keys=${Object.keys(nd?.props?.pageProps??{}).join(',')}`;
+      } catch { /* parse failed */ }
+    }
+
+    if (parsed.type === "dom" && parsed.cards?.length) {
+      const cards = parsed.cards as {url:string; name:string; times:string[]}[];
+      console.log(`[OT BB] dom: ${cards.length} cards, slots sample: ${JSON.stringify(cards[0])}`);
+      (globalThis as any).__otVerifyDebug = `dom cards=${cards.length} first=${JSON.stringify(cards[0])}`;
+      restaurants = cards.map(card => {
+        const r = normToOT({ url: card.url, title: card.name, description: "" }, params);
+        if (!r) return null;
+        if (card.times.length > 0) {
+          const base = card.url.split("?")[0];
+          r.timeSlots = card.times.map(t => ({ time: t, url: buildSlotUrl("opentable", base, params, t) }));
+          r._preVerified = true;
+        }
+        return r;
+      }).filter(Boolean) as Restaurant[];
+    }
+
+    if (!restaurants.length) {
+      // last resort: just extract links, verification will handle slots
+      const links = parsed.cards?.map((c:any)=>c.url) ?? [];
+      restaurants = links.map((u:string) => normToOT({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+    }
+
+    console.log(`[OT BB] ${restaurants.length} restaurants, ${restaurants.filter(r=>r._preVerified).length} pre-verified`);
+    return restaurants;
   } catch (err: any) {
     console.log(`[OT BB] discovery error: ${err?.message}`);
     return [];

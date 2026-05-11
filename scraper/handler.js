@@ -9,15 +9,28 @@ exports.handler = async (event) => {
     return { statusCode: 401, body: JSON.stringify({ error: "unauthorized" }) };
   }
 
+  // When using a residential proxy (for Akamai-protected sites like OT),
+  // force HTTP/1.1 so Akamai doesn't RST the HTTP/2 stream, and trust any
+  // certificate the proxy may present.
+  const proxyArgs = (useProxy && process.env.PROXY_URL)
+    ? [
+        "--disable-http2",
+        "--ignore-certificate-errors",
+        "--ignore-certificate-errors-spki-list",
+      ]
+    : [];
+
   const launchOptions = {
     args: [
       ...chromium.args,
       "--disable-web-security",
       "--no-sandbox",
       "--disable-setuid-sandbox",
+      ...proxyArgs,
     ],
     executablePath: await chromium.executablePath(),
-    headless: chromium.headless,
+    // chromium.headless may be a string ("new"/"shell") in some versions — Playwright needs a boolean
+    headless: chromium.headless === false ? false : true,
   };
 
   if (useProxy && process.env.PROXY_URL) {
@@ -39,7 +52,7 @@ exports.handler = async (event) => {
   });
 
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 50000 });
     await page.waitForTimeout(waitMs);
 
     const content = evalExpr
