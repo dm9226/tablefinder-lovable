@@ -1398,7 +1398,7 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         url: r.platformUrl, formats: ["markdown"],
-        onlyMainContent: true,
+        onlyMainContent: false,
         waitFor: 5000,  // Yelp /reservations/ pages are heavily JS-rendered
         timeout: 15000,
       }),
