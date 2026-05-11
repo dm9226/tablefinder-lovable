@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v19",
+      _v:                  "v19b",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -730,38 +730,38 @@ async function discoverOTViaBB(
       useProxy: false,
       timeoutMs: 28_000,
       evalExpr: `JSON.stringify((() => {
-        // Check __NEXT_DATA__ keys so we know what's available (for debugging)
-        const nd = document.getElementById('__NEXT_DATA__');
-        let ndKeys = [];
-        try { ndKeys = nd ? Object.keys(JSON.parse(nd.textContent)?.props?.pageProps ?? {}) : []; } catch(e) {}
-        // Extract restaurant cards from DOM
-        // Strategy: find the card-level container for each /r/ link (article, li, or
-        // large div), then collect ALL time buttons within that container.
+        // Deduplicate /r/ links by base URL (slug only, no query params)
+        const seen = new Set();
         const links = Array.from(document.querySelectorAll('a[href*="/r/"]'))
-          .filter(a => /opentable\\.(com|co\\.uk)\\/r\\//.test(a.href));
-        const cards = links.map(a => {
-          const url = a.href.split('#')[0].split('?')[0];
-          // Walk up to find article/li (card boundary) or a div with ≥3 children
-          let container = a.parentElement;
-          for (let i=0; i<15 && container; i++) {
-            const tag = container.tagName;
-            if (tag==='ARTICLE' || tag==='LI') break;
-            if (container.childElementCount >= 3) break;
-            container = container.parentElement;
-          }
-          if (!container) container = a;
-          // Collect all time-like buttons in the card
-          const times = Array.from(container.querySelectorAll('button,a[role="button"],span'))
-            .map(x=>x.textContent.trim())
-            .filter(t=>/^\\d{1,2}:\\d{2}\\s*(AM|PM)$/i.test(t));
-          // Prefer a heading element for the name; fall back to link text
-          const heading = container.querySelector('h2,h3,[class*="name"],[class*="Name"]');
-          const name = (heading?.textContent ?? a.textContent ?? '').trim().substring(0,80);
-          return {url, name, times:[...new Set(times)].slice(0,8)};
-        })
-        .filter((r,i,a)=>r.url&&a.findIndex(x=>x.url===r.url)===i)
-        .slice(0,20);
-        return {type:'dom', cards, ndKeys};
+          .map(a => ({el:a, url:a.href.split('?')[0].split('#')[0]}))
+          .filter(({url}) => /opentable\\.(com|co\\.uk)\\/r\\/[^/]+$/.test(url))
+          .filter(({url}) => { if(seen.has(url)) return false; seen.add(url); return true; })
+          .slice(0,20);
+        const cards = links.map(({el, url}) => {
+          // Use closest() with OT's known data-test attributes first,
+          // then fall back to semantic elements, then height-based heuristic.
+          const card = el.closest('[data-test*="restaurant"]') ||
+                       el.closest('[data-test*="result"]') ||
+                       el.closest('article') || el.closest('li') ||
+                       el.closest('[class*="result"]') || el.closest('[class*="Result"]') ||
+                       el.closest('[class*="card"]')   || el.closest('[class*="Card"]') ||
+                       (() => {
+                         let c = el.parentElement;
+                         for(let i=0; i<20 && c && c.tagName!=='BODY'; i++) {
+                           if(c.clientHeight >= 120) return c;
+                           c = c.parentElement;
+                         }
+                         return el.parentElement;
+                       })();
+          const text = card ? (card.innerText || '') : '';
+          const times = [...new Set(
+            [...text.matchAll(/\\b(\\d{1,2}:\\d{2}\\s*(?:AM|PM))\\b/gi)].map(m=>m[1].trim())
+          )].slice(0,8);
+          const h = card?.querySelector('h1,h2,h3,[data-test*="name"]');
+          const name = (h?.textContent || el.textContent || '').trim().replace(/\\s+/g,' ').substring(0,80);
+          return {url, name, times, _cc: card?.className?.substring(0,40)||''};
+        });
+        return {type:'dom', cards};
       })())`,
     });
     const parsed = JSON.parse(raw || "{}");
@@ -785,7 +785,7 @@ async function discoverOTViaBB(
     if (parsed.type === "dom" && parsed.cards?.length) {
       const cards = parsed.cards as {url:string; name:string; times:string[]}[];
       console.log(`[OT BB] dom: ${cards.length} cards, slots sample: ${JSON.stringify(cards[0])}`);
-      (globalThis as any).__otVerifyDebug = `dom cards=${cards.length} first=${JSON.stringify(cards[0])}`;
+      (globalThis as any).__otVerifyDebug = `dom cards=${cards.length} first=${JSON.stringify({...cards[0], _cc: cards[0]?._cc})}`;
       restaurants = cards.map(card => {
         const r = normToOT({ url: card.url, title: card.name, description: "" }, params);
         if (!r) return null;
@@ -793,6 +793,11 @@ async function discoverOTViaBB(
           const base = card.url.split("?")[0];
           r.timeSlots = card.times.map(t => ({ time: t, url: buildSlotUrl("opentable", base, params, t) }));
           r._preVerified = true;
+        } else {
+          // No times extracted from search page — individual pages are Akamai-blocked.
+          // Soft-verify so the restaurant still shows with a "Check on OT" prompt.
+          r.softVerified = true;
+          r._preVerified = true; // skip verifyOTViaBB (which would just fail anyway)
         }
         return r;
       }).filter(Boolean) as Restaurant[];
