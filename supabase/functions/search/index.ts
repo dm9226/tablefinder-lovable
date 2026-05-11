@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v20b",
+      _v:                  "v20c",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -725,6 +725,7 @@ async function discoverOTViaBB(
   const searchUrl = `https://www.${domain}/s/?covers=${params.partySize}&dateTime=${dt}&term=${cityQ}${cuiQ}`;
 
   try {
+    (globalThis as any).__otVerifyDebug = "bbLoad_starting";
     const raw = await bbLoad(searchUrl, bbKey, bbProject, {
       waitMs: 6000,
       useProxy: false,
@@ -814,6 +815,7 @@ async function discoverOTViaBB(
     return restaurants;
   } catch (err: any) {
     console.log(`[OT BB] discovery error: ${err?.message}`);
+    (globalThis as any).__otVerifyDebug = `error: ${err?.message}`;
     return [];
   }
 }
@@ -863,7 +865,7 @@ async function discoverYelp(params: SearchParams, fcKey: string): Promise<Restau
   const scrapeYelp = async (url: string, label: string): Promise<string[]> => {
     try {
       const ctrl  = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 11_000);
+      const timer = setTimeout(() => ctrl.abort(), 22_000);
       const resp  = await fetch(`${FC_API}/scrape`, {
         method: "POST",
         headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
