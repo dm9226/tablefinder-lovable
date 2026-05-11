@@ -174,7 +174,8 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17c-bb-error-logging",
+      _v:                  "v17d-bb-debug",
+      _ot_bb_error:        (globalThis as any).__otBBError ?? null,
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -734,7 +735,10 @@ async function discoverOTViaBB(
     console.log(`[OT BB] ${links.length} restaurants discovered`);
     return links.map(u => normToOT({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
   } catch (err: any) {
-    console.log(`[OT BB] discovery error: ${err?.message ?? err}`);
+    const msg = err?.message ?? String(err);
+    console.log(`[OT BB] discovery error: ${msg}`);
+    // Temporarily surface error in results for debugging
+    (globalThis as any).__otBBError = msg;
     return [];
   }
 }
