@@ -149,9 +149,9 @@ serve(async (req) => {
     // ── Verification ──────────────────────────────────────────────────────────
     const verifyStart = Date.now();
     const [resyVer, otVer, yelpVer] = await Promise.all([
-      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "", ""),
-      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS, "",           "",             BB_KEY, BB_PROJECT),
-      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS),
+      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL, SCRAPER_SECRET, "", ""),
+      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        "",           "",             BB_KEY, BB_PROJECT),
+      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET),  // extra budget for Lambda widget render
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
@@ -193,7 +193,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v26b",
+      _v:                  "v26c",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -617,10 +617,19 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
         name,
         cuisine:      venue.cuisines?.[0] ?? (params.cuisine || "Restaurant"),
         neighborhood: venue.location?.neighborhood ?? venue.location?.name ?? "",
-        rating:       typeof venue.rater?.score    === "number" ? venue.rater.score    :
-                      typeof venue.rating?.average === "number" ? venue.rating.average : undefined,
-        reviewCount:  typeof venue.rater?.total_ratings === "number" ? venue.rater.total_ratings :
-                      typeof venue.rating?.count        === "number" ? venue.rating.count        : undefined,
+        rating: (() => {
+          // Resy API field name varies by version — try all known shapes
+          const raw = venue.rater?.score ?? venue.rating?.average ?? venue.rating
+                   ?? venue.score        ?? venue.aggregate_score ?? venue.ratingAverage;
+          const n = parseFloat(String(raw ?? ""));
+          return isNaN(n) ? undefined : n;
+        })(),
+        reviewCount: (() => {
+          const raw = venue.rater?.total_ratings ?? venue.rating?.count
+                   ?? venue.review_count        ?? venue.num_ratings ?? venue.ratingCount;
+          const n = parseInt(String(raw ?? ""));
+          return isNaN(n) ? undefined : n;
+        })(),
         priceRange:   typeof venue.price_range_id === "number"
           ? "$".repeat(Math.min(4, venue.price_range_id))
           : undefined,
@@ -875,10 +884,11 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   // inurl: reliably targets pages whose URL contains the /r/ or /restaurant/profile/
   // path. site: with a path prefix is unreliable in Firecrawl's Google search API;
   // both site: and path-prefix queries return 0 usable results in practice.
+  // site: without path prefix is far more reliable than inurl: or site: with path
+  // (same fix that unlocked Resy Google discovery)
   const queries = [
-    `inurl:${domain}/r/ ${city}${state}${cuisine} restaurant`,
-    `inurl:${domain}/r/ ${city}${state} restaurant dinner reservation`,
-    `inurl:${domain}/restaurant/profile/ ${city}${state}${cuisine} restaurant`,
+    `site:${domain} ${city}${state}${cuisine} restaurant reservation`,
+    `site:${domain} ${city}${state} dinner restaurant reservation`,
   ];
 
   const results = await firecrawlSearch(queries, fcKey, 10);
@@ -1358,7 +1368,7 @@ async function verifyBatch(
     if (remaining < 3_000) break; // not enough time for a meaningful scrape batch
 
     const batch      = candidates.slice(i, i + VERIFY_CONCUR);
-    const perScrapeMs = Math.min(remaining - 500, 16_000); // leave 500ms margin; BB sessions need ~12s
+    const perScrapeMs = Math.min(remaining - 500, 24_000); // 24s allows warm Lambda Yelp (~15s) to complete
     const settled    = await Promise.allSettled(
       batch.map(r => withTimeout(verifyOne(r, params, fcKey, scraperUrl, scraperSecret, bbKey, bbProject), perScrapeMs, null))
     );
@@ -2019,10 +2029,8 @@ async function verifyYelpViaLambda(
     const windowed = filterWindow(slots, params.time);
 
     if (windowed.length === 0) {
-      const hasContent = /restaurant|reservation|dining|cuisine|menu/i.test(text);
-      if (!hasContent) { console.log(`[Yelp Lambda] ${rr.name}: no restaurant content`); return null; }
-      console.log(`[Yelp Lambda] ${rr.name}: soft-verified (no slots extracted)`);
-      return { ...rr, timeSlots: [], softVerified: true };
+      console.log(`[Yelp Lambda] ${rr.name}: no slots in window — dropping`);
+      return null;
     }
 
     const base          = rr.platformUrl.split("?")[0];
