@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v19e",
+      _v:                  "v20",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -881,17 +881,34 @@ async function discoverYelp(params: SearchParams, fcKey: string): Promise<Restau
     }
   };
 
-  // Reservation-filtered search only — returns restaurants that actually have
-  // native Yelp reservation availability for the requested date/time/party.
-  // Removed the "top-rated general" search: it pulled in OT/Resy/non-Yelp
-  // restaurants that were slipping through verification as false positives.
+  // Two searches: reservation-filtered (native Yelp only) + top-rated (broader pool).
+  // Top-rated results get flagged _topRated=true so verifyYelp can apply stricter
+  // isYelpNative checks and drop non-native restaurants.
   const resvUrl = `https://www.${domain}/search?find_loc=${loc}${term.replace("find_desc=","term=")}&reservation_date=${params.date}&reservation_time=${tNoCol}&reservation_covers=${params.partySize}`;
+  const topUrl  = `https://www.${domain}/search?find_loc=${loc}${term}&sortby=rating`;
 
-  const resvUrls = await scrapeYelp(resvUrl, "resv");
+  const [resvUrls, topUrls] = await Promise.all([
+    scrapeYelp(resvUrl, "resv"),
+    scrapeYelp(topUrl,  "top"),
+  ]);
 
-  if (resvUrls.length >= 1) {
-    console.log(`[Yelp] ${resvUrls.length} reservation-filtered venues`);
-    return resvUrls.map(u => normToYelp({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+  const seen = new Set<string>();
+  const combined: string[] = [];
+  for (const u of [...resvUrls, ...topUrls]) {
+    const slug = u.split("/").pop() ?? "";
+    if (slug && !seen.has(slug)) { seen.add(slug); combined.push(u); }
+  }
+
+  if (combined.length >= 1) {
+    console.log(`[Yelp] ${combined.length} venues (resv=${resvUrls.length} top=${topUrls.length})`);
+    const resvSet = new Set(resvUrls.map(u => u.split("/").pop()));
+    return combined.map(u => {
+      const r = normToYelp({ url: u, title: "", description: "" }, params);
+      if (!r) return null;
+      // Flag top-rated-only results so verifyYelp treats them more strictly
+      if (!resvSet.has(u.split("/").pop())) r._topRated = true;
+      return r;
+    }).filter(Boolean) as Restaurant[];
   }
 
   // Google fallback (rarely needed given two direct scrapes above)
@@ -1107,7 +1124,7 @@ async function verifyOne(
   r: Restaurant, params: SearchParams, fcKey: string,
   scraperUrl = "", scraperSecret = "", bbKey = "", bbProject = "",
 ): Promise<Restaurant | null> {
-  if (r._preVerified && r.timeSlots.length > 0) return r;
+  if (r._preVerified) return r; // already verified (or soft-verified) during discovery
   if (r.platform === "resy")      return scraperUrl && scraperSecret
     ? verifyResyViaBB(r, params, scraperUrl, scraperSecret)
     : verifyResy(r, params, fcKey);
@@ -1463,10 +1480,12 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       return null;
     }
 
-    // NOTE: We do NOT gate on native widget text here. Firecrawl can't render Yelp's
-    // JS time-picker even with waitFor:3000, so phrases like "select a time" / "party size"
-    // never appear in the markdown. Candidates already came from Yelp's own reservation
-    // search URL and passed the usesOtherPlatform filter — that's sufficient evidence.
+    // Top-rated-only results (not from reservation-filtered search) require isYelpNative
+    // to be confirmed — without that signal they're too likely to be false positives.
+    if ((r as any)._topRated && !isYelpNative) {
+      console.log(`[verifyYelp] ${r.name}: top-rated + non-native — skipping`);
+      return null;
+    }
 
     const slots    = extractTimes(md);
     const windowed = filterWindow(slots, params.time);
