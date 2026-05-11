@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17d-bb-debug",
+      _v:                  "v17e-bb-no-proxy",
       _ot_bb_error:        (globalThis as any).__otBBError ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -727,7 +727,7 @@ async function discoverOTViaBB(
   try {
     const linksJson = await bbLoad(searchUrl, bbKey, bbProject, {
       waitMs: 3000,
-      useProxy: true,
+      useProxy: false,
       timeoutMs: 28_000,
       evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/r/"],a[href*="/restaurant/profile/"]')).map(a=>a.href))].slice(0,20))`,
     });
@@ -1261,7 +1261,7 @@ async function verifyOTViaBB(
   try {
     const text = await bbLoad(r.platformUrl, bbKey, bbProject, {
       waitMs: 4000,
-      useProxy: true,
+      useProxy: false,
     });
     if (text.length < 50) { console.log(`[OT BB] ${r.name}: short text`); return null; }
     if (/access denied|security check|are you a robot|just a moment/i.test(text)) {
