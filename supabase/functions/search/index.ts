@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v22
+// TableFinder Search Edge Function — v23
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -140,17 +140,19 @@ serve(async (req) => {
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
 
     // Keep candidate pool tight — verify all in one parallel batch to hit 30s target.
-    // Lambda warm: 6 candidates × 7s each (parallel) = 7s verification round.
+    // Resy/OT are pre-verified by discovery (API + Lambda DOM), so verify passes are fast.
+    // Yelp: 4 candidates via Lambda (1 warm ~12s + 3 cold ~20s in parallel = ~20s).
     const resySlice = resyCands.slice(0, 6);
     const otSlice   = otCands.slice(0, 6);
-    const yelpSlice = yelpCands.slice(0, 6);
+    const yelpSlice = yelpCands.slice(0, 4);
 
     // ── Verification ──────────────────────────────────────────────────────────
     const verifyStart = Date.now();
     const [resyVer, otVer, yelpVer] = await Promise.all([
-      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",       ""),
+      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",     ""),
       verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS, "",           "",             BB_KEY, BB_PROJECT),
-      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS),
+      // Yelp via Lambda for real time slots; falls back to Firecrawl verifyYelp if no scraper
+      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET),
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
@@ -190,14 +192,14 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v22",
-      _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
+      _v:                  "v23",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
         verified:       { resy: resyVer.length, ot: otVer.length, yelp: yelpVer.length },
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
-        bb_enabled:      !!(BB_KEY && BB_PROJECT),
+        resy_api:        (globalThis as any).__resyApiDebug  ?? null,
+        ot_lambda:       (globalThis as any).__otLambdaDebug ?? null,
       },
     });
 
@@ -497,18 +499,23 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
   const lat   = params.lat  ?? metro?.lat;
   const lng   = params.lng  ?? metro?.lng;
   if (lat == null || lng == null) {
+    (globalThis as any).__resyApiDebug = `no_coords city=${params.city}`;
     console.log(`[Resy API] no coordinates for "${params.city}"`);
     return [];
   }
 
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12_000);
   try {
     const cuiQ = params.cuisine
       ? `&cuisine=${encodeURIComponent(params.cuisine.toLowerCase().replace(/\s+/g, "-"))}`
       : "";
     const url = `https://api.resy.com/4/find?lat=${lat}&long=${lng}&day=${params.date}&party_size=${params.partySize}&per_page=20&sort_by=availability&order_by=asc${cuiQ}`;
     const resp = await fetch(url, {
+      signal: ctrl.signal,
       headers: {
         "Authorization":   'ResyAPI api_key="VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"',
+        "x-resy-api-key":  "VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5",
         "X-Origin":        "https://resy.com",
         "Origin":          "https://resy.com",
         "Referer":         "https://resy.com/",
@@ -516,35 +523,50 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
         "Accept-Language": "en-US,en;q=0.9",
         "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       },
-      signal: AbortSignal.timeout(12_000),
     });
-    if (!resp.ok) { console.log(`[Resy API] HTTP ${resp.status}`); return []; }
-    const data = await resp.json();
+    clearTimeout(timer);
+
+    const rawBody = await resp.text();
+    (globalThis as any).__resyApiDebug = `status=${resp.status} len=${rawBody.length} sample=${rawBody.substring(0, 200)}`;
+
+    if (!resp.ok) {
+      console.log(`[Resy API] HTTP ${resp.status}: ${rawBody.substring(0, 200)}`);
+      return [];
+    }
+    const data = JSON.parse(rawBody);
     const venues: any[] = data?.results?.venues ?? [];
     console.log(`[Resy API] ${venues.length} venues with availability`);
+    (globalThis as any).__resyApiDebug = `status=200 venues=${venues.length} first=${JSON.stringify(venues[0]?.venue?.name ?? null)}`;
 
     return venues.flatMap((v: any) => {
       const venue = v.venue ?? {};
       const name  = (venue.name ?? "").trim();
       if (!name) return [];
 
-      // Derive the venue slug from contact.url (may be a full URL or just a slug)
+      // url_slug is the canonical field; fall back to contact.url (full URL or slug)
+      const urlSlug: string    = venue.url_slug ?? "";
       const contactUrl: string = venue.contact?.url ?? "";
       let venueSlug: string;
-      const urlM = contactUrl.match(/\/venues\/([^/?#]+)/);
-      if (urlM) {
-        venueSlug = urlM[1];
-      } else if (contactUrl && !contactUrl.startsWith("http")) {
-        venueSlug = contactUrl.split("/").pop() ?? "";
+      if (urlSlug) {
+        venueSlug = urlSlug;
       } else {
-        venueSlug = slugify(name);
+        const urlM = contactUrl.match(/\/venues\/([^/?#]+)/);
+        if (urlM) {
+          venueSlug = urlM[1];
+        } else if (contactUrl && !contactUrl.startsWith("http")) {
+          venueSlug = contactUrl.split("/").pop() ?? "";
+        } else {
+          venueSlug = slugify(name);
+        }
       }
       if (!venueSlug || RESY_SKIP.has(venueSlug.toLowerCase())) return [];
 
       const base       = `https://resy.com/cities/${slug}/venues/${venueSlug}`;
       const bookingUrl = addResyParams(base, params);
 
-      // Convert API slots to TimeSlot[] filtered to the requested time window
+      // Convert API slots to TimeSlot[] filtered to the requested time window.
+      // If slot parsing yields nothing (API response schema difference), soft-verify —
+      // the venue is confirmed available (Resy included it in results for this date/party).
       const allSlots: TimeSlot[] = (v.slots ?? []).flatMap((s: any) => {
         const startStr = (s.date?.start ?? "") as string;  // "2026-05-14 19:00:00"
         if (!startStr) return [];
@@ -557,27 +579,32 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
         return [{ time: disp, url: buildSlotUrl("resy", base, params, disp) }];
       });
       const windowed = filterWindow(allSlots, params.time);
-      if (windowed.length === 0) return [];  // no slots in the ±90-min window
 
-      return [{
+      const base_r: Restaurant = {
         id:           `resy-${venueSlug.toLowerCase()}`,
         name,
         cuisine:      venue.cuisines?.[0] ?? (params.cuisine || "Restaurant"),
-        neighborhood: venue.location?.neighborhood ?? "",
-        rating:       typeof venue.rating?.average === "number" ? venue.rating.average : undefined,
-        reviewCount:  typeof venue.rating?.count   === "number" ? venue.rating.count   : undefined,
-        priceRange:   typeof venue.price_range_id  === "number"
+        neighborhood: venue.location?.neighborhood ?? venue.location?.name ?? "",
+        rating:       typeof venue.rater?.score    === "number" ? venue.rater.score    :
+                      typeof venue.rating?.average === "number" ? venue.rating.average : undefined,
+        reviewCount:  typeof venue.rater?.total_ratings === "number" ? venue.rater.total_ratings :
+                      typeof venue.rating?.count        === "number" ? venue.rating.count        : undefined,
+        priceRange:   typeof venue.price_range_id === "number"
           ? "$".repeat(Math.min(4, venue.price_range_id))
           : undefined,
-        platform:     "resy"    as const,
+        platform:     "resy" as const,
         platformUrl:  bookingUrl,
         timeSlots:    windowed,
         distanceMiles: null,
-        _preVerified:  true,
+        _preVerified:  windowed.length > 0,
+        softVerified:  windowed.length === 0,  // confirmed available but slot parsing failed
         _slug:         venueSlug.toLowerCase(),
-      } as Restaurant];
+      };
+      return [base_r];
     });
   } catch (err: any) {
+    clearTimeout(timer);
+    (globalThis as any).__resyApiDebug = `error=${err?.message}`;
     console.log(`[Resy API] error: ${err?.message}`);
     return [];
   }
@@ -790,7 +817,9 @@ async function discoverOTviaLambda(
     if (!cards.length) {
       // Check if Akamai blocked or page returned challenge text
       const lc = raw.toLowerCase();
-      if (/access denied|security check|enable javascript|are you a robot|just a moment/i.test(lc)) {
+      const blocked = /access denied|security check|enable javascript|are you a robot|just a moment/i.test(lc);
+      (globalThis as any).__otLambdaDebug = `cards=0 blocked=${blocked} raw_len=${raw.length} sample=${raw.substring(0,150)}`;
+      if (blocked) {
         console.log("[OT Lambda discover] Akamai blocked search page — 0 results");
       } else {
         console.log(`[OT Lambda discover] 0 cards (page len=${raw.length})`);
@@ -798,6 +827,7 @@ async function discoverOTviaLambda(
       return [];
     }
 
+    (globalThis as any).__otLambdaDebug = `cards=${cards.length} with_slots=${cards.filter(c=>c.times.length>0).length}`;
     console.log(`[OT Lambda discover] ${cards.length} cards, ${cards.filter(c=>c.times.length>0).length} with slots`);
     return cards.map(card => {
       const r = normToOT({ url: card.url, title: card.name, description: "" }, params);
@@ -815,6 +845,7 @@ async function discoverOTviaLambda(
       return r;
     }).filter(Boolean) as Restaurant[];
   } catch (err: any) {
+    (globalThis as any).__otLambdaDebug = `error=${err?.message}`;
     console.log(`[OT Lambda discover] error: ${err?.message}`);
     return [];
   }
