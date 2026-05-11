@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v20c",
+      _v:                  "v20e",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -1468,10 +1468,22 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Non-native redirect with no bridge — drop regardless of any extracted times.
-    // (The /biz/ page has generic "reservation" language that fools extractTimes.)
+    // Non-native redirect (or Yelp og:url always resolves to /biz/) with no bridge found.
     if (!isYelpNative) {
-      console.log(`[verifyYelp] ${r.name}: non-native redirect + no bridge — skipping`);
+      // _topRated-only candidates didn't come from Yelp's reservation-filtered search.
+      // Without isYelpNative confirmation they're too likely to be false positives.
+      if ((r as any)._topRated) {
+        console.log(`[verifyYelp] ${r.name}: non-native + top-rated + no bridge — skipping`);
+        return null;
+      }
+      // Reservation-search candidates: Yelp included this in its own reservation index.
+      // Note: Yelp's og:url may always resolve to /biz/ even for truly native Yelp pages,
+      // causing false-negative native detection. Soft-verify so the user can click through.
+      if (md.length >= 200) {
+        console.log(`[verifyYelp] ${r.name}: non-native (resv-search, og:url=/biz/) — soft-verified`);
+        return { ...r, timeSlots: [], softVerified: true };
+      }
+      console.log(`[verifyYelp] ${r.name}: non-native + no bridge + thin content — skipping`);
       return null;
     }
 
@@ -1483,8 +1495,7 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       return null;
     }
 
-    // Top-rated-only results (not from reservation-filtered search) require isYelpNative
-    // to be confirmed — without that signal they're too likely to be false positives.
+    // Top-rated-only results (not from reservation-filtered search) require isYelpNative.
     if ((r as any)._topRated && !isYelpNative) {
       console.log(`[verifyYelp] ${r.name}: top-rated + non-native — skipping`);
       return null;
