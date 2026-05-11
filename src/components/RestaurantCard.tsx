@@ -66,7 +66,7 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
           {restaurant.rating != null && (
             <span className="flex items-center gap-0.5 text-primary shrink-0">
               <Star className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
-              <span className="text-sm font-body font-medium">{restaurant.rating}</span>
+              <span className="text-sm font-body font-medium">{Number(restaurant.rating).toFixed(1)}</span>
               {restaurant.reviewCount != null && (
                 <span className="text-xs text-muted-foreground font-body">
                   ({formatReviewCount(restaurant.reviewCount)})

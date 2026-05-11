@@ -193,7 +193,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v26c",
+      _v:                  "v26d",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1384,7 +1384,8 @@ async function verifyOne(
   r: Restaurant, params: SearchParams, fcKey: string,
   scraperUrl = "", scraperSecret = "", bbKey = "", bbProject = "",
 ): Promise<Restaurant | null> {
-  if (r._preVerified) return r; // already verified (or soft-verified) during discovery
+  if (r._preVerified && !r.softVerified) return r; // hard-verified during discovery — pass through
+  if (r._preVerified &&  r.softVerified) return null; // API confirmed venue exists but no slots in window
   if (r.platform === "resy")      return scraperUrl && scraperSecret
     ? verifyResyViaBB(r, params, scraperUrl, scraperSecret)
     : verifyResy(r, params, fcKey);
@@ -1399,9 +1400,20 @@ async function verifyOne(
         ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
         : verifyOT(r, params, fcKey);
   }
-  if (r.platform === "yelp")      return scraperUrl && scraperSecret
-    ? verifyYelpViaLambda(r, params, scraperUrl, scraperSecret)
-    : verifyYelp(r, params, fcKey);
+  if (r.platform === "yelp") {
+    // Run Firecrawl path (has OT/Resy bridge) and Lambda path (renders JS widget) in parallel.
+    // Lambda finds native Yelp slots; Firecrawl finds bridged OT/Resy rids on the page.
+    // Use whichever returns hard slots first.
+    const [lambdaResult, fcResult] = await Promise.all([
+      scraperUrl && scraperSecret
+        ? verifyYelpViaLambda(r, params, scraperUrl, scraperSecret)
+        : Promise.resolve(null),
+      verifyYelp(r, params, fcKey),
+    ]);
+    if (lambdaResult && lambdaResult.timeSlots.length > 0) return lambdaResult;
+    if (fcResult    && fcResult.timeSlots.length    > 0) return fcResult;
+    return null;
+  }
   return null;
 }
 
