@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v20e",
+      _v:                  "v20f",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -1408,6 +1408,18 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     const md: string = data.data?.markdown ?? "";
     if (md.length < 50) { console.log(`[verifyYelp] ${r.name}: short markdown (${md.length})`); return null; }
 
+    // Extract actual restaurant name from page og:title (slug-derived fallback names
+    // include Yelp city-disambiguation suffixes like "Fox Bros Bar B Q Atlanta").
+    const pageMetaTitle = (data.data?.metadata?.ogTitle ?? data.data?.metadata?.title ?? "") as string;
+    const pageName = pageMetaTitle.length > 1
+      ? pageMetaTitle
+          .replace(/\s*[|–-]\s*(Yelp|Make a Reservation|Reservations?|Reviews?|Photos?|Menu|Order Online).*$/i, "")
+          .replace(/\s*[-–]\s*[A-Za-z\s]+,\s*[A-Z]{2}.*$/i, "")
+          .trim()
+      : "";
+    // Use the page-scraped name if it's cleaner than the URL-slug fallback
+    const rr = pageName.length > 1 ? { ...r, name: pageName } : r;
+
     // Detect /reservations/ → /biz/ redirect: Yelp shows the restaurant in its
     // reservation search but the restaurant doesn't actually use Yelp reservations.
     // Firecrawl follows the redirect silently; ogUrl reveals the final landing URL.
@@ -1432,13 +1444,13 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
                 ?? md.match(/opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
     if (otRidM) {
       const rid      = otRidM[1];
-      const otResult = await tryOTWidgetScrape(r.name, rid, params, fcKey);
-      if (otResult) return otResult; // Hard OT result with time slots ✓
+      const otResult = await tryOTWidgetScrape(rr.name, rid, params, fcKey);
+      if (otResult) return { ...otResult, name: rr.name }; // Hard OT result with time slots ✓
       // Widget blocked by Akamai → emit soft-verified OT (shows "Check on OT" link)
       const profileUrl = `https://www.opentable.com/restaurant/profile/${rid}`;
-      console.log(`[verifyYelp] ${r.name}: OT rid=${rid} found but widget blocked → OT soft-verified`);
+      console.log(`[verifyYelp] ${rr.name}: OT rid=${rid} found but widget blocked → OT soft-verified`);
       return {
-        ...r,
+        ...rr,
         id:          `opentable-${rid}`,
         platform:    "opentable" as const,
         platformUrl: addOTParams(profileUrl, params),
@@ -1456,9 +1468,9 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     if (resyVenueM) {
       const resyBase = `https://resy.com/cities/${resyVenueM[1]}/venues/${resyVenueM[2]}`;
       const vSlug    = resyVenueM[2].toLowerCase();
-      console.log(`[verifyYelp] ${r.name}: Resy venue found → soft-verified Resy (${vSlug})`);
+      console.log(`[verifyYelp] ${rr.name}: Resy venue found → soft-verified Resy (${vSlug})`);
       return {
-        ...r,
+        ...rr,
         id:          `resy-${vSlug}`,
         platform:    "resy" as const,
         platformUrl: addResyParams(resyBase, params),
@@ -1473,17 +1485,17 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       // _topRated-only candidates didn't come from Yelp's reservation-filtered search.
       // Without isYelpNative confirmation they're too likely to be false positives.
       if ((r as any)._topRated) {
-        console.log(`[verifyYelp] ${r.name}: non-native + top-rated + no bridge — skipping`);
+        console.log(`[verifyYelp] ${rr.name}: non-native + top-rated + no bridge — skipping`);
         return null;
       }
       // Reservation-search candidates: Yelp included this in its own reservation index.
       // Note: Yelp's og:url may always resolve to /biz/ even for truly native Yelp pages,
       // causing false-negative native detection. Soft-verify so the user can click through.
       if (md.length >= 200) {
-        console.log(`[verifyYelp] ${r.name}: non-native (resv-search, og:url=/biz/) — soft-verified`);
-        return { ...r, timeSlots: [], softVerified: true };
+        console.log(`[verifyYelp] ${rr.name}: non-native (resv-search, og:url=/biz/) — soft-verified`);
+        return { ...rr, timeSlots: [], softVerified: true };
       }
-      console.log(`[verifyYelp] ${r.name}: non-native + no bridge + thin content — skipping`);
+      console.log(`[verifyYelp] ${rr.name}: non-native + no bridge + thin content — skipping`);
       return null;
     }
 
@@ -1491,13 +1503,13 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     // (Generic "Reserve on Resy" text without a venue link — not enough to act on.)
     const usesOtherPlatform = /\b(reserve\s+on\s+resy|book\s+on\s+resy|resy\.com|reserve\s+on\s+opentable|book\s+on\s+opentable)\b/i.test(md);
     if (usesOtherPlatform) {
-      console.log(`[verifyYelp] ${r.name}: redirects to Resy/OT (no extractable URL) — skipping`);
+      console.log(`[verifyYelp] ${rr.name}: redirects to Resy/OT (no extractable URL) — skipping`);
       return null;
     }
 
     // Top-rated-only results (not from reservation-filtered search) require isYelpNative.
     if ((r as any)._topRated && !isYelpNative) {
-      console.log(`[verifyYelp] ${r.name}: top-rated + non-native — skipping`);
+      console.log(`[verifyYelp] ${rr.name}: top-rated + non-native — skipping`);
       return null;
     }
 
@@ -1507,31 +1519,31 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     const reviewM  = md.match(/\(([\d,]+)\s*review/i);
     const priceM   = md.match(/(\$+)\s*(?:·|•|,|\s)/);
     const meta     = {
-      rating:      ratingM ? parseFloat(ratingM[1])                 : r.rating,
-      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
-      priceRange:  priceM  ? priceM[1]                              : r.priceRange,
+      rating:      ratingM ? parseFloat(ratingM[1])                 : rr.rating,
+      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : rr.reviewCount,
+      priceRange:  priceM  ? priceM[1]                              : rr.priceRange,
     };
-    const addr = r._address || extractAddress(md) || undefined;
+    const addr = rr._address || extractAddress(md) || undefined;
 
     if (windowed.length === 0) {
       // If the page redirected from /reservations/ to /biz/, this restaurant isn't
       // on Yelp natively — drop it (bridges above already had a chance to fire).
       if (!isYelpNative) {
-        console.log(`[verifyYelp] ${r.name}: non-native redirect + no slots — skipping`);
+        console.log(`[verifyYelp] ${rr.name}: non-native redirect + no slots — skipping`);
         return null;
       }
       // Soft-verify: the time-picker widget likely didn't render (JS-heavy), but the
       // restaurant was found via Yelp's own reservation search URL and doesn't redirect
       // to Resy/OT. Accept if there's any reservation-related language on the page.
       const hasAnyReservationHint = /\b(reservation|book\s+a\s+table|waitlist|party\s+of|guests?|dining|dine\s+in)\b/i.test(md);
-      if (!hasAnyReservationHint) { console.log(`[verifyYelp] ${r.name}: no reservation language — skipping`); return null; }
-      console.log(`[verifyYelp] ${r.name}: soft-verified (widget likely not rendered)`);
-      return { ...r, ...meta, timeSlots: [], softVerified: true, _address: addr };
+      if (!hasAnyReservationHint) { console.log(`[verifyYelp] ${rr.name}: no reservation language — skipping`); return null; }
+      console.log(`[verifyYelp] ${rr.name}: soft-verified (widget likely not rendered)`);
+      return { ...rr, ...meta, timeSlots: [], softVerified: true, _address: addr };
     }
-    const base          = r.platformUrl.split("?")[0];
+    const base          = rr.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
-    console.log(`[verifyYelp] ${r.name}: ${windowed.length} slots ✓`);
-    return { ...r, ...meta, timeSlots: slotsWithUrls, _address: addr };
+    console.log(`[verifyYelp] ${rr.name}: ${windowed.length} slots ✓`);
+    return { ...rr, ...meta, timeSlots: slotsWithUrls, _address: addr };
   } catch (err) {
     console.error(`[verifyYelp] ${r.name}:`, err);
     return null;
