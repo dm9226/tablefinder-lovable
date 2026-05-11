@@ -116,14 +116,14 @@ serve(async (req) => {
       SCRAPER_URL && SCRAPER_SECRET
         ? abortableDiscover(() => discoverResyViaBB(params, SCRAPER_URL, SCRAPER_SECRET), DISCOVER_MS)
         : Promise.resolve([] as Restaurant[]),
-      BB_KEY && BB_PROJECT
-        ? abortableDiscover(() => discoverOTViaBB(params, BB_KEY, BB_PROJECT), DISCOVER_MS)
-        : APIFY
-          ? abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS)
-          : SCRAPER_URL && SCRAPER_SECRET
-            // Lambda available: use Firecrawl Google search to find OT rids, then
-            // verify via widget canvas with real Chrome (no Akamai issue on canvas endpoint).
-            ? abortableDiscover(() => discoverOTviaWidgetCanvas(params, FIRECRAWL), DISCOVER_MS)
+      // Prioritise Lambda (widget canvas) over Browserbase — BB free tier is exhausted.
+      // Lambda + Firecrawl Google search finds OT rids; real Chrome hits the canvas endpoint.
+      SCRAPER_URL && SCRAPER_SECRET
+        ? abortableDiscover(() => discoverOTviaWidgetCanvas(params, FIRECRAWL), DISCOVER_MS)
+        : BB_KEY && BB_PROJECT
+          ? abortableDiscover(() => discoverOTViaBB(params, BB_KEY, BB_PROJECT), DISCOVER_MS)
+          : APIFY
+            ? abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS)
             : Promise.resolve([] as Restaurant[]),
       abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS),
     ]);
@@ -180,7 +180,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v21b",
+      _v:                  "v21c",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -594,7 +594,7 @@ async function discoverResyViaBB(
 
   try {
     const linksJson = await lambdaLoad(searchUrl, scraperUrl, scraperSecret, {
-      waitMs: 6000,
+      waitMs: 10000,  // Resy React SPA needs ~8-10s to fully hydrate venue list
       evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/venues/"]')).map(a=>a.href.split('?')[0]).filter(h=>/\\/cities\\/[^/]+\\/venues\\/[^/?#]+$/.test(h)))].slice(0,20))`,
     });
     const links: string[] = JSON.parse(linksJson || "[]");
@@ -1627,9 +1627,21 @@ async function verifyYelpViaLambda(
   r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant | null> {
   try {
+    // Use a targeted evalExpr to pull time slot text directly from Yelp's DOM.
+    // Yelp renders available times as buttons/spans — body.innerText misses them
+    // because they're inside components that don't surface in plain text order.
+    const yelpEvalExpr = `(function(){
+      // Try dedicated time-slot elements first
+      const timeEls = document.querySelectorAll('[data-testid*="time"], [class*="timeslot"], [class*="time-slot"], button[aria-label*="PM"], button[aria-label*="AM"]');
+      const fromEls = Array.from(timeEls).map(e => (e.textContent || e.getAttribute('aria-label') || '').trim()).filter(Boolean);
+      if (fromEls.length) return fromEls.join('\\n');
+      // Fallback: full innerText (extractTimes will parse it)
+      return document.body.innerText;
+    })()`;
     const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, {
-      waitMs:    8000,   // Yelp's reservation widget takes longer to hydrate
+      waitMs:    10000,  // Yelp's reservation widget needs ~8-10s to fully hydrate
       timeoutMs: 55_000,
+      evalExpr:  yelpEvalExpr,
     });
     if (!text || text.length < 100) {
       console.log(`[Yelp Lambda] ${r.name}: short content (${text?.length ?? 0})`);
