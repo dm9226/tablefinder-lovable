@@ -27,7 +27,7 @@ const APIFY_API  = "https://api.apify.com/v2";
 const PHOTON     = "https://photon.komoot.io/api";
 
 const GLOBAL_TIMEOUT  = 115_000;
-const DISCOVER_MS     =  20_000;  // per-platform discovery budget (direct scrape ~11s + fallback ~5s)
+const DISCOVER_MS     =  30_000;  // per-platform discovery budget (BB session spin-up needs ~15s headroom)
 const VERIFY_MS       =  35_000;  // per-platform verification budget (was 10s — key fix)
 const GEOCODE_MS      =  10_000;  // geocodeAndRank hard cap
 const ENRICH_MS       =  10_000;  // AI enrichment hard cap
@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17-resy-lambda-ot-browserbase",
+      _v:                  "v17b-bb-timeout-fix",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -722,8 +722,9 @@ async function discoverOTViaBB(
 
   try {
     const linksJson = await bbLoad(searchUrl, bbKey, bbProject, {
-      waitMs: 5000,
+      waitMs: 3000,
       useProxy: true,
+      timeoutMs: 28_000,
       evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/r/"],a[href*="/restaurant/profile/"]')).map(a=>a.href))].slice(0,20))`,
     });
     const links: string[] = JSON.parse(linksJson || "[]");
