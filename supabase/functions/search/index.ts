@@ -27,7 +27,7 @@ const APIFY_API  = "https://api.apify.com/v2";
 const PHOTON     = "https://photon.komoot.io/api";
 
 const GLOBAL_TIMEOUT  = 115_000;
-const DISCOVER_MS     =  30_000;  // per-platform discovery budget (BB session spin-up needs ~15s headroom)
+const DISCOVER_MS     =  38_000;  // per-platform discovery budget (Lambda cold start can take 15s + 15s scrape)
 const VERIFY_MS       =  50_000;  // per-platform verification budget (BB sessions need ~15s each)
 const GEOCODE_MS      =  10_000;  // geocodeAndRank hard cap
 const ENRICH_MS       =  10_000;  // AI enrichment hard cap
@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v18b",
+      _v:                  "v18c",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -732,7 +732,8 @@ async function discoverOTViaBB(
       evalExpr: `JSON.stringify((() => {
         // Check __NEXT_DATA__ keys so we know what's available (for debugging)
         const nd = document.getElementById('__NEXT_DATA__');
-        const ndKeys = nd ? Object.keys(JSON.parse(nd.textContent)?.props?.pageProps ?? {}) : [];
+        let ndKeys = [];
+        try { ndKeys = nd ? Object.keys(JSON.parse(nd.textContent)?.props?.pageProps ?? {}) : []; } catch(e) {}
         // Extract restaurant cards from DOM
         // Strategy: find the card-level container for each /r/ link (article, li, or
         // large div), then collect ALL time buttons within that container.
@@ -1787,7 +1788,7 @@ function filterWindow(slots: TimeSlot[], requestedTime: string): TimeSlot[] {
       if (m[3].toLowerCase() === "am" && h === 12) h = 0;
       return { slot: s, mins: h * 60 + mn };
     })
-    .filter(x => x && Math.abs(x.mins - reqMins) <= 120)
+    .filter(x => x && Math.abs(x.mins - reqMins) <= 90)
     .sort((a, b) => Math.abs(a!.mins - reqMins) - Math.abs(b!.mins - reqMins))
     .slice(0, 5)
     .sort((a, b) => a!.mins - b!.mins)
