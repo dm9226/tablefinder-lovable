@@ -27,11 +27,11 @@ const APIFY_API  = "https://api.apify.com/v2";
 const PHOTON     = "https://photon.komoot.io/api";
 
 const GLOBAL_TIMEOUT  = 115_000;
-const DISCOVER_MS     =  38_000;  // per-platform discovery budget (Lambda cold start can take 15s + 15s scrape)
-const VERIFY_MS       =  50_000;  // per-platform verification budget (BB sessions need ~15s each)
+const DISCOVER_MS     =  40_000;  // per-platform discovery budget (Lambda cold start ~15s + page ~8s)
+const VERIFY_MS       =  60_000;  // per-platform verification budget (Lambda needs ~25s cold start + render)
 const GEOCODE_MS      =  10_000;  // geocodeAndRank hard cap
 const ENRICH_MS       =  10_000;  // AI enrichment hard cap
-const VERIFY_CONCUR   =       3;  // concurrent scrapes per platform (3 platforms × 3 = 9 peak — safe rate limit)
+const VERIFY_CONCUR   =       3;  // concurrent scrapes per platform
 const VERIFY_MAX      =       8;  // max verified results per platform
 
 const CORS = {
@@ -120,7 +120,11 @@ serve(async (req) => {
         ? abortableDiscover(() => discoverOTViaBB(params, BB_KEY, BB_PROJECT), DISCOVER_MS)
         : APIFY
           ? abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS)
-          : Promise.resolve([] as Restaurant[]),
+          : SCRAPER_URL && SCRAPER_SECRET
+            // Lambda available: use Firecrawl Google search to find OT rids, then
+            // verify via widget canvas with real Chrome (no Akamai issue on canvas endpoint).
+            ? abortableDiscover(() => discoverOTviaWidgetCanvas(params, FIRECRAWL), DISCOVER_MS)
+            : Promise.resolve([] as Restaurant[]),
       abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS),
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
@@ -174,7 +178,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v20f",
+      _v:                  "v21",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -1133,8 +1137,12 @@ async function verifyOne(
     : verifyResy(r, params, fcKey);
   if (r.platform === "opentable") return bbKey && bbProject
     ? verifyOTViaBB(r, params, bbKey, bbProject)
-    : verifyOT(r, params, fcKey);
-  if (r.platform === "yelp")      return verifyYelp(r, params, fcKey);
+    : scraperUrl && scraperSecret
+      ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
+      : verifyOT(r, params, fcKey);
+  if (r.platform === "yelp")      return scraperUrl && scraperSecret
+    ? verifyYelpViaLambda(r, params, scraperUrl, scraperSecret)
+    : verifyYelp(r, params, fcKey);
   return null;
 }
 
@@ -1555,6 +1563,110 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
  * embedded on restaurant websites. May bypass Akamai's stricter datacenter IP
  * rules that block the main OpenTable restaurant pages.
  */
+// ─── OT LAMBDA VERIFICATION ───────────────────────────────────────────────────
+// The OT widget/reservation/canvas endpoint is designed for cross-origin embedding
+// on any restaurant website — including cloud-hosted ones. Akamai's rules for it
+// are much lighter than for the main opentable.com pages. Real Chrome (our Lambda)
+// renders the actual time-slot buttons that Firecrawl can't reach.
+
+async function verifyOTviaLambda(
+  r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
+): Promise<Restaurant | null> {
+  const rid = r._rid ?? extractRid(r.platformUrl);
+  if (!rid) { console.log(`[OT Lambda] ${r.name}: no rid — skip`); return null; }
+
+  const dt        = `${params.date}T${params.time}`;
+  const widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
+
+  try {
+    const text = await lambdaLoad(widgetUrl, scraperUrl, scraperSecret, {
+      waitMs:    5000,
+      timeoutMs: 55_000,
+    });
+    if (!text || text.length < 50) {
+      console.log(`[OT Lambda] ${r.name}: short content (${text?.length ?? 0})`);
+      return null;
+    }
+    if (/access denied|security check|enable javascript|are you a robot|just a moment/i.test(text)) {
+      console.log(`[OT Lambda] ${r.name}: Akamai blocked — soft-verified`);
+      return { ...r, timeSlots: [], softVerified: true };
+    }
+    const slots    = extractTimes(text);
+    const windowed = filterWindow(slots, params.time);
+    if (windowed.length === 0) {
+      if (text.length > 200) {
+        console.log(`[OT Lambda] ${r.name}: no slots in window — soft-verified`);
+        return { ...r, timeSlots: [], softVerified: true };
+      }
+      return null;
+    }
+    const base          = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
+    const ratingM = text.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM = text.match(/\(([\d,]+)\s*review/i);
+    console.log(`[OT Lambda] ${r.name}: ${windowed.length} slots ✓ (rid=${rid})`);
+    return {
+      ...r,
+      timeSlots:   slotsWithUrls,
+      rating:      ratingM ? parseFloat(ratingM[1])                 : r.rating,
+      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
+    };
+  } catch (err: any) {
+    console.log(`[OT Lambda] ${r.name}: ${err?.message}`);
+    return null;
+  }
+}
+
+// ─── YELP LAMBDA VERIFICATION ─────────────────────────────────────────────────
+// Real Chrome renders Yelp's JS reservation widget — Firecrawl cannot.
+// We also get the actual page title for clean restaurant names.
+
+async function verifyYelpViaLambda(
+  r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
+): Promise<Restaurant | null> {
+  try {
+    const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, {
+      waitMs:    8000,   // Yelp's reservation widget takes longer to hydrate
+      timeoutMs: 55_000,
+    });
+    if (!text || text.length < 100) {
+      console.log(`[Yelp Lambda] ${r.name}: short content (${text?.length ?? 0})`);
+      return null;
+    }
+
+    // Extract restaurant name from first non-empty line (innerText page title area)
+    const firstLine = text.split("\n").map(l => l.trim()).find(l => l.length > 2 && l.length < 100) ?? "";
+    const extractedName = firstLine.replace(/\s*[|–-]\s*(Yelp|Make a Reservation|Reservations?).*$/i, "").trim();
+    const name = extractedName.length > 1 ? extractedName : r.name;
+    const rr   = { ...r, name };
+
+    const slots    = extractTimes(text);
+    const windowed = filterWindow(slots, params.time);
+
+    if (windowed.length === 0) {
+      const hasContent = /restaurant|reservation|dining|cuisine|menu/i.test(text);
+      if (!hasContent) { console.log(`[Yelp Lambda] ${rr.name}: no restaurant content`); return null; }
+      console.log(`[Yelp Lambda] ${rr.name}: soft-verified (no slots extracted)`);
+      return { ...rr, timeSlots: [], softVerified: true };
+    }
+
+    const base          = rr.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
+    const ratingM = text.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM = text.match(/\(([\d,]+)\s*review/i);
+    console.log(`[Yelp Lambda] ${rr.name}: ${windowed.length} slots ✓`);
+    return {
+      ...rr,
+      timeSlots:   slotsWithUrls,
+      rating:      ratingM ? parseFloat(ratingM[1])                 : rr.rating,
+      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : rr.reviewCount,
+    };
+  } catch (err: any) {
+    console.log(`[Yelp Lambda] ${r.name}: ${err?.message}`);
+    return null;
+  }
+}
+
 async function tryOTWidgetScrape(
   name: string, rid: string, params: SearchParams, fcKey: string
 ): Promise<Restaurant | null> {
