@@ -113,11 +113,12 @@ serve(async (req) => {
     // real browser (CDP). Otherwise: Resy = 0 (SPA blocks bots), OT = Apify if
     // configured else 0 (Akamai blocks bots), Yelp = always via Firecrawl.
     const [resyCands, otCands, yelpCands] = await Promise.all([
-      SCRAPER_URL && SCRAPER_SECRET
-        ? abortableDiscover(() => discoverResyViaBB(params, SCRAPER_URL, SCRAPER_SECRET), DISCOVER_MS)
-        : Promise.resolve([] as Restaurant[]),
-      // Prioritise Lambda (widget canvas) over Browserbase — BB free tier is exhausted.
-      // Lambda + Firecrawl Google search finds OT rids; real Chrome hits the canvas endpoint.
+      // Resy discovery: use Firecrawl (IP rotation prevents rate-limiting).
+      // Lambda same-IP warm reuse causes Resy to block repeat discovery requests.
+      // Lambda is still used for verification (different URLs each time, harder to block).
+      abortableDiscover(() => discoverResy(params, FIRECRAWL), DISCOVER_MS),
+      // OT: Firecrawl Google search to discover restaurants, Lambda to verify.
+      // BB free tier exhausted; APIFY not configured. Fall back to widget canvas / direct page.
       SCRAPER_URL && SCRAPER_SECRET
         ? abortableDiscover(() => discoverOTviaWidgetCanvas(params, FIRECRAWL), DISCOVER_MS)
         : BB_KEY && BB_PROJECT
@@ -180,7 +181,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v21c",
+      _v:                  "v21d",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -1575,13 +1576,18 @@ async function verifyOTviaLambda(
   r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant | null> {
   const rid = r._rid ?? extractRid(r.platformUrl);
-  if (!rid) { console.log(`[OT Lambda] ${r.name}: no rid — skip`); return null; }
 
+  // Prefer widget canvas (rid required, lighter Akamai). Fall back to the /r/ page
+  // directly — individual restaurant pages are less protected than search results.
   const dt        = `${params.date}T${params.time}`;
-  const widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
+  const urlToLoad = rid
+    ? `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`
+    : r.platformUrl;  // /r/restaurant-slug — try directly with real Chrome
+
+  console.log(`[OT Lambda] ${r.name}: loading ${rid ? `widget (rid=${rid})` : "direct /r/ page"}`);
 
   try {
-    const text = await lambdaLoad(widgetUrl, scraperUrl, scraperSecret, {
+    const text = await lambdaLoad(urlToLoad, scraperUrl, scraperSecret, {
       waitMs:    5000,
       timeoutMs: 55_000,
     });
