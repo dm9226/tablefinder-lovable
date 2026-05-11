@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v20",
+      _v:                  "v20b",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -765,7 +765,8 @@ async function discoverOTViaBB(
       })())`,
     });
     const parsed = JSON.parse(raw || "{}");
-    (globalThis as any).__otVerifyDebug = `type=${parsed.type}|ndKeys=${JSON.stringify(parsed.ndKeys??[])}|cards=${parsed.cards?.length??0}|first=${JSON.stringify(parsed.cards?.[0]??null)}`;
+    // Always set debug so we can diagnose — even if type is missing
+    (globalThis as any).__otVerifyDebug = `raw_len=${raw.length}|type=${parsed.type}|cards=${parsed.cards?.length??0}|first=${JSON.stringify(parsed.cards?.[0]??null)}`;
 
     let restaurants: Restaurant[] = [];
 
@@ -867,7 +868,7 @@ async function discoverYelp(params: SearchParams, fcKey: string): Promise<Restau
         method: "POST",
         headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
         signal: ctrl.signal,
-        body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: false, waitFor: 3500, timeout: 10000 }),
+        body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: false, waitFor: 6000, timeout: 15000 }),
       });
       clearTimeout(timer);
       if (!resp.ok) { console.log(`[Yelp ${label}] HTTP ${resp.status}`); return []; }
@@ -1396,14 +1397,14 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       body: JSON.stringify({
         url: r.platformUrl, formats: ["markdown"],
         onlyMainContent: true,
-        waitFor: 3000,  // Yelp JS widget is slow — 2000ms was sometimes too short
-        timeout: 10000,
+        waitFor: 5000,  // Yelp /reservations/ pages are heavily JS-rendered
+        timeout: 15000,
       }),
     });
     if (!resp.ok) { console.log(`[verifyYelp] ${r.name}: HTTP ${resp.status}`); return null; }
     const data = await resp.json();
     const md: string = data.data?.markdown ?? "";
-    if (md.length < 100) { console.log(`[verifyYelp] ${r.name}: short markdown (${md.length})`); return null; }
+    if (md.length < 50) { console.log(`[verifyYelp] ${r.name}: short markdown (${md.length})`); return null; }
 
     // Detect /reservations/ → /biz/ redirect: Yelp shows the restaurant in its
     // reservation search but the restaurant doesn't actually use Yelp reservations.
