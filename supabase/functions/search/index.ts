@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v29
+// TableFinder Search Edge Function — v30
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -186,7 +186,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v29",
+      _v:                  "v30",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -194,6 +194,8 @@ serve(async (req) => {
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
         resy_api:        (globalThis as any).__resyApiDebug    ?? null,
         ot_lambda:       (globalThis as any).__otLambdaDebug   ?? null,
+        ot_api:          (globalThis as any).__otApiDebug      ?? null,
+        ot_discovery:    (globalThis as any).__otDiscoveryDebug ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug  ?? null,
         yelp_api:        (globalThis as any).__yelpApiDebug    ?? null,
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug ?? null,
@@ -876,6 +878,61 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
+  // ── Approach 0: OT's internal dapi / restref search JSON APIs ────────────────
+  // These are the same cross-origin-friendly endpoints the booking widget uses.
+  // Unlike the main site HTML pages, they are NOT behind Akamai bot-protection.
+  // Try several candidate endpoint shapes since OT's internal API isn't documented.
+  const otApiHeaders = {
+    "Accept":          "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Referer":         "https://www.opentable.com/",
+    "X-Requested-With":"XMLHttpRequest",
+  };
+  const metroQ  = encodeURIComponent(`${city}${state}`);
+  const apiCandidates: string[] = [
+    // OT dapi search endpoint (used by SPA frontend — may or may not have Akamai)
+    `https://www.opentable.com/dapi/fee/search/available?covers=${params.partySize}&dateTime=${encodeURIComponent(`${params.date}T${params.time}`)}&lang=en-US&sortBy=Match&term=${metroQ}&pageSize=20`,
+    // restref without rid — might return restaurant list
+    `https://www.opentable.com/restref/api/availability?metro=${metroQ}&covers=${params.partySize}&day=${params.date}&lang=en-US&ref=5`,
+  ];
+  if (params.lat != null && params.lng != null) {
+    apiCandidates.push(
+      `https://www.opentable.com/dapi/fee/search/available?covers=${params.partySize}&dateTime=${encodeURIComponent(`${params.date}T${params.time}`)}&lang=en-US&sortBy=Relevance&latitude=${params.lat}&longitude=${params.lng}&radius=8&pageSize=20`,
+    );
+  }
+  for (const apiUrl of apiCandidates) {
+    try {
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 7_000);
+      const resp  = await fetch(apiUrl, { headers: otApiHeaders, signal: ctrl.signal });
+      clearTimeout(timer);
+      const statusLine = `HTTP ${resp.status} url=${apiUrl.slice(0, 80)}`;
+      if (!resp.ok) { console.log(`[OT API] ${statusLine}`); continue; }
+      const raw  = await resp.json();
+      const text = JSON.stringify(raw).slice(0, 300);
+      console.log(`[OT API] ${statusLine} body=${text}`);
+      (globalThis as any).__otApiDebug = `${statusLine} body=${text}`;
+      // Parse known response shapes
+      const items: any[] = raw.RestaurantAvailability ?? raw.restaurants ?? raw.items
+        ?? raw.data?.restaurants ?? raw.results ?? [];
+      if (items.length === 0) continue;
+      const cands = items.flatMap((item: any) => {
+        const rid  = item.RestaurantId ?? item.restaurantId ?? item.Id ?? item.id ?? item.rid;
+        const name = item.Name ?? item.restaurantName ?? item.name ?? "";
+        const slug = item.UrlSlug ?? item.urlSlug ?? item.slug
+          ?? name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        if (!rid && !slug) return [];
+        const url  = rid ? `https://www.opentable.com/r/${slug}?rid=${rid}` : `https://www.opentable.com/r/${slug}`;
+        return normToOT({ url, title: name, description: "" }, params) ?? [];
+      });
+      console.log(`[OT API] ${cands.length} candidates from API`);
+      if (cands.length > 0) return cands;
+    } catch (err: any) {
+      console.log(`[OT API] error: ${err?.message}`);
+    }
+  }
+
   // ── Approach 1: Scrape OT city listing page ─────────────────────────────────
   // opentable.com/{city}-restaurant-reservations is a static SEO page.
   // Akamai usually blocks this, so timeout is short (5s) to fail fast.
@@ -1001,7 +1058,9 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   for (const c of candidates) {
     if (c._rid) c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
   }
-  console.log(`[OT discovery] ${candidates.length} total (direct=${directItems.length} scrape=${scrapeItems.length} rids=${candidates.filter(c=>c._rid).length})`);
+  const dbg = `direct=${directItems.length} scrape=${scrapeItems.length} total=${candidates.length} rids=${candidates.filter(c=>c._rid).length}`;
+  console.log(`[OT discovery] ${dbg}`);
+  (globalThis as any).__otDiscoveryDebug = dbg;
   return candidates;
 }
 
