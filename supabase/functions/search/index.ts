@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v17
+// TableFinder Search Edge Function — v22
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -113,19 +113,28 @@ serve(async (req) => {
     // real browser (CDP). Otherwise: Resy = 0 (SPA blocks bots), OT = Apify if
     // configured else 0 (Akamai blocks bots), Yelp = always via Firecrawl.
     const [resyCands, otCands, yelpCands] = await Promise.all([
-      // Resy discovery: use Firecrawl (IP rotation prevents rate-limiting).
-      // Lambda same-IP warm reuse causes Resy to block repeat discovery requests.
-      // Lambda is still used for verification (different URLs each time, harder to block).
-      abortableDiscover(() => discoverResy(params, FIRECRAWL), DISCOVER_MS),
-      // OT: Firecrawl Google search to discover restaurants, Lambda to verify.
-      // BB free tier exhausted; APIFY not configured. Fall back to widget canvas / direct page.
+      // Resy: Try the public JSON API first (api.resy.com/4/find) — returns pre-verified
+      // venues with real time slots in one HTTP call, no SPA scraping needed.
+      // Falls back to Firecrawl Google search if the API returns 0 results.
+      abortableDiscover(async () => {
+        const apiResults = await discoverResyViaAPI(params);
+        if (apiResults.length > 0) {
+          console.log(`[Resy] API returned ${apiResults.length} pre-verified venues`);
+          return apiResults;
+        }
+        console.log("[Resy] API returned 0 — falling back to Firecrawl");
+        return discoverResy(params, FIRECRAWL);
+      }, DISCOVER_MS),
+      // OT: Lambda real-browser discovery when available (Akamai blocks Firecrawl).
+      // Lambda loads the OT search page with real Chrome and extracts restaurant cards.
+      // Falls back to BB, Apify, or widget canvas in degraded mode.
       SCRAPER_URL && SCRAPER_SECRET
-        ? abortableDiscover(() => discoverOTviaWidgetCanvas(params, FIRECRAWL), DISCOVER_MS)
+        ? abortableDiscover(() => discoverOTviaLambda(params, SCRAPER_URL, SCRAPER_SECRET), DISCOVER_MS)
         : BB_KEY && BB_PROJECT
           ? abortableDiscover(() => discoverOTViaBB(params, BB_KEY, BB_PROJECT), DISCOVER_MS)
           : APIFY
             ? abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS)
-            : Promise.resolve([] as Restaurant[]),
+            : abortableDiscover(() => discoverOTviaWidgetCanvas(params, FIRECRAWL), DISCOVER_MS),
       abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS),
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
@@ -181,7 +190,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v21d",
+      _v:                  "v22",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -477,6 +486,103 @@ async function bbLoad(
 // Resy does NOT use Akamai, so Firecrawl can access it freely.
 // FALLBACK: Google-based site: search if the direct scrape yields < 3 venues.
 
+// ─── RESY JSON API DISCOVERY ─────────────────────────────────────────────────
+// Resy exposes a public venue-search API that powers their mobile app.
+// It returns venues WITH availability for the requested date/party_size in one
+// JSON response — no SPA scraping, no rate-limit exposure, pre-verified slots.
+// Public API key is the same key embedded in Resy's own web bundle.
+async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
+  const slug  = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
+  const metro = RESY_METROS.find(m => m.slug === slug);
+  const lat   = params.lat  ?? metro?.lat;
+  const lng   = params.lng  ?? metro?.lng;
+  if (lat == null || lng == null) {
+    console.log(`[Resy API] no coordinates for "${params.city}"`);
+    return [];
+  }
+
+  try {
+    const cuiQ = params.cuisine
+      ? `&cuisine=${encodeURIComponent(params.cuisine.toLowerCase().replace(/\s+/g, "-"))}`
+      : "";
+    const url = `https://api.resy.com/4/find?lat=${lat}&long=${lng}&day=${params.date}&party_size=${params.partySize}&per_page=20&sort_by=availability&order_by=asc${cuiQ}`;
+    const resp = await fetch(url, {
+      headers: {
+        "Authorization":   'ResyAPI api_key="VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"',
+        "X-Origin":        "https://resy.com",
+        "Origin":          "https://resy.com",
+        "Referer":         "https://resy.com/",
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!resp.ok) { console.log(`[Resy API] HTTP ${resp.status}`); return []; }
+    const data = await resp.json();
+    const venues: any[] = data?.results?.venues ?? [];
+    console.log(`[Resy API] ${venues.length} venues with availability`);
+
+    return venues.flatMap((v: any) => {
+      const venue = v.venue ?? {};
+      const name  = (venue.name ?? "").trim();
+      if (!name) return [];
+
+      // Derive the venue slug from contact.url (may be a full URL or just a slug)
+      const contactUrl: string = venue.contact?.url ?? "";
+      let venueSlug: string;
+      const urlM = contactUrl.match(/\/venues\/([^/?#]+)/);
+      if (urlM) {
+        venueSlug = urlM[1];
+      } else if (contactUrl && !contactUrl.startsWith("http")) {
+        venueSlug = contactUrl.split("/").pop() ?? "";
+      } else {
+        venueSlug = slugify(name);
+      }
+      if (!venueSlug || RESY_SKIP.has(venueSlug.toLowerCase())) return [];
+
+      const base       = `https://resy.com/cities/${slug}/venues/${venueSlug}`;
+      const bookingUrl = addResyParams(base, params);
+
+      // Convert API slots to TimeSlot[] filtered to the requested time window
+      const allSlots: TimeSlot[] = (v.slots ?? []).flatMap((s: any) => {
+        const startStr = (s.date?.start ?? "") as string;  // "2026-05-14 19:00:00"
+        if (!startStr) return [];
+        const timePart = startStr.split(" ")[1]?.substring(0, 5);  // "19:00"
+        if (!timePart) return [];
+        const [hh, mm] = timePart.split(":").map(Number);
+        const ampm = hh >= 12 ? "PM" : "AM";
+        const h12  = hh % 12 || 12;
+        const disp = `${h12}:${mm.toString().padStart(2, "0")} ${ampm}`;
+        return [{ time: disp, url: buildSlotUrl("resy", base, params, disp) }];
+      });
+      const windowed = filterWindow(allSlots, params.time);
+      if (windowed.length === 0) return [];  // no slots in the ±90-min window
+
+      return [{
+        id:           `resy-${venueSlug.toLowerCase()}`,
+        name,
+        cuisine:      venue.cuisines?.[0] ?? params.cuisine || "Restaurant",
+        neighborhood: venue.location?.neighborhood ?? "",
+        rating:       typeof venue.rating?.average === "number" ? venue.rating.average : undefined,
+        reviewCount:  typeof venue.rating?.count   === "number" ? venue.rating.count   : undefined,
+        priceRange:   typeof venue.price_range_id  === "number"
+          ? "$".repeat(Math.min(4, venue.price_range_id))
+          : undefined,
+        platform:     "resy"    as const,
+        platformUrl:  bookingUrl,
+        timeSlots:    windowed,
+        distanceMiles: null,
+        _preVerified:  true,
+        _slug:         venueSlug.toLowerCase(),
+      } as Restaurant];
+    });
+  } catch (err: any) {
+    console.log(`[Resy API] error: ${err?.message}`);
+    return [];
+  }
+}
+
 async function discoverResy(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
   const slug   = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
   const metro  = resyCityName(params.city, params.state, params.lat, params.lng);
@@ -622,6 +728,96 @@ async function discoverOpenTable(params: SearchParams, fcKey: string, apifyToken
   // Discovery via Google search (no Akamai issue), verification via widget canvas.
   console.log("[OT] no Apify — trying widget canvas bypass");
   return discoverOTviaWidgetCanvas(params, fcKey);
+}
+
+// ─── OT LAMBDA DISCOVERY ─────────────────────────────────────────────────────
+// Loads the OpenTable search results page with a real headless Chrome browser
+// (AWS Lambda). Akamai blocks datacenter HTTP requests to OT, but a real browser
+// with proper fingerprinting bypasses the JS challenge tier used on search pages.
+// The evalExpr extracts restaurant cards including URL, name, and time slots in
+// a single DOM pass — cards with slots are pre-verified, others soft-verified.
+async function discoverOTviaLambda(
+  params: SearchParams, scraperUrl: string, scraperSecret: string,
+): Promise<Restaurant[]> {
+  const domain = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
+  const dt     = `${params.date}T${params.time}`;
+  const cityQ  = encodeURIComponent(`${params.city}${params.state ? `, ${params.state}` : ""}`);
+  const cuiQ   = params.cuisine ? `&term=${encodeURIComponent(params.cuisine)}` : "";
+  const searchUrl = `https://www.${domain}/s/?covers=${params.partySize}&dateTime=${dt}&term=${cityQ}${cuiQ}`;
+
+  try {
+    const raw = await lambdaLoad(searchUrl, scraperUrl, scraperSecret, {
+      waitMs:    7000,   // OT search page needs ~5-7s to fully render after Akamai challenge
+      timeoutMs: 55_000,
+      evalExpr: `JSON.stringify((() => {
+        const seen = new Set();
+        const links = Array.from(document.querySelectorAll('a[href*="/r/"]'))
+          .map(a => ({el:a, url:a.href.split('?')[0].split('#')[0]}))
+          .filter(({url}) => /opentable\\.(com|co\\.uk)\\/r\\/[^/]+$/.test(url))
+          .filter(({url}) => { if(seen.has(url)) return false; seen.add(url); return true; })
+          .slice(0, 20);
+        return links.map(({el, url}) => {
+          const card = el.closest('[data-test*="restaurant"]') ||
+                       el.closest('[data-test*="result"]') ||
+                       el.closest('article') || el.closest('li') ||
+                       el.closest('[class*="result"]') || el.closest('[class*="Result"]') ||
+                       el.closest('[class*="card"]')   || el.closest('[class*="Card"]') ||
+                       (() => {
+                         let c = el.parentElement;
+                         for(let i=0; i<20 && c && c.tagName!=='BODY'; i++) {
+                           if(c.clientHeight >= 120) return c;
+                           c = c.parentElement;
+                         }
+                         return el.parentElement;
+                       })();
+          const text  = card ? (card.innerText || '') : '';
+          const times = [...new Set(
+            [...text.matchAll(/\\b(\\d{1,2}:\\d{2}\\s*(?:AM|PM))\\b/gi)].map(m=>m[1].trim())
+          )].slice(0, 8);
+          const h    = card?.querySelector('h1,h2,h3,[data-test*="name"]');
+          const name = (h?.textContent || el.textContent || '').trim().replace(/\\s+/g,' ').substring(0,80);
+          // Extract rid from data attributes or nearby links
+          const ridEl = card?.querySelector('[data-restaurant-id],[data-rid]');
+          const rid   = ridEl?.getAttribute('data-restaurant-id') || ridEl?.getAttribute('data-rid') || '';
+          return {url, name, times, rid};
+        });
+      })())`,
+    });
+
+    let cards: { url: string; name: string; times: string[]; rid: string }[] = [];
+    try { cards = JSON.parse(raw || "[]"); } catch { /* empty */ }
+
+    if (!cards.length) {
+      // Check if Akamai blocked or page returned challenge text
+      const lc = raw.toLowerCase();
+      if (/access denied|security check|enable javascript|are you a robot|just a moment/i.test(lc)) {
+        console.log("[OT Lambda discover] Akamai blocked search page — 0 results");
+      } else {
+        console.log(`[OT Lambda discover] 0 cards (page len=${raw.length})`);
+      }
+      return [];
+    }
+
+    console.log(`[OT Lambda discover] ${cards.length} cards, ${cards.filter(c=>c.times.length>0).length} with slots`);
+    return cards.map(card => {
+      const r = normToOT({ url: card.url, title: card.name, description: "" }, params);
+      if (!r) return null;
+      // Override _rid if we extracted it from data attributes
+      if (card.rid) r._rid = card.rid;
+      if (card.times.length > 0) {
+        const base = card.url.split("?")[0];
+        r.timeSlots    = card.times.map(t => ({ time: t, url: buildSlotUrl("opentable", base, params, t) }));
+        r._preVerified = true;
+      } else {
+        r.softVerified = true;
+        r._preVerified = true;
+      }
+      return r;
+    }).filter(Boolean) as Restaurant[];
+  } catch (err: any) {
+    console.log(`[OT Lambda discover] error: ${err?.message}`);
+    return [];
+  }
 }
 
 async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
