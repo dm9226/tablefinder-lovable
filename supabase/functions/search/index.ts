@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v26
+// TableFinder Search Edge Function — v27
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -31,8 +31,8 @@ const DISCOVER_MS     =  38_000;  // per-platform discovery budget
 const VERIFY_MS       =  25_000;  // per-platform verification budget (warm Lambda: 7-10s per call)
 const GEOCODE_MS      =  10_000;  // geocodeAndRank hard cap
 const ENRICH_MS       =  10_000;  // AI enrichment hard cap
-const VERIFY_CONCUR   =       6;  // verify all candidates in one parallel batch (not sequential rounds)
-const VERIFY_MAX      =       6;  // max verified results per platform
+const VERIFY_CONCUR   =      12;  // verify candidates in parallel batches
+const VERIFY_MAX      =      20;  // max verified results per platform
 
 const CORS = {
   "Access-Control-Allow-Origin":  "*",
@@ -144,8 +144,8 @@ serve(async (req) => {
     // Resy/OT are pre-verified by discovery (API + Lambda DOM extracts slots directly).
     // Yelp: Firecrawl verification gives soft-verified results — better than Lambda cold starts
     // (which time out and return 0). Warm Lambda only helps if already hot from another call.
-    const resySlice = resyCands.slice(0, 6);
-    const otSlice   = otCands.slice(0, 6);
+    const resySlice = resyCands.slice(0, 20);  // API pre-verifies — no scraping cost per restaurant
+    const otSlice   = otCands.slice(0, 12);   // restref API is fast (~1s each)
     const yelpSlice = yelpCands.slice(0, 6);
 
     // ── Verification ──────────────────────────────────────────────────────────
@@ -195,7 +195,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v26f",
+      _v:                  "v27",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -885,22 +885,21 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
-  // inurl: reliably targets pages whose URL contains the /r/ or /restaurant/profile/
-  // path. site: with a path prefix is unreliable in Firecrawl's Google search API;
-  // both site: and path-prefix queries return 0 usable results in practice.
-  // site: without path prefix is far more reliable than inurl: or site: with path
-  // (same fix that unlocked Resy Google discovery)
+  // OT restaurant pages come in two formats:
+  //   /r/{slug}                  — readable slug; extractRid returns null (no rid in URL)
+  //   /restaurant/profile/{rid}  — numeric rid in URL; extractRid gets it directly
+  // Targeting /restaurant/profile/ pages gives us rids, which unlocks verifyOTviaRestref
+  // (the fast cross-origin JSON API that bypasses Akamai entirely).
+  // Quoting the path fragment in the Google query constrains results to those URL types.
   const queries = [
-    `site:${domain} ${city}${state}${cuisine} restaurant reservation`,
-    `site:${domain} ${city}${state} dinner restaurant reservation`,
+    `"opentable.com/restaurant/profile/" ${city}${state}${cuisine} restaurant reservation`,
+    `"opentable.com/restaurant/profile/" ${city}${state} dinner restaurant`,
   ];
 
-  const results = await firecrawlSearch(queries, fcKey, 10);
+  const results    = await firecrawlSearch(queries, fcKey, 10);
   const candidates = results.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
 
   // For each candidate with a rid, add the widget canvas URL for verification.
-  // The widget canvas endpoint must be cross-origin accessible (it's embedded on
-  // restaurant websites worldwide) and typically has lighter Akamai protection.
   for (const c of candidates) {
     if (c._rid) {
       const dt = `${params.date}T${params.time}`;
