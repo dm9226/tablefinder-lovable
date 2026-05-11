@@ -186,7 +186,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v31",
+      _v:                  "v32",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -196,8 +196,9 @@ serve(async (req) => {
         ot_lambda:       (globalThis as any).__otLambdaDebug   ?? null,
         ot_api:          (globalThis as any).__otApiDebug      ?? null,
         ot_discovery:    (globalThis as any).__otDiscoveryDebug ?? null,
-        ot_restref:      (globalThis as any).__otRestrefDebug  ?? null,
-        yelp_api:        (globalThis as any).__yelpApiDebug    ?? null,
+        ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
+        ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
+        yelp_api:        (globalThis as any).__yelpApiDebug      ?? null,
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug ?? null,
       },
     });
@@ -879,18 +880,39 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
   // ── Approach 1: Google search → OT restaurant pages directly ────────────────
-  // inurl: returns pages whose URLs contain the string — better than site: for
-  // subdirectory filtering.  item.url IS the OT page; no snippet parsing needed.
+  // "opentable.com/r" as a quoted phrase lets Google match pages that contain or
+  // ARE the OT restaurant URL — better than inurl: which Firecrawl returns 0 for.
+  // Also scans title/snippet text for OT slugs (Google often shows OT URLs in
+  // snippets even when the indexed page is a restaurant's own website).
   const directP = (async () => {
     const directQueries = [
-      `inurl:opentable.com/r/ ${city}${state}${cuisine} restaurant`,
-      `inurl:opentable.com/r/ ${city}${state} restaurant dinner`,
+      `"opentable.com/r" ${city}${state}${cuisine} restaurant reservation`,
+      `"opentable.com/r" ${city}${state} restaurant dinner reservation`,
     ];
-    const directRaw   = await firecrawlSearch(directQueries, fcKey, 12);
-    const directItems = directRaw
-      .filter(r => /opentable\.(?:com|co\.uk)\/(r\/|restaurant\/profile\/)/i.test(r.url ?? ""))
-      .map(r => normToOT(r, params))
-      .filter(Boolean) as Restaurant[];
+    const directRaw  = await firecrawlSearch(directQueries, fcKey, 12);
+    const directSeen = new Set<string>();
+    const directItems: Restaurant[] = [];
+    for (const item of directRaw) {
+      // Direct URL hit — the result page is itself an OT restaurant page
+      if (/opentable\.(?:com|co\.uk)\/(r\/|restaurant\/profile\/)/i.test(item.url ?? "")) {
+        const r = normToOT(item, params);
+        if (r && !directSeen.has(r.id)) { directSeen.add(r.id); directItems.push(r); }
+      }
+      // Also scan title + snippet text for OT restaurant slugs
+      // (Google returns restaurant websites whose snippets mention "Book on opentable.com/r/...")
+      const txt     = `${item.url ?? ""} ${item.title ?? ""} ${item.description ?? ""}`;
+      const slugRe  = /opentable\.(?:com|co\.uk)\/r\/([^/\s"'&?#,()<>\]]+)/gi;
+      let m;
+      while ((m = slugRe.exec(txt)) !== null) {
+        // Skip if the result URL itself is OT (already handled above)
+        if (/opentable\.(?:com|co\.uk)\/(r\/|restaurant\/profile\/)/i.test(item.url ?? "")) continue;
+        const slug  = m[1].replace(/[.,;:)>\]]+$/, "");
+        const u     = `https://www.opentable.com/r/${slug}`;
+        const synth = { url: u, title: item.title ?? "", description: "" };
+        const r     = normToOT(synth, params);
+        if (r && !directSeen.has(r.id)) { directSeen.add(r.id); directItems.push(r); }
+      }
+    }
     console.log(`[OT direct] ${directRaw.length} raw → ${directItems.length} OT URLs`);
     (globalThis as any).__otApiDebug = `direct_raw=${directRaw.length} direct_ot=${directItems.length}`;
     return directItems;
@@ -1858,7 +1880,7 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       method: "POST",
       headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        url: r.platformUrl, formats: ["markdown"],
+        url: r.platformUrl, formats: ["markdown", "rawHtml"],
         onlyMainContent: false,
         waitFor: 5000,  // Yelp /reservations/ pages are heavily JS-rendered
         timeout: 15000,
@@ -1866,7 +1888,8 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     });
     if (!resp.ok) { console.log(`[verifyYelp] ${r.name}: HTTP ${resp.status}`); return null; }
     const data = await resp.json();
-    const md: string = data.data?.markdown ?? "";
+    const md: string   = data.data?.markdown ?? "";
+    const html: string = data.data?.rawHtml ?? "";
     if (md.length < 50) { console.log(`[verifyYelp] ${r.name}: short markdown (${md.length})`); return null; }
 
     // Extract actual restaurant name from page og:title (slug-derived fallback names
@@ -1901,8 +1924,13 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     // rid. Try the OT widget canvas first (hard result with slots). If Akamai
     // blocks it, return a soft-verified OT result rather than dropping entirely —
     // the rid is definitive proof this restaurant is on OpenTable.
-    const otRidM = md.match(/opentable\.(?:com|co\.uk)[^\s"'<>]*[?&]rid=(\d+)/i)
-                ?? md.match(/opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
+    // Search both markdown (for visible links) and rawHtml (for widget script/iframe src
+    // attributes like <script src="//www.opentable.com/widget/...?rid=12345"> which are
+    // invisible in markdown format but present in the raw page source).
+    const otRidRe1 = /opentable\.(?:com|co\.uk)[^\s"'<>]*[?&\/]rid[=\/](\d+)/i;
+    const otRidRe2 = /opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i;
+    const otRidM = md.match(otRidRe1) ?? md.match(otRidRe2)
+                ?? html.match(otRidRe1) ?? html.match(otRidRe2);
     if (otRidM) {
       const rid        = otRidM[1];
       const profileUrl = `https://www.opentable.com/restaurant/profile/${rid}`;
@@ -1914,7 +1942,11 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       };
       // Try restref API first (no Akamai), then fall back to widget scrape
       const restrefResult = await verifyOTviaRestref(mockR, params);
-      if (restrefResult) { console.log(`[verifyYelp OT bridge] ${rr.name}: restref ✓`); return { ...restrefResult, name: rr.name }; }
+      if (restrefResult) {
+        console.log(`[verifyYelp OT bridge] ${rr.name}: restref ✓ (rid=${rid})`);
+        (globalThis as any).__yelpOTBridgeDebug = ((globalThis as any).__yelpOTBridgeDebug ?? "") + `${rr.name}(rid=${rid}) `;
+        return { ...restrefResult, name: rr.name };
+      }
       const otResult = await tryOTWidgetScrape(rr.name, rid, params, fcKey);
       if (otResult) return { ...otResult, name: rr.name }; // Hard OT result with time slots ✓
       // Both blocked → emit soft-verified OT (shows "Check on OT" link)
