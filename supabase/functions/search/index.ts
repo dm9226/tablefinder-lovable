@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17b-bb-timeout-fix",
+      _v:                  "v17c-bb-error-logging",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -372,7 +372,10 @@ async function bbLoad(
       ...(useProxy ? { proxies: [{ type: "browserbase" }] } : {}),
     }),
   });
-  if (!sessResp.ok) throw new Error(`BB create session: ${sessResp.status}`);
+  if (!sessResp.ok) {
+    const errText = await sessResp.text();
+    throw new Error(`BB create session: ${sessResp.status} — ${errText.substring(0, 200)}`);
+  }
   const { id: sessionId } = await sessResp.json();
 
   // Step 2: CDP over WebSocket
@@ -731,7 +734,7 @@ async function discoverOTViaBB(
     console.log(`[OT BB] ${links.length} restaurants discovered`);
     return links.map(u => normToOT({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
   } catch (err: any) {
-    console.log(`[OT BB] discovery error: ${err?.message}`);
+    console.log(`[OT BB] discovery error: ${err?.message ?? err}`);
     return [];
   }
 }
