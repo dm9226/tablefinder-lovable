@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v23
+// TableFinder Search Edge Function — v24
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -139,20 +139,19 @@ serve(async (req) => {
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
 
-    // Keep candidate pool tight — verify all in one parallel batch to hit 30s target.
-    // Resy/OT are pre-verified by discovery (API + Lambda DOM), so verify passes are fast.
-    // Yelp: 4 candidates via Lambda (1 warm ~12s + 3 cold ~20s in parallel = ~20s).
+    // Resy/OT are pre-verified by discovery (API + Lambda DOM extracts slots directly).
+    // Yelp: Firecrawl verification gives soft-verified results — better than Lambda cold starts
+    // (which time out and return 0). Warm Lambda only helps if already hot from another call.
     const resySlice = resyCands.slice(0, 6);
     const otSlice   = otCands.slice(0, 6);
-    const yelpSlice = yelpCands.slice(0, 4);
+    const yelpSlice = yelpCands.slice(0, 6);
 
     // ── Verification ──────────────────────────────────────────────────────────
     const verifyStart = Date.now();
     const [resyVer, otVer, yelpVer] = await Promise.all([
-      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",     ""),
+      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "", ""),
       verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS, "",           "",             BB_KEY, BB_PROJECT),
-      // Yelp via Lambda for real time slots; falls back to Firecrawl verifyYelp if no scraper
-      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET),
+      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS),
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
@@ -192,7 +191,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v23",
+      _v:                  "v24",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -510,7 +509,7 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
     const cuiQ = params.cuisine
       ? `&cuisine=${encodeURIComponent(params.cuisine.toLowerCase().replace(/\s+/g, "-"))}`
       : "";
-    const url = `https://api.resy.com/4/find?lat=${lat}&long=${lng}&day=${params.date}&party_size=${params.partySize}&per_page=20&sort_by=availability&order_by=asc${cuiQ}`;
+    const url = `https://api.resy.com/4/find?lat=${lat}&long=${lng}&day=${params.date}&party_size=${params.partySize}&per_page=20&sort_by=available${cuiQ}`;
     const resp = await fetch(url, {
       signal: ctrl.signal,
       headers: {
@@ -776,38 +775,18 @@ async function discoverOTviaLambda(
     const raw = await lambdaLoad(searchUrl, scraperUrl, scraperSecret, {
       waitMs:    7000,   // OT search page needs ~5-7s to fully render after Akamai challenge
       timeoutMs: 55_000,
+      // Simple evalExpr — just extract /r/ links. Avoids complex DOM traversal that
+      // can crash Playwright (e.g. closest() on detached nodes, class selector errors).
       evalExpr: `JSON.stringify((() => {
-        const seen = new Set();
-        const links = Array.from(document.querySelectorAll('a[href*="/r/"]'))
-          .map(a => ({el:a, url:a.href.split('?')[0].split('#')[0]}))
-          .filter(({url}) => /opentable\\.(com|co\\.uk)\\/r\\/[^/]+$/.test(url))
-          .filter(({url}) => { if(seen.has(url)) return false; seen.add(url); return true; })
-          .slice(0, 20);
-        return links.map(({el, url}) => {
-          const card = el.closest('[data-test*="restaurant"]') ||
-                       el.closest('[data-test*="result"]') ||
-                       el.closest('article') || el.closest('li') ||
-                       el.closest('[class*="result"]') || el.closest('[class*="Result"]') ||
-                       el.closest('[class*="card"]')   || el.closest('[class*="Card"]') ||
-                       (() => {
-                         let c = el.parentElement;
-                         for(let i=0; i<20 && c && c.tagName!=='BODY'; i++) {
-                           if(c.clientHeight >= 120) return c;
-                           c = c.parentElement;
-                         }
-                         return el.parentElement;
-                       })();
-          const text  = card ? (card.innerText || '') : '';
-          const times = [...new Set(
-            [...text.matchAll(/\\b(\\d{1,2}:\\d{2}\\s*(?:AM|PM))\\b/gi)].map(m=>m[1].trim())
-          )].slice(0, 8);
-          const h    = card?.querySelector('h1,h2,h3,[data-test*="name"]');
-          const name = (h?.textContent || el.textContent || '').trim().replace(/\\s+/g,' ').substring(0,80);
-          // Extract rid from data attributes or nearby links
-          const ridEl = card?.querySelector('[data-restaurant-id],[data-rid]');
-          const rid   = ridEl?.getAttribute('data-restaurant-id') || ridEl?.getAttribute('data-rid') || '';
-          return {url, name, times, rid};
-        });
+        try {
+          const seen = new Set();
+          return Array.from(document.querySelectorAll('a[href*="/r/"]'))
+            .map(a => a.href.split('?')[0])
+            .filter(h => /opentable\\.com\\/r\\/[^/?#]+$/.test(h))
+            .filter(h => { if(seen.has(h)) return false; seen.add(h); return true; })
+            .slice(0, 20)
+            .map(url => ({url, name:'', times:[], rid:''}));
+        } catch(e) { return []; }
       })())`,
     });
 
