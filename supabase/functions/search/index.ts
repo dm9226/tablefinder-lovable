@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v24
+// TableFinder Search Edge Function — v25
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -191,7 +191,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v24",
+      _v:                  "v25",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -537,35 +537,45 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
     console.log(`[Resy API] ${venues.length} venues with availability`);
     (globalThis as any).__resyApiDebug = `status=200 venues=${venues.length} first=${JSON.stringify(venues[0]?.venue?.name ?? null)}`;
 
+    // Dump first venue for slug debugging
+    (globalThis as any).__resyApiDebug = `status=200 venues=${venues.length} first_venue=${JSON.stringify(venues[0]?.venue ?? null).substring(0, 600)}`;
+
     return venues.flatMap((v: any) => {
       const venue = v.venue ?? {};
       const name  = (venue.name ?? "").trim();
       if (!name) return [];
 
-      // url_slug is the canonical field; fall back to contact.url (full URL or slug)
-      const urlSlug: string    = venue.url_slug ?? "";
+      // Use contact.url as the canonical base URL — it contains the correct city slug
+      // AND venue slug as Resy knows them, avoiding 404s from wrong city or slug.
+      // Fall back to constructing from the city slug only if contact.url is absent.
       const contactUrl: string = venue.contact?.url ?? "";
-      let venueSlug: string;
-      if (urlSlug) {
-        venueSlug = urlSlug;
+      let base: string;
+      if (contactUrl.match(/resy\.com\/cities\/[^/]+\/venues\/[^/?#]+/)) {
+        base = contactUrl.replace(/[?#].*$/, "").replace(/^https?:\/\//, "https://");
       } else {
-        const urlM = contactUrl.match(/\/venues\/([^/?#]+)/);
-        if (urlM) {
-          venueSlug = urlM[1];
-        } else if (contactUrl && !contactUrl.startsWith("http")) {
-          venueSlug = contactUrl.split("/").pop() ?? "";
-        } else {
-          venueSlug = slugify(name);
-        }
+        // contact.url absent — construct from city slug + url_slug or name slug
+        const venueSlug = (venue.url_slug ?? slugify(name)).toLowerCase();
+        if (!venueSlug || RESY_SKIP.has(venueSlug)) return [];
+        base = `https://resy.com/cities/${slug}/venues/${venueSlug}`;
       }
-      if (!venueSlug || RESY_SKIP.has(venueSlug.toLowerCase())) return [];
+      // Extract venue slug from the confirmed base URL
+      const slugM = base.match(/\/venues\/([^/?#]+)/);
+      const venueSlug = slugM?.[1]?.toLowerCase() ?? slugify(name);
+      if (RESY_SKIP.has(venueSlug)) return [];
 
-      const base       = `https://resy.com/cities/${slug}/venues/${venueSlug}`;
+      // Distance filter — skip venues outside 12 miles of the user.
+      // Resy API returns venues from the entire metro (238+ results); this keeps results local.
+      const vLat: number | undefined = venue.location?.geo?.lat  ?? venue.location?.latitude  ?? venue.location?.lat;
+      const vLng: number | undefined = venue.location?.geo?.long ?? venue.location?.longitude ?? venue.location?.long ?? venue.location?.lng;
+      if (vLat != null && vLng != null && lat != null && lng != null) {
+        if (haversine(lat, lng, vLat, vLng) > 12) return [];
+      }
+
       const bookingUrl = addResyParams(base, params);
 
-      // Convert API slots to TimeSlot[] filtered to the requested time window.
-      // If slot parsing yields nothing (API response schema difference), soft-verify —
-      // the venue is confirmed available (Resy included it in results for this date/party).
+      // Convert API slots → TimeSlot[]. Deduplicate by display time (API returns multiple
+      // slot tokens for the same time when different seating areas are available).
+      const seenTimes = new Set<string>();
       const allSlots: TimeSlot[] = (v.slots ?? []).flatMap((s: any) => {
         const startStr = (s.date?.start ?? "") as string;  // "2026-05-14 19:00:00"
         if (!startStr) return [];
@@ -575,12 +585,14 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
         const ampm = hh >= 12 ? "PM" : "AM";
         const h12  = hh % 12 || 12;
         const disp = `${h12}:${mm.toString().padStart(2, "0")} ${ampm}`;
+        if (seenTimes.has(disp)) return [];
+        seenTimes.add(disp);
         return [{ time: disp, url: buildSlotUrl("resy", base, params, disp) }];
       });
       const windowed = filterWindow(allSlots, params.time);
 
-      const base_r: Restaurant = {
-        id:           `resy-${venueSlug.toLowerCase()}`,
+      return [{
+        id:           `resy-${venueSlug}`,
         name,
         cuisine:      venue.cuisines?.[0] ?? (params.cuisine || "Restaurant"),
         neighborhood: venue.location?.neighborhood ?? venue.location?.name ?? "",
@@ -596,10 +608,11 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
         timeSlots:    windowed,
         distanceMiles: null,
         _preVerified:  windowed.length > 0,
-        softVerified:  windowed.length === 0,  // confirmed available but slot parsing failed
-        _slug:         venueSlug.toLowerCase(),
-      };
-      return [base_r];
+        softVerified:  windowed.length === 0,
+        _slug:         venueSlug,
+        _lat:          vLat,
+        _lng:          vLng,
+      } as Restaurant];
     });
   } catch (err: any) {
     clearTimeout(timer);
