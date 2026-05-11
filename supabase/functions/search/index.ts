@@ -152,7 +152,7 @@ serve(async (req) => {
     const verifyStart = Date.now();
     const [resyVer, otVer, yelpVer] = await Promise.all([
       verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL, SCRAPER_SECRET, "", ""),
-      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        "",           "",             BB_KEY, BB_PROJECT),
+      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL,  SCRAPER_SECRET, BB_KEY, BB_PROJECT),
       verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET),  // extra budget for Lambda widget render
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
@@ -175,7 +175,7 @@ serve(async (req) => {
     const attempted   = new Set([...resySlice, ...otSlice, ...yelpSlice].map(r => r.id));
     const remaining   = dedup(
       [...resyCands, ...otCands, ...yelpCands]
-        .filter(r => !attempted.has(r.id) && !verifiedIds.has(r.id))
+        .filter(r => !attempted.has(r.id) && !verifiedIds.has(r.id) && !r.softVerified)
     ).slice(0, 18);
 
     const meta: SearchMeta = {
@@ -195,7 +195,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v27",
+      _v:                  "v27b",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -618,7 +618,7 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
       return [{
         id:           `resy-${venueSlug}`,
         name,
-        cuisine:      venue.cuisines?.[0] ?? (params.cuisine || "Restaurant"),
+        cuisine:      venue.cuisines?.[0] ?? venue.type ?? (params.cuisine || "Restaurant"),
         neighborhood: venue.location?.neighborhood ?? venue.location?.name ?? "",
         rating: (() => {
           // Resy API field name varies by version — try all known shapes
@@ -885,15 +885,51 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
-  // OT restaurant pages come in two formats:
-  //   /r/{slug}                  — readable slug; extractRid returns null (no rid in URL)
-  //   /restaurant/profile/{rid}  — numeric rid in URL; extractRid gets it directly
-  // Targeting /restaurant/profile/ pages gives us rids, which unlocks verifyOTviaRestref
-  // (the fast cross-origin JSON API that bypasses Akamai entirely).
-  // Quoting the path fragment in the Google query constrains results to those URL types.
+  // ── Approach 1: Scrape OT city listing page ─────────────────────────────────
+  // opentable.com/{city}-restaurant-reservations is a static SEO page with
+  // hundreds of /r/slug links — lighter Akamai rules than the SPA search page.
+  const citySlug    = city.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+  const cityPageUrl = `https://www.${domain}/${citySlug}-restaurant-reservations`;
+  try {
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12_000);
+    const scResp = await fetch(`${FC_API}/scrape`, {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+      signal:  ctrl.signal,
+      body:    JSON.stringify({ url: cityPageUrl, formats: ["markdown"], onlyMainContent: true, timeout: 10000 }),
+    });
+    clearTimeout(timer);
+    if (scResp.ok) {
+      const scData = await scResp.json();
+      const md: string = scData.data?.markdown ?? scData.markdown ?? "";
+      const seen  = new Set<string>();
+      const links: any[] = [];
+      const reOT  = /https?:\/\/(?:www\.)?opentable\.(?:com|co\.uk)\/r\/([^/?#\s"')\]]+)/gi;
+      let mm;
+      while ((mm = reOT.exec(md)) !== null) {
+        const url = `https://www.opentable.com/r/${mm[1]}`;
+        if (!seen.has(url)) { seen.add(url); links.push({ url, title: "", description: "" }); }
+      }
+      console.log(`[OT city] ${links.length} URLs from city page (md_len=${md.length})`);
+      if (links.length >= 3) {
+        const cands = links.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
+        for (const c of cands) {
+          if (c._rid) {
+            c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${params.date}T${params.time}&styleid=5&disablegt=true`;
+          }
+        }
+        return cands;
+      }
+    }
+  } catch { /* fall through to Google approach */ }
+
+  // ── Approach 2: Google with quoted /r/ fragment ──────────────────────────────
+  // Quoting "opentable.com/r/" tells Google to return pages whose URLs contain
+  // that path — the result items are OT restaurant pages normToOT can parse.
   const queries = [
-    `"opentable.com/restaurant/profile/" ${city}${state}${cuisine} restaurant reservation`,
-    `"opentable.com/restaurant/profile/" ${city}${state} dinner restaurant`,
+    `"opentable.com/r/" ${city}${state}${cuisine} restaurant dinner reservation`,
+    `"opentable.com/r/" ${city}${state} restaurant reservation`,
   ];
 
   const results    = await firecrawlSearch(queries, fcKey, 10);
