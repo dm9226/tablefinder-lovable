@@ -155,16 +155,18 @@ serve(async (req) => {
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
-    let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
-    const softVerified  = verified.filter(r => r.softVerified).slice(0, 3);
-    const hardVerified  = verified.filter(r => !r.softVerified);
+    // Only show hard-verified results (real confirmed time slots).
+    // Soft-verified = "we think this restaurant takes reservations but couldn't confirm times" —
+    // not useful to users; drop them entirely.
+    let verified = dedup([...resyVer, ...otVer, ...yelpVer])
+      .filter(r => !r.softVerified);
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
     const [ranked] = await Promise.all([
-      withTimeout(geocodeAndRank(hardVerified, params), GEOCODE_MS, hardVerified),
-      withTimeout(enrich(hardVerified, params, AI_KEY), ENRICH_MS,  hardVerified),
+      withTimeout(geocodeAndRank(verified, params), GEOCODE_MS, verified),
+      withTimeout(enrich(verified, params, AI_KEY), ENRICH_MS,  verified),
     ]);
-    verified = [...ranked, ...softVerified];
+    verified = ranked;
 
     // Remaining candidates for optional second pass
     const verifiedIds = new Set(verified.map(r => r.id));
@@ -191,7 +193,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v26",
+      _v:                  "v26b",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
