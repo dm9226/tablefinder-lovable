@@ -27,12 +27,12 @@ const APIFY_API  = "https://api.apify.com/v2";
 const PHOTON     = "https://photon.komoot.io/api";
 
 const GLOBAL_TIMEOUT  = 115_000;
-const DISCOVER_MS     =  40_000;  // per-platform discovery budget (Lambda cold start ~15s + page ~8s)
-const VERIFY_MS       =  60_000;  // per-platform verification budget (Lambda needs ~25s cold start + render)
+const DISCOVER_MS     =  38_000;  // per-platform discovery budget
+const VERIFY_MS       =  25_000;  // per-platform verification budget (warm Lambda: 7-10s per call)
 const GEOCODE_MS      =  10_000;  // geocodeAndRank hard cap
 const ENRICH_MS       =  10_000;  // AI enrichment hard cap
-const VERIFY_CONCUR   =       3;  // concurrent scrapes per platform
-const VERIFY_MAX      =       8;  // max verified results per platform
+const VERIFY_CONCUR   =       6;  // verify all candidates in one parallel batch (not sequential rounds)
+const VERIFY_MAX      =       6;  // max verified results per platform
 
 const CORS = {
   "Access-Control-Allow-Origin":  "*",
@@ -129,9 +129,11 @@ serve(async (req) => {
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
 
-    const resySlice = resyCands.slice(0, 15);
-    const otSlice   = otCands.slice(0, 15);
-    const yelpSlice = yelpCands.slice(0, 18);
+    // Keep candidate pool tight — verify all in one parallel batch to hit 30s target.
+    // Lambda warm: 6 candidates × 7s each (parallel) = 7s verification round.
+    const resySlice = resyCands.slice(0, 6);
+    const otSlice   = otCands.slice(0, 6);
+    const yelpSlice = yelpCands.slice(0, 6);
 
     // ── Verification ──────────────────────────────────────────────────────────
     const verifyStart = Date.now();
@@ -178,7 +180,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v21",
+      _v:                  "v21b",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
