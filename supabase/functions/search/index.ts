@@ -28,7 +28,7 @@ const PHOTON     = "https://photon.komoot.io/api";
 
 const GLOBAL_TIMEOUT  = 115_000;
 const DISCOVER_MS     =  30_000;  // per-platform discovery budget (BB session spin-up needs ~15s headroom)
-const VERIFY_MS       =  35_000;  // per-platform verification budget (was 10s — key fix)
+const VERIFY_MS       =  50_000;  // per-platform verification budget (BB sessions need ~15s each)
 const GEOCODE_MS      =  10_000;  // geocodeAndRank hard cap
 const ENRICH_MS       =  10_000;  // AI enrichment hard cap
 const VERIFY_CONCUR   =       3;  // concurrent scrapes per platform (3 platforms × 3 = 9 peak — safe rate limit)
@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17-final3",
+      _v:                  "v17-final4",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -1257,9 +1257,9 @@ async function verifyOTViaBB(
 ): Promise<Restaurant | null> {
   try {
     const text = await bbLoad(r.platformUrl, bbKey, bbProject, {
-      waitMs: 2000,
+      waitMs: 5000,
       useProxy: false,
-      timeoutMs: 14_000,
+      timeoutMs: 20_000,
     });
     if (!(globalThis as any).__otVerifyDebug) {
       (globalThis as any).__otVerifyDebug = `${r.name}|len=${text.length}|url=${r.platformUrl}|snippet=${text.substring(0,300)}`;
