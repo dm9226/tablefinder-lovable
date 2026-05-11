@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17f-bb-page-debug",
+      _v:                  "v17g-bb-link-debug",
       _ot_bb_error:        (globalThis as any).__otBBError ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -729,12 +729,12 @@ async function discoverOTViaBB(
       waitMs: 3000,
       useProxy: false,
       timeoutMs: 28_000,
-      evalExpr: `JSON.stringify({title:document.title,links:[...new Set(Array.from(document.querySelectorAll('a[href*="/r/"],a[href*="/restaurant/profile/"]')).map(a=>a.href))].slice(0,20),snippet:document.body.innerText.substring(0,300)})`,
+      evalExpr: `JSON.stringify({title:document.title,allLinks:[...new Set(Array.from(document.querySelectorAll('a[href]')).map(a=>a.href).filter(h=>h.includes('opentable')))].slice(0,30),snippet:document.body.innerText.substring(0,500)})`,
     });
-    const { title = "", links = [], snippet = "" } = JSON.parse(pageInfo || "{}");
-    console.log(`[OT BB] title="${title}" links=${links.length} snippet="${snippet.substring(0,100)}"`);
-    (globalThis as any).__otBBError = `title=${title}|links=${links.length}|snippet=${snippet.substring(0,150)}`;
-    return (links as string[]).map((u: string) => normToOT({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+    const { title = "", allLinks = [], snippet = "" } = JSON.parse(pageInfo || "{}");
+    console.log(`[OT BB] title="${title}" allLinks=${allLinks.length}`);
+    (globalThis as any).__otBBError = `title=${title}|allLinks=${JSON.stringify(allLinks).substring(0,400)}|snippet=${snippet.substring(0,200)}`;
+    return [];
   } catch (err: any) {
     const msg = err?.message ?? String(err);
     console.log(`[OT BB] discovery error: ${msg}`);
