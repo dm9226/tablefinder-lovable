@@ -38,7 +38,14 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
   const isSoftVerified = !!restaurant.softVerified;
 
   return (
-    <div className="flex gap-3 px-4 py-3.5 border-b border-border hover:bg-muted/30 transition-colors w-full text-left">
+    <div
+      className="flex gap-3 px-4 py-3.5 border-b border-border hover:bg-muted/30 transition-colors w-full text-left cursor-pointer"
+      onClick={() => window.open(restaurant.platformUrl, "_blank", "noopener")}
+      role="link"
+      tabIndex={0}
+      onKeyDown={(e) => e.key === "Enter" && window.open(restaurant.platformUrl, "_blank", "noopener")}
+      aria-label={`Open ${restaurant.name} on ${PLATFORM_LABELS[restaurant.platform] ?? restaurant.platform}`}
+    >
       <div className="flex-1 min-w-0 flex flex-col gap-1.5">
         {/* Row 1: platform badge + name */}
         <div className="flex items-center gap-2 min-w-0">
@@ -48,14 +55,9 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
             {PLATFORM_LABELS[restaurant.platform] ?? restaurant.platform}
           </span>
           <h3 className="font-heading text-base font-semibold text-foreground truncate">
-            <a
-              href={restaurant.platformUrl}
-              target="_self"
-              rel="noopener"
-              className="hover:text-primary transition-colors focus:outline-none focus-visible:underline"
-            >
+            <span className="hover:text-primary transition-colors">
               {restaurant.name}
-            </a>
+            </span>
           </h3>
         </div>
 
@@ -116,8 +118,8 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
               <a
                 key={i}
                 href={getSlotUrl(restaurant, slot, searchMeta)}
-                target="_self"
-                rel="noopener"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="px-2 py-0.5 rounded text-[13px] font-body font-medium bg-primary/10 text-primary hover:bg-primary/20 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded-sm"
                 aria-label={`Book ${restaurant.name} at ${slot.time}`}
                 onClick={(e) => e.stopPropagation()}
@@ -134,9 +136,10 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
             <AlertTriangle className="h-3.5 w-3.5 text-yellow-500 shrink-0" aria-hidden="true" />
             <a
               href={restaurant.platformUrl}
-              target="_self"
-              rel="noopener"
+              target="_blank"
+              rel="noopener noreferrer"
               className="text-xs text-yellow-500 hover:text-yellow-400 transition-colors font-body focus:outline-none focus-visible:underline"
+              onClick={(e) => e.stopPropagation()}
             >
               Check availability on {PLATFORM_LABELS[restaurant.platform] ?? restaurant.platform} →
             </a>
