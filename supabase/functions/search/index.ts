@@ -193,16 +193,17 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v26d",
+      _v:                  "v26e",
       _debug: {
-        elapsed_ms:     elapsed,
-        discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
-        verified:       { resy: resyVer.length, ot: otVer.length, yelp: yelpVer.length },
+        elapsed_ms:      elapsed,
+        discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
+        verified:        { resy: resyVer.length, ot: otVer.length, yelp: yelpVer.length },
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
         resy_api:        (globalThis as any).__resyApiDebug    ?? null,
         ot_lambda:       (globalThis as any).__otLambdaDebug   ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug  ?? null,
         yelp_api:        (globalThis as any).__yelpApiDebug    ?? null,
+        yelp_lambda:     (globalThis as any).__yelpLambdaDebug ?? null,
       },
     });
 
@@ -622,7 +623,8 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
           const raw = venue.rater?.score ?? venue.rating?.average ?? venue.rating
                    ?? venue.score        ?? venue.aggregate_score ?? venue.ratingAverage;
           const n = parseFloat(String(raw ?? ""));
-          return isNaN(n) ? undefined : n;
+          if (isNaN(n)) return undefined;
+          return Math.round(n * 10) / 10;  // always 1 decimal place
         })(),
         reviewCount: (() => {
           const raw = venue.rater?.total_ratings ?? venue.rating?.count
@@ -1402,16 +1404,21 @@ async function verifyOne(
   }
   if (r.platform === "yelp") {
     // Run Firecrawl path (has OT/Resy bridge) and Lambda path (renders JS widget) in parallel.
-    // Lambda finds native Yelp slots; Firecrawl finds bridged OT/Resy rids on the page.
-    // Use whichever returns hard slots first.
     const [lambdaResult, fcResult] = await Promise.all([
       scraperUrl && scraperSecret
         ? verifyYelpViaLambda(r, params, scraperUrl, scraperSecret)
         : Promise.resolve(null),
       verifyYelp(r, params, fcKey),
     ]);
-    if (lambdaResult && lambdaResult.timeSlots.length > 0) return lambdaResult;
-    if (fcResult    && fcResult.timeSlots.length    > 0) return fcResult;
+    const lSlots = lambdaResult?.timeSlots.length ?? 0;
+    const fSlots = fcResult?.timeSlots.length ?? 0;
+    console.log(`[verifyOne Yelp] ${r.name}: lambda=${lSlots} slots fc=${fSlots} slots fc_platform=${fcResult?.platform ?? "null"}`);
+    if (lambdaResult && lSlots > 0) return lambdaResult;
+    if (fcResult    && fSlots > 0) return fcResult;
+    // fc may have found a bridge result on another platform (OT/Resy) with slots
+    if (fcResult && fcResult.platform !== "yelp" && fSlots === 0) {
+      console.log(`[verifyOne Yelp] ${r.name}: bridge result ${fcResult.platform} has 0 slots — dropping`);
+    }
     return null;
   }
   return null;
@@ -2026,6 +2033,8 @@ async function verifyYelpViaLambda(
       timeoutMs: 55_000,
       evalExpr:  yelpEvalExpr,
     });
+    // Capture for _debug regardless of outcome
+    (globalThis as any).__yelpLambdaDebug = `len=${text?.length ?? 0} sample=${(text ?? "").substring(0, 200)}`;
     if (!text || text.length < 100) {
       console.log(`[Yelp Lambda] ${r.name}: short content (${text?.length ?? 0})`);
       return null;
