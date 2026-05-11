@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17g-bb-link-debug",
+      _v:                  "v17h-bb-more-wait",
       _ot_bb_error:        (globalThis as any).__otBBError ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -726,10 +726,10 @@ async function discoverOTViaBB(
 
   try {
     const pageInfo = await bbLoad(searchUrl, bbKey, bbProject, {
-      waitMs: 3000,
+      waitMs: 6000,
       useProxy: false,
       timeoutMs: 28_000,
-      evalExpr: `JSON.stringify({title:document.title,allLinks:[...new Set(Array.from(document.querySelectorAll('a[href]')).map(a=>a.href).filter(h=>h.includes('opentable')))].slice(0,30),snippet:document.body.innerText.substring(0,500)})`,
+      evalExpr: `JSON.stringify({title:document.title,allLinks:[...new Set(Array.from(document.querySelectorAll('a[href]')).map(a=>a.getAttribute('href')).filter(h=>h&&(h.includes('/r/')||h.includes('restaurant'))))].slice(0,30),snippet:document.body.innerText.substring(0,1500)})`,
     });
     const { title = "", allLinks = [], snippet = "" } = JSON.parse(pageInfo || "{}");
     console.log(`[OT BB] title="${title}" allLinks=${allLinks.length}`);
