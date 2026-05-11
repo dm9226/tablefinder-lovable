@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17-final",
+      _v:                  "v17-final2",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1024,7 +1024,7 @@ async function verifyBatch(
     if (remaining < 3_000) break; // not enough time for a meaningful scrape batch
 
     const batch      = candidates.slice(i, i + VERIFY_CONCUR);
-    const perScrapeMs = Math.min(remaining - 500, 10_000); // leave 500ms margin
+    const perScrapeMs = Math.min(remaining - 500, 16_000); // leave 500ms margin; BB sessions need ~12s
     const settled    = await Promise.allSettled(
       batch.map(r => withTimeout(verifyOne(r, params, fcKey, scraperUrl, scraperSecret, bbKey, bbProject), perScrapeMs, null))
     );
@@ -1256,8 +1256,9 @@ async function verifyOTViaBB(
 ): Promise<Restaurant | null> {
   try {
     const text = await bbLoad(r.platformUrl, bbKey, bbProject, {
-      waitMs: 4000,
+      waitMs: 2000,
       useProxy: false,
+      timeoutMs: 14_000,
     });
     if (text.length < 50) { console.log(`[OT BB] ${r.name}: short text`); return null; }
     if (/access denied|security check|are you a robot|just a moment/i.test(text)) {
