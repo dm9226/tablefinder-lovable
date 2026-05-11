@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v18c",
+      _v:                  "v19",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -876,28 +876,17 @@ async function discoverYelp(params: SearchParams, fcKey: string): Promise<Restau
     }
   };
 
-  // Search #1: reservation-filtered (native Yelp only)
+  // Reservation-filtered search only — returns restaurants that actually have
+  // native Yelp reservation availability for the requested date/time/party.
+  // Removed the "top-rated general" search: it pulled in OT/Resy/non-Yelp
+  // restaurants that were slipping through verification as false positives.
   const resvUrl = `https://www.${domain}/search?find_loc=${loc}${term.replace("find_desc=","term=")}&reservation_date=${params.date}&reservation_time=${tNoCol}&reservation_covers=${params.partySize}`;
-  // Search #2: general top-rated (ALL platforms — feeds OT/Resy bridges)
-  const topUrl  = `https://www.${domain}/search?find_loc=${loc}${term}&sortby=rating`;
 
-  const [resvUrls, topUrls] = await Promise.all([
-    scrapeYelp(resvUrl, "resv"),
-    scrapeYelp(topUrl,  "top"),
-  ]);
+  const resvUrls = await scrapeYelp(resvUrl, "resv");
 
-  // Merge: resv first (native Yelp, high confidence), then top-rated additions
-  // (potential OT/Resy restaurants not in resv list)
-  const seen = new Set<string>();
-  const combined: string[] = [];
-  for (const u of [...resvUrls, ...topUrls]) {
-    const slug = u.split("/").pop() ?? "";
-    if (slug && !seen.has(slug)) { seen.add(slug); combined.push(u); }
-  }
-
-  if (combined.length >= 1) {
-    console.log(`[Yelp combined] ${combined.length} (resv=${resvUrls.length} top=${topUrls.length})`);
-    return combined.map(u => normToYelp({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
+  if (resvUrls.length >= 1) {
+    console.log(`[Yelp] ${resvUrls.length} reservation-filtered venues`);
+    return resvUrls.map(u => normToYelp({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
   }
 
   // Google fallback (rarely needed given two direct scrapes above)
@@ -1183,9 +1172,31 @@ async function verifyResyViaBB(
   r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant | null> {
   try {
-    const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, { waitMs: 4000 });
-    if (text.length < 100) { console.log(`[Resy Lambda] ${r.name}: short text (${text.length})`); return null; }
-    if (/\bnotify\b/i.test(text) && !/\b\d{1,2}:\d{2}\s*(am|pm)\b/i.test(text)) return null;
+    // Target only the actual available time-slot buttons on the Resy booking page.
+    // Using document.body.innerText picks up waitlist messages, nearby-date suggestions,
+    // and restaurant hours — all of which look like available times but aren't.
+    const evalExpr = `(() => {
+      const btns = Array.from(document.querySelectorAll('button'))
+        .filter(b => /^\\d{1,2}:\\d{2}\\s*(AM|PM)$/i.test((b.textContent||'').trim()))
+        .filter(b => !b.disabled)
+        .filter(b => {
+          // skip buttons inside waitlist / notify sections
+          let el = b;
+          for (let i=0; i<8; i++) {
+            el = el.parentElement; if (!el) break;
+            if (/notify|waitlist|unavailable/i.test(el.getAttribute('aria-label')||'')) return false;
+            if (/notify|waitlist/i.test(el.className||'')) return false;
+          }
+          return true;
+        })
+        .map(b => (b.textContent||'').trim());
+      return [...new Set(btns)].join('\\n');
+    })()`;
+    const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, { waitMs: 4000, evalExpr });
+    if (!text || text.trim().length === 0) {
+      console.log(`[Resy Lambda] ${r.name}: no available time buttons found`);
+      return null;
+    }
 
     const slots    = extractTimes(text);
     const windowed = filterWindow(slots, params.time);
@@ -1444,6 +1455,13 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       };
     }
     // ─────────────────────────────────────────────────────────────────────────
+
+    // Non-native redirect with no bridge — drop regardless of any extracted times.
+    // (The /biz/ page has generic "reservation" language that fools extractTimes.)
+    if (!isYelpNative) {
+      console.log(`[verifyYelp] ${r.name}: non-native redirect + no bridge — skipping`);
+      return null;
+    }
 
     // Reject pages that mention Resy/OT by name but had no extractable URL above.
     // (Generic "Reserve on Resy" text without a venue link — not enough to act on.)
