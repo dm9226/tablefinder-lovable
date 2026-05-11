@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v25
+// TableFinder Search Edge Function — v26
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -191,14 +191,16 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v25",
+      _v:                  "v26",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
         verified:       { resy: resyVer.length, ot: otVer.length, yelp: yelpVer.length },
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
-        resy_api:        (globalThis as any).__resyApiDebug  ?? null,
-        ot_lambda:       (globalThis as any).__otLambdaDebug ?? null,
+        resy_api:        (globalThis as any).__resyApiDebug    ?? null,
+        ot_lambda:       (globalThis as any).__otLambdaDebug   ?? null,
+        ot_restref:      (globalThis as any).__otRestrefDebug  ?? null,
+        yelp_api:        (globalThis as any).__yelpApiDebug    ?? null,
       },
     });
 
@@ -564,11 +566,28 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
       if (RESY_SKIP.has(venueSlug)) return [];
 
       // Distance filter — skip venues outside 12 miles of the user.
-      // Resy API returns venues from the entire metro (238+ results); this keeps results local.
-      const vLat: number | undefined = venue.location?.geo?.lat  ?? venue.location?.latitude  ?? venue.location?.lat;
-      const vLng: number | undefined = venue.location?.geo?.long ?? venue.location?.longitude ?? venue.location?.long ?? venue.location?.lng;
-      if (vLat != null && vLng != null && lat != null && lng != null) {
-        if (haversine(lat, lng, vLat, vLng) > 12) return [];
+      // Resy API uses geo.lon (not geo.long). Covers all known field-name variants.
+      const vLat: number | undefined =
+        venue.location?.geo?.lat     ?? venue.location?.latitude   ?? venue.location?.lat;
+      const vLng: number | undefined =
+        venue.location?.geo?.lon     ??   // ← primary Resy API field
+        venue.location?.geo?.long    ??   // fallback variant
+        venue.location?.longitude    ??
+        venue.location?.long         ??
+        venue.location?.lng;
+      if (vLat != null && vLng != null) {
+        if (haversine(lat, lng, vLat, vLng) > 12) {
+          console.log(`[Resy API] skip ${name}: ${haversine(lat, lng, vLat, vLng).toFixed(1)}mi away`);
+          return [];
+        }
+      } else {
+        // No coordinates in response — filter by city name as a safety net
+        const locCity: string = (venue.location?.city ?? venue.location?.area?.name ?? "").toLowerCase();
+        const FAR_CITIES = ["peachtree city","newnan","mcdonough","griffin","covington","canton","cumming","gainesville","cartersville"];
+        if (FAR_CITIES.some(c => locCity.includes(c))) {
+          console.log(`[Resy API] skip ${name}: city="${locCity}" is far suburb (no coords)`);
+          return [];
+        }
       }
 
       const bookingUrl = addResyParams(base, params);
@@ -1357,11 +1376,17 @@ async function verifyOne(
   if (r.platform === "resy")      return scraperUrl && scraperSecret
     ? verifyResyViaBB(r, params, scraperUrl, scraperSecret)
     : verifyResy(r, params, fcKey);
-  if (r.platform === "opentable") return bbKey && bbProject
-    ? verifyOTViaBB(r, params, bbKey, bbProject)
-    : scraperUrl && scraperSecret
-      ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
-      : verifyOT(r, params, fcKey);
+  if (r.platform === "opentable") {
+    // Always try restref JSON API first — cross-origin widget endpoint, no Akamai.
+    const restref = await verifyOTviaRestref(r, params);
+    if (restref) return restref;
+    // Fall back to browser-based methods if restref fails or no rid available.
+    return bbKey && bbProject
+      ? verifyOTViaBB(r, params, bbKey, bbProject)
+      : scraperUrl && scraperSecret
+        ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
+        : verifyOT(r, params, fcKey);
+  }
   if (r.platform === "yelp")      return scraperUrl && scraperSecret
     ? verifyYelpViaLambda(r, params, scraperUrl, scraperSecret)
     : verifyYelp(r, params, fcKey);
@@ -1576,6 +1601,54 @@ async function verifyOTviaJina(r: Restaurant, params: SearchParams): Promise<Res
   }
 }
 
+// ── OT: Direct restref API ────────────────────────────────────────────────────
+// opentable.com/restref/api/availability is designed for cross-origin embedding
+// on restaurant websites worldwide — no Akamai bot protection, no CSRF required.
+// Returns JSON availability data directly from Deno, no Lambda/scraping needed.
+async function verifyOTviaRestref(r: Restaurant, params: SearchParams): Promise<Restaurant | null> {
+  const rid = r._rid ?? extractRid(r.platformUrl);
+  if (!rid) { console.log(`[OT restref] ${r.name}: no rid`); return null; }
+
+  const url = `https://www.opentable.com/restref/api/availability?rid=${rid}&covers=${params.partySize}&day=${params.date}&lang=en-US&ref=5`;
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 9000);
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer":         "https://www.opentable.com/",
+        "Accept":          "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "en-US,en;q=0.9",
+        "X-Requested-With":"XMLHttpRequest",
+      },
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) { console.log(`[OT restref] ${r.name}: HTTP ${resp.status}`); return null; }
+    const raw  = await resp.json();
+    const text = JSON.stringify(raw);
+    // Capture first response for schema inspection
+    if (!(globalThis as any).__otRestrefDebug) {
+      (globalThis as any).__otRestrefDebug = text.substring(0, 500);
+    }
+    // extractTimes handles both 12h ("7:30 PM") and 24h ("19:30") formats
+    const slots    = extractTimes(text);
+    const windowed = filterWindow(slots, params.time);
+    if (windowed.length === 0) {
+      console.log(`[OT restref] ${r.name}: no slots in window (raw len=${text.length})`);
+      return null;
+    }
+    const base          = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
+    console.log(`[OT restref] ${r.name}: ${windowed.length} slots ✓ (rid=${rid})`);
+    return { ...r, timeSlots: slotsWithUrls, softVerified: false };
+  } catch (err: any) {
+    clearTimeout(timer);
+    console.log(`[OT restref] ${r.name}: ${err?.message}`);
+    return null;
+  }
+}
+
 // Real-browser OT verification — residential proxy bypasses Akamai on restaurant pages.
 async function verifyOTViaBB(
   r: Restaurant, params: SearchParams, bbKey: string, bbProject: string,
@@ -1621,7 +1694,59 @@ async function verifyOTViaBB(
 
 // ── Yelp ──────────────────────────────────────────────────────────────────────
 
+// Direct Yelp SeatMe availability API — called by the widget JS before rendering.
+// Bypasses JS rendering entirely; returns JSON time slots from Deno directly.
+async function verifyYelpViaDirectAPI(r: Restaurant, params: SearchParams): Promise<Restaurant | null> {
+  // Accept both /reservations/slug and /biz/slug URL shapes
+  const slugM = r.platformUrl.match(/yelp\.com\/(?:reservations\/|biz\/)([^/?#\s]+)/i);
+  if (!slugM) return null;
+  const slug = slugM[1];
+
+  const url = `https://www.yelp.com/reservations/${slug}/availability?covers=${params.partySize}&date=${params.date}&time=${params.time}`;
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 9000);
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent":        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer":           `https://www.yelp.com/reservations/${slug}`,
+        "Accept":            "application/json",
+        "Accept-Language":   "en-US,en;q=0.9",
+        "X-Requested-With":  "XMLHttpRequest",
+        "x-yelp-request-id": crypto.randomUUID(),
+      },
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) { console.log(`[Yelp API] ${r.name}: HTTP ${resp.status}`); return null; }
+    const raw  = await resp.json();
+    const text = JSON.stringify(raw);
+    if (!(globalThis as any).__yelpApiDebug) {
+      (globalThis as any).__yelpApiDebug = text.substring(0, 500);
+    }
+    const slots    = extractTimes(text);
+    const windowed = filterWindow(slots, params.time);
+    if (windowed.length === 0) {
+      console.log(`[Yelp API] ${r.name}: no slots (raw=${text.substring(0, 120)})`);
+      return null;
+    }
+    const base          = `https://www.yelp.com/reservations/${slug}`;
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
+    console.log(`[Yelp API] ${r.name}: ${windowed.length} slots ✓`);
+    return { ...r, timeSlots: slotsWithUrls, softVerified: false };
+  } catch (err: any) {
+    clearTimeout(timer);
+    console.log(`[Yelp API] ${r.name}: ${err?.message}`);
+    return null;
+  }
+}
+
 async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): Promise<Restaurant | null> {
+  // Try direct SeatMe API first — fastest path, no JS rendering needed.
+  // Falls through to Firecrawl scraping if the API call fails or returns no slots.
+  const apiResult = await verifyYelpViaDirectAPI(r, params);
+  if (apiResult && apiResult.timeSlots.length > 0) return apiResult;
+
   try {
     const resp = await fetch(`${FC_API}/scrape`, {
       method: "POST",
@@ -1673,12 +1798,21 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     const otRidM = md.match(/opentable\.(?:com|co\.uk)[^\s"'<>]*[?&]rid=(\d+)/i)
                 ?? md.match(/opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
     if (otRidM) {
-      const rid      = otRidM[1];
+      const rid        = otRidM[1];
+      const profileUrl = `https://www.opentable.com/restaurant/profile/${rid}`;
+      const mockR: Restaurant = {
+        id: `opentable-${rid}`, name: rr.name, cuisine: rr.cuisine,
+        neighborhood: rr.neighborhood, platform: "opentable",
+        platformUrl: addOTParams(profileUrl, params),
+        timeSlots: [], distanceMiles: null, _rid: rid,
+      };
+      // Try restref API first (no Akamai), then fall back to widget scrape
+      const restrefResult = await verifyOTviaRestref(mockR, params);
+      if (restrefResult) { console.log(`[verifyYelp OT bridge] ${rr.name}: restref ✓`); return { ...restrefResult, name: rr.name }; }
       const otResult = await tryOTWidgetScrape(rr.name, rid, params, fcKey);
       if (otResult) return { ...otResult, name: rr.name }; // Hard OT result with time slots ✓
-      // Widget blocked by Akamai → emit soft-verified OT (shows "Check on OT" link)
-      const profileUrl = `https://www.opentable.com/restaurant/profile/${rid}`;
-      console.log(`[verifyYelp] ${rr.name}: OT rid=${rid} found but widget blocked → OT soft-verified`);
+      // Both blocked → emit soft-verified OT (shows "Check on OT" link)
+      console.log(`[verifyYelp] ${rr.name}: OT rid=${rid} — all methods blocked → OT soft-verified`);
       return {
         ...rr,
         id:          `opentable-${rid}`,
