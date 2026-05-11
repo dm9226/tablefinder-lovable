@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v19b",
+      _v:                  "v19c",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -1177,29 +1177,19 @@ async function verifyResyViaBB(
   r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant | null> {
   try {
-    // Target only the actual available time-slot buttons on the Resy booking page.
-    // Using document.body.innerText picks up waitlist messages, nearby-date suggestions,
-    // and restaurant hours — all of which look like available times but aren't.
+    // Try to extract only actual time-slot buttons. If none found (Resy may use
+    // non-button elements, or the page hasn't fully rendered), fall back to innerText.
     const evalExpr = `(() => {
-      const btns = Array.from(document.querySelectorAll('button'))
+      const btns = Array.from(document.querySelectorAll('button,[role="button"]'))
         .filter(b => /^\\d{1,2}:\\d{2}\\s*(AM|PM)$/i.test((b.textContent||'').trim()))
         .filter(b => !b.disabled)
-        .filter(b => {
-          // skip buttons inside waitlist / notify sections
-          let el = b;
-          for (let i=0; i<8; i++) {
-            el = el.parentElement; if (!el) break;
-            if (/notify|waitlist|unavailable/i.test(el.getAttribute('aria-label')||'')) return false;
-            if (/notify|waitlist/i.test(el.className||'')) return false;
-          }
-          return true;
-        })
         .map(b => (b.textContent||'').trim());
-      return [...new Set(btns)].join('\\n');
+      const unique = [...new Set(btns)];
+      return unique.length > 0 ? unique.join('\\n') : document.body.innerText;
     })()`;
     const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, { waitMs: 4000, evalExpr });
-    if (!text || text.trim().length === 0) {
-      console.log(`[Resy Lambda] ${r.name}: no available time buttons found`);
+    if (!text || text.trim().length < 50) {
+      console.log(`[Resy Lambda] ${r.name}: empty page`);
       return null;
     }
 
