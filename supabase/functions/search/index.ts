@@ -562,7 +562,7 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
       return [{
         id:           `resy-${venueSlug.toLowerCase()}`,
         name,
-        cuisine:      venue.cuisines?.[0] ?? params.cuisine || "Restaurant",
+        cuisine:      venue.cuisines?.[0] ?? (params.cuisine || "Restaurant"),
         neighborhood: venue.location?.neighborhood ?? "",
         rating:       typeof venue.rating?.average === "number" ? venue.rating.average : undefined,
         reviewCount:  typeof venue.rating?.count   === "number" ? venue.rating.count   : undefined,
