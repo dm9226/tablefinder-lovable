@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v19d",
+      _v:                  "v19e",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -1177,32 +1177,16 @@ async function verifyResyViaBB(
   r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant | null> {
   try {
-    // Extract time slots from Resy booking page.
-    // Priority: enabled <button> elements with time text (definitively available).
-    // If fully booked: page shows "Join Waitlist" — return sentinel so we drop it.
-    // If page hasn't loaded yet (no buttons, no waitlist): fall back to innerText.
-    const evalExpr = `(() => {
-      const body = document.body.innerText || '';
-      const btns = Array.from(document.querySelectorAll('button,[role="button"]'))
-        .filter(b => /^\\d{1,2}:\\d{2}\\s*(AM|PM)$/i.test((b.textContent||'').trim()))
-        .filter(b => !b.disabled);
-      if (btns.length > 0) {
-        return [...new Set(btns.map(b=>(b.textContent||'').trim()))].join('\\n');
-      }
-      // Fully booked: explicit waitlist/no-availability signal
-      if (/join\\s+waitlist|notify\\s+me|no\\s+availability|fully\\s+booked/i.test(body)) {
-        return '__NO_AVAILABILITY__';
-      }
-      // Page may not have fully rendered — fall back to full text
-      return body;
-    })()`;
-    const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, { waitMs: 5000, evalExpr });
-    if (!text || text.trim().length < 20) {
+    // Use full page text — we know this works reliably with the Lambda browser.
+    // extractTimes already filters times near "notify/waitlist/other dates" context.
+    const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, { waitMs: 5000 });
+    if (!text || text.trim().length < 50) {
       console.log(`[Resy Lambda] ${r.name}: empty page`);
       return null;
     }
-    if (text.trim() === '__NO_AVAILABILITY__') {
-      console.log(`[Resy Lambda] ${r.name}: fully booked / waitlist only`);
+    // If page clearly shows fully booked with NO time text at all, drop it.
+    if (/join\s+waitlist|notify\s+me/i.test(text) && !/\d{1,2}:\d{2}\s*(am|pm)/i.test(text)) {
+      console.log(`[Resy Lambda] ${r.name}: fully booked, no times`);
       return null;
     }
 
