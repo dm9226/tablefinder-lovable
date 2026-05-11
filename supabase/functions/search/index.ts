@@ -125,16 +125,18 @@ serve(async (req) => {
         console.log("[Resy] API returned 0 — falling back to Firecrawl");
         return discoverResy(params, FIRECRAWL);
       }, DISCOVER_MS),
-      // OT: Lambda real-browser discovery when available (Akamai blocks Firecrawl).
-      // Lambda loads the OT search page with real Chrome and extracts restaurant cards.
-      // Falls back to BB, Apify, or widget canvas in degraded mode.
-      SCRAPER_URL && SCRAPER_SECRET
-        ? abortableDiscover(() => discoverOTviaLambda(params, SCRAPER_URL, SCRAPER_SECRET), DISCOVER_MS)
-        : BB_KEY && BB_PROJECT
-          ? abortableDiscover(() => discoverOTViaBB(params, BB_KEY, BB_PROJECT), DISCOVER_MS)
-          : APIFY
-            ? abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS)
-            : abortableDiscover(() => discoverOTviaWidgetCanvas(params, FIRECRAWL), DISCOVER_MS),
+      // OT: Try Lambda first (real Chrome bypasses some Akamai checks), but Akamai
+      // still blocks Lambda on the OT search page with HTTP 500. When Lambda returns 0,
+      // fall back to Firecrawl Google search (site:opentable.com) which finds restaurant
+      // page URLs containing rids — then verifyOTviaRestref handles availability.
+      abortableDiscover(async () => {
+        if (SCRAPER_URL && SCRAPER_SECRET) {
+          const lambdaResults = await discoverOTviaLambda(params, SCRAPER_URL, SCRAPER_SECRET);
+          if (lambdaResults.length > 0) return lambdaResults;
+          console.log("[OT] Lambda returned 0 — falling back to Firecrawl discovery");
+        }
+        return discoverOTviaWidgetCanvas(params, FIRECRAWL);
+      }, DISCOVER_MS),
       abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS),
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
@@ -193,7 +195,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v26e",
+      _v:                  "v26f",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1749,7 +1751,11 @@ async function verifyYelpViaDirectAPI(r: Restaurant, params: SearchParams): Prom
       signal: ctrl.signal,
     });
     clearTimeout(timer);
-    if (!resp.ok) { console.log(`[Yelp API] ${r.name}: HTTP ${resp.status}`); return null; }
+    if (!resp.ok) {
+      (globalThis as any).__yelpApiDebug = `HTTP ${resp.status} for ${r.name}`;
+      console.log(`[Yelp API] ${r.name}: HTTP ${resp.status}`);
+      return null;
+    }
     const raw  = await resp.json();
     const text = JSON.stringify(raw);
     if (!(globalThis as any).__yelpApiDebug) {
