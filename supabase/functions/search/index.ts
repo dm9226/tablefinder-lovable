@@ -195,7 +195,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v27b",
+      _v:                  "v27c",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -924,16 +924,45 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
     }
   } catch { /* fall through to Google approach */ }
 
-  // ── Approach 2: Google with quoted /r/ fragment ──────────────────────────────
-  // Quoting "opentable.com/r/" tells Google to return pages whose URLs contain
-  // that path — the result items are OT restaurant pages normToOT can parse.
+  // ── Approach 2: Google with quoted /r/ fragment + description extraction ───────
+  // Google returns pages that *contain* "opentable.com/r/" — these are often
+  // restaurant sites, Yelp biz pages, or food media linking to their OT page.
+  // item.url will be the external page URL, NOT the OT URL. So we also check
+  // item.description (the Google snippet) which frequently includes the full OT URL.
   const queries = [
     `"opentable.com/r/" ${city}${state}${cuisine} restaurant dinner reservation`,
     `"opentable.com/r/" ${city}${state} restaurant reservation`,
   ];
 
-  const results    = await firecrawlSearch(queries, fcKey, 10);
-  const candidates = results.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
+  const raw     = await firecrawlSearch(queries, fcKey, 15);
+  const otSeen  = new Set<string>();
+  const otItems: Array<{ url: string; title?: string; description?: string }> = [];
+
+  for (const item of raw) {
+    const candidates2: string[] = [];
+
+    // Direct OT URL in item.url
+    if (/opentable\.(?:com|co\.uk)\/r\/|opentable\.(?:com|co\.uk)\/restaurant\/profile\//i.test(item.url ?? "")) {
+      candidates2.push(item.url);
+    }
+
+    // Extract OT URL from the Google snippet (description)
+    const snippet = item.description ?? item.markdown ?? item.content ?? "";
+    const mSlug = snippet.match(/https?:\/\/(?:www\.)?opentable\.(?:com|co\.uk)\/r\/([^/?#\s"')\]<>]+)/i);
+    if (mSlug) candidates2.push(`https://www.opentable.com/r/${mSlug[1]}`);
+    const mNum  = snippet.match(/https?:\/\/(?:www\.)?opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
+    if (mNum)  candidates2.push(`https://www.opentable.com/restaurant/profile/${mNum[1]}`);
+
+    for (const url of candidates2) {
+      if (!otSeen.has(url)) {
+        otSeen.add(url);
+        otItems.push({ url, title: item.title, description: item.description });
+      }
+    }
+  }
+
+  console.log(`[OT widget] ${otItems.length} OT URLs extracted from ${raw.length} search results`);
+  const candidates = otItems.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
 
   // For each candidate with a rid, add the widget canvas URL for verification.
   for (const c of candidates) {
