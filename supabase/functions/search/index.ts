@@ -174,7 +174,8 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17-final2",
+      _v:                  "v17-final3",
+      _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1260,6 +1261,10 @@ async function verifyOTViaBB(
       useProxy: false,
       timeoutMs: 14_000,
     });
+    if (!(globalThis as any).__otVerifyDebug) {
+      (globalThis as any).__otVerifyDebug = `${r.name}|len=${text.length}|url=${r.platformUrl}|snippet=${text.substring(0,300)}`;
+    }
+    console.log(`[OT BB verify] ${r.name}: text len=${text.length} snippet="${text.substring(0,200)}"`);
     if (text.length < 50) { console.log(`[OT BB] ${r.name}: short text`); return null; }
     if (/access denied|security check|are you a robot|just a moment/i.test(text)) {
       console.log(`[OT BB] ${r.name}: Akamai blocked`);
@@ -1267,6 +1272,7 @@ async function verifyOTViaBB(
     }
     const slots    = extractTimes(text);
     const windowed = filterWindow(slots, params.time);
+    console.log(`[OT BB verify] ${r.name}: slots=${JSON.stringify(slots.slice(0,5))} windowed=${windowed.length}`);
     if (windowed.length === 0) {
       console.log(`[OT BB] ${r.name}: no slots`);
       return null;
