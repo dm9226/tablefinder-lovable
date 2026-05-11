@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v16
+// TableFinder Search Edge Function — v17
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -92,6 +92,8 @@ serve(async (req) => {
     const APIFY          = Deno.env.get("APIFY_API_TOKEN") ?? "";
     const SCRAPER_URL    = Deno.env.get("SCRAPER_LAMBDA_URL") ?? "";
     const SCRAPER_SECRET = Deno.env.get("SCRAPER_SECRET") ?? "";
+    const BB_KEY         = Deno.env.get("BROWSERBASE_API_KEY")    ?? "";
+    const BB_PROJECT     = Deno.env.get("BROWSERBASE_PROJECT_ID") ?? "";
 
     if (body.extended === true) {
       const extra = await runExtendedSearch(body, FIRECRAWL, AI_KEY, APIFY, SCRAPER_URL, SCRAPER_SECRET);
@@ -114,8 +116,8 @@ serve(async (req) => {
       SCRAPER_URL && SCRAPER_SECRET
         ? abortableDiscover(() => discoverResyViaBB(params, SCRAPER_URL, SCRAPER_SECRET), DISCOVER_MS)
         : Promise.resolve([] as Restaurant[]),
-      SCRAPER_URL && SCRAPER_SECRET
-        ? abortableDiscover(() => discoverOTViaBB(params, SCRAPER_URL, SCRAPER_SECRET), DISCOVER_MS)
+      BB_KEY && BB_PROJECT
+        ? abortableDiscover(() => discoverOTViaBB(params, BB_KEY, BB_PROJECT), DISCOVER_MS)
         : APIFY
           ? abortableDiscover(() => discoverOpenTable(params, FIRECRAWL, APIFY), DISCOVER_MS)
           : Promise.resolve([] as Restaurant[]),
@@ -130,8 +132,8 @@ serve(async (req) => {
     // ── Verification ──────────────────────────────────────────────────────────
     const verifyStart = Date.now();
     const [resyVer, otVer, yelpVer] = await Promise.all([
-      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET),
-      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET),
+      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",       ""),
+      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS, "",           "",             BB_KEY, BB_PROJECT),
       verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS),
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
@@ -172,12 +174,13 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v16-lambda-real-browser",
+      _v:                  "v17-resy-lambda-ot-browserbase",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
         verified:       { resy: resyVer.length, ot: otVer.length, yelp: yelpVer.length },
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
+        bb_enabled:      !!(BB_KEY && BB_PROJECT),
       },
     });
 
@@ -226,10 +229,12 @@ async function runExtendedSearch(
     lng:         body.lng ?? extendedParams.lng,
   };
 
+  const BB_KEY2     = Deno.env.get("BROWSERBASE_API_KEY")    ?? "";
+  const BB_PROJECT2 = Deno.env.get("BROWSERBASE_PROJECT_ID") ?? "";
   const batch = (remainingCandidates as Restaurant[]).slice(0, 18);
   const [resyVer, otVer, yelpVer] = await Promise.all([
-    verifyBatch(batch.filter(r => r.platform === "resy"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET),
-    verifyBatch(batch.filter(r => r.platform === "opentable"), params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET),
+    verifyBatch(batch.filter(r => r.platform === "resy"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",        ""),
+    verifyBatch(batch.filter(r => r.platform === "opentable"), params, FIRECRAWL, VERIFY_MS, "",           "",             BB_KEY2, BB_PROJECT2),
     verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS),
   ]);
 
@@ -339,6 +344,119 @@ async function lambdaLoad(
   } catch (err: any) {
     clearTimeout(timer);
     throw err;
+  }
+}
+
+// ─── BROWSERBASE CDP CLIENT ───────────────────────────────────────────────────
+// Raw CDP over WebSocket — no npm packages, Deno built-in WebSocket.
+// Creates a real Chrome session on Browserbase (residential IP pool),
+// navigates to the target URL, waits for React/SPA to render, then evaluates
+// a JS expression and returns the result as a string.
+// Used for OT which blocks all datacenter IPs via Akamai Bot Manager.
+
+async function bbLoad(
+  url: string,
+  bbKey: string,
+  bbProject: string,
+  opts: { waitMs?: number; useProxy?: boolean; timeoutMs?: number; evalExpr?: string } = {},
+): Promise<string> {
+  const { waitMs = 4000, useProxy = true, timeoutMs = 25_000, evalExpr } = opts;
+
+  // Step 1: Create Browserbase session (residential proxy enabled by default for OT)
+  const sessResp = await fetch("https://api.browserbase.com/v1/sessions", {
+    method: "POST",
+    headers: { "x-bb-api-key": bbKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: bbProject,
+      browserSettings: { solveCaptchas: true },
+      ...(useProxy ? { proxies: [{ type: "browserbase" }] } : {}),
+    }),
+  });
+  if (!sessResp.ok) throw new Error(`BB create session: ${sessResp.status}`);
+  const { id: sessionId } = await sessResp.json();
+
+  // Step 2: CDP over WebSocket
+  let msgId = 0;
+  const pending = new Map<number, [(v: any) => void, (e: Error) => void]>();
+
+  const ws = new WebSocket(
+    `wss://connect.browserbase.com?apiKey=${bbKey}&sessionId=${sessionId}`
+  );
+
+  function cdpSend(method: string, params: any = {}, sid?: string): Promise<any> {
+    return new Promise((res, rej) => {
+      const id = ++msgId;
+      pending.set(id, [res, rej]);
+      const msg: any = { id, method, params };
+      if (sid) msg.sessionId = sid;
+      ws.send(JSON.stringify(msg));
+    });
+  }
+
+  let outerResolve!: (v: string) => void;
+  let outerReject!:  (e: any)    => void;
+  const result = new Promise<string>((res, rej) => {
+    outerResolve = res;
+    outerReject  = rej;
+  });
+
+  const timer = setTimeout(() => {
+    ws.close();
+    outerReject(new Error(`bbLoad timeout ${timeoutMs}ms for ${url}`));
+  }, timeoutMs);
+
+  ws.onmessage = (evt: MessageEvent) => {
+    try {
+      const msg = JSON.parse(evt.data as string);
+      if (msg.id && pending.has(msg.id)) {
+        const [res, rej] = pending.get(msg.id)!;
+        pending.delete(msg.id);
+        msg.error ? rej(new Error(msg.error.message ?? "CDP error")) : res(msg.result);
+      }
+    } catch { /* ignore parse errors */ }
+  };
+
+  ws.onerror = () => { clearTimeout(timer); outerReject(new Error("BB WebSocket error")); };
+
+  ws.onopen = async () => {
+    try {
+      const { targetInfos } = await cdpSend("Target.getTargets");
+      const page = (targetInfos as any[]).find(t => t.type === "page");
+      if (!page) throw new Error("No page target");
+
+      const { sessionId: pageSid } = await cdpSend("Target.attachToTarget", {
+        targetId: page.targetId,
+        flatten: true,
+      });
+
+      await cdpSend("Page.navigate", { url }, pageSid);
+      await new Promise(r => setTimeout(r, waitMs));
+
+      const expr = evalExpr ?? "document.body.innerText";
+      const { result: evalResult } = await cdpSend("Runtime.evaluate", {
+        expression: expr,
+        returnByValue: true,
+        awaitPromise: true,
+      }, pageSid);
+
+      clearTimeout(timer);
+      ws.close();
+      outerResolve(String(evalResult?.value ?? ""));
+    } catch (e: any) {
+      clearTimeout(timer);
+      ws.close();
+      outerReject(e);
+    }
+  };
+
+  try {
+    return await result;
+  } finally {
+    fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+      method: "POST",
+      headers: { "x-bb-api-key": bbKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "REQUEST_RELEASE" }),
+    }).catch(() => {});
   }
 }
 
@@ -594,7 +712,7 @@ async function discoverOTviaApify(params: SearchParams, token: string): Promise<
 // Browserbase's residential proxy IPs bypass Akamai's blacklist because they
 // route through real ISPs indistinguishable from organic user traffic.
 async function discoverOTViaBB(
-  params: SearchParams, scraperUrl: string, scraperSecret: string,
+  params: SearchParams, bbKey: string, bbProject: string,
 ): Promise<Restaurant[]> {
   const domain = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
   const dt     = `${params.date}T${params.time}`;
@@ -603,16 +721,16 @@ async function discoverOTViaBB(
   const searchUrl = `https://www.${domain}/s/?covers=${params.partySize}&dateTime=${dt}&term=${cityQ}${cuiQ}`;
 
   try {
-    const linksJson = await lambdaLoad(searchUrl, scraperUrl, scraperSecret, {
+    const linksJson = await bbLoad(searchUrl, bbKey, bbProject, {
       waitMs: 5000,
-      useProxy: false, // try without proxy first — real Chrome may pass Akamai checks
+      useProxy: true,
       evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/r/"],a[href*="/restaurant/profile/"]')).map(a=>a.href))].slice(0,20))`,
     });
     const links: string[] = JSON.parse(linksJson || "[]");
-    console.log(`[OT Lambda] ${links.length} restaurants discovered`);
+    console.log(`[OT BB] ${links.length} restaurants discovered`);
     return links.map(u => normToOT({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
   } catch (err: any) {
-    console.log(`[OT Lambda] discovery error: ${err?.message}`);
+    console.log(`[OT BB] discovery error: ${err?.message}`);
     return [];
   }
 }
@@ -888,6 +1006,8 @@ async function verifyBatch(
   budgetMs: number,
   scraperUrl = "",
   scraperSecret = "",
+  bbKey = "",
+  bbProject = "",
 ): Promise<Restaurant[]> {
   if (candidates.length === 0) return [];
 
@@ -902,7 +1022,7 @@ async function verifyBatch(
     const batch      = candidates.slice(i, i + VERIFY_CONCUR);
     const perScrapeMs = Math.min(remaining - 500, 10_000); // leave 500ms margin
     const settled    = await Promise.allSettled(
-      batch.map(r => withTimeout(verifyOne(r, params, fcKey, scraperUrl, scraperSecret), perScrapeMs, null))
+      batch.map(r => withTimeout(verifyOne(r, params, fcKey, scraperUrl, scraperSecret, bbKey, bbProject), perScrapeMs, null))
     );
     for (const s of settled) {
       if (s.status === "fulfilled" && s.value !== null) results.push(s.value);
@@ -914,14 +1034,14 @@ async function verifyBatch(
 
 async function verifyOne(
   r: Restaurant, params: SearchParams, fcKey: string,
-  scraperUrl = "", scraperSecret = "",
+  scraperUrl = "", scraperSecret = "", bbKey = "", bbProject = "",
 ): Promise<Restaurant | null> {
   if (r._preVerified && r.timeSlots.length > 0) return r;
   if (r.platform === "resy")      return scraperUrl && scraperSecret
     ? verifyResyViaBB(r, params, scraperUrl, scraperSecret)
     : verifyResy(r, params, fcKey);
-  if (r.platform === "opentable") return scraperUrl && scraperSecret
-    ? verifyOTViaBB(r, params, scraperUrl, scraperSecret)
+  if (r.platform === "opentable") return bbKey && bbProject
+    ? verifyOTViaBB(r, params, bbKey, bbProject)
     : verifyOT(r, params, fcKey);
   if (r.platform === "yelp")      return verifyYelp(r, params, fcKey);
   return null;
@@ -1128,29 +1248,29 @@ async function verifyOTviaJina(r: Restaurant, params: SearchParams): Promise<Res
 
 // Real-browser OT verification — residential proxy bypasses Akamai on restaurant pages.
 async function verifyOTViaBB(
-  r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
+  r: Restaurant, params: SearchParams, bbKey: string, bbProject: string,
 ): Promise<Restaurant | null> {
   try {
-    const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, {
+    const text = await bbLoad(r.platformUrl, bbKey, bbProject, {
       waitMs: 4000,
-      useProxy: false, // try without proxy first; enable if Akamai still blocks
+      useProxy: true,
     });
-    if (text.length < 50) { console.log(`[OT Lambda] ${r.name}: short text`); return null; }
+    if (text.length < 50) { console.log(`[OT BB] ${r.name}: short text`); return null; }
     if (/access denied|security check|are you a robot|just a moment/i.test(text)) {
-      console.log(`[OT Lambda] ${r.name}: Akamai blocked even with proxy`);
+      console.log(`[OT BB] ${r.name}: Akamai blocked`);
       return null;
     }
     const slots    = extractTimes(text);
     const windowed = filterWindow(slots, params.time);
     if (windowed.length === 0) {
-      console.log(`[OT Lambda] ${r.name}: no slots`);
+      console.log(`[OT BB] ${r.name}: no slots`);
       return null;
     }
     const base          = r.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
     const ratingM = text.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
     const reviewM = text.match(/\(([\d,]+)\s*review/i);
-    console.log(`[OT Lambda] ${r.name}: ${windowed.length} slots ✓`);
+    console.log(`[OT BB] ${r.name}: ${windowed.length} slots ✓`);
     return {
       ...r,
       timeSlots:   slotsWithUrls,
@@ -1158,7 +1278,7 @@ async function verifyOTViaBB(
       reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
     };
   } catch (err: any) {
-    console.log(`[OT Lambda] ${r.name}: ${err?.message}`);
+    console.log(`[OT BB] ${r.name}: ${err?.message}`);
     return null;
   }
 }
