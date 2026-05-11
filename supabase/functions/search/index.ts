@@ -174,7 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v19c",
+      _v:                  "v19d",
       _ot_verify_debug:    (globalThis as any).__otVerifyDebug ?? null,
       _debug: {
         elapsed_ms:     elapsed,
@@ -1177,19 +1177,32 @@ async function verifyResyViaBB(
   r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant | null> {
   try {
-    // Try to extract only actual time-slot buttons. If none found (Resy may use
-    // non-button elements, or the page hasn't fully rendered), fall back to innerText.
+    // Extract time slots from Resy booking page.
+    // Priority: enabled <button> elements with time text (definitively available).
+    // If fully booked: page shows "Join Waitlist" — return sentinel so we drop it.
+    // If page hasn't loaded yet (no buttons, no waitlist): fall back to innerText.
     const evalExpr = `(() => {
+      const body = document.body.innerText || '';
       const btns = Array.from(document.querySelectorAll('button,[role="button"]'))
         .filter(b => /^\\d{1,2}:\\d{2}\\s*(AM|PM)$/i.test((b.textContent||'').trim()))
-        .filter(b => !b.disabled)
-        .map(b => (b.textContent||'').trim());
-      const unique = [...new Set(btns)];
-      return unique.length > 0 ? unique.join('\\n') : document.body.innerText;
+        .filter(b => !b.disabled);
+      if (btns.length > 0) {
+        return [...new Set(btns.map(b=>(b.textContent||'').trim()))].join('\\n');
+      }
+      // Fully booked: explicit waitlist/no-availability signal
+      if (/join\\s+waitlist|notify\\s+me|no\\s+availability|fully\\s+booked/i.test(body)) {
+        return '__NO_AVAILABILITY__';
+      }
+      // Page may not have fully rendered — fall back to full text
+      return body;
     })()`;
-    const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, { waitMs: 4000, evalExpr });
-    if (!text || text.trim().length < 50) {
+    const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, { waitMs: 5000, evalExpr });
+    if (!text || text.trim().length < 20) {
       console.log(`[Resy Lambda] ${r.name}: empty page`);
+      return null;
+    }
+    if (text.trim() === '__NO_AVAILABILITY__') {
+      console.log(`[Resy Lambda] ${r.name}: fully booked / waitlist only`);
       return null;
     }
 
@@ -1817,7 +1830,7 @@ function extractTimes(text: string): TimeSlot[] {
   let m: RegExpExecArray | null;
   while ((m = re12.exec(text)) !== null) {
     const ctx = text.slice(Math.max(0, m.index-60), m.index+m[0].length+60).toLowerCase();
-    if (/notify|sold\s*out|waitlist|unavailable/i.test(ctx)) continue;
+    if (/notify|sold\s*out|waitlist|unavailable|try\s+(these\s+)?dates?|other\s+dates?|also\s+available|opening\s+hours?|hours?\s+of\s+operation/i.test(ctx)) continue;
     let h = +m[1]; const mn = +m[2];
     if (m[3].toLowerCase() === "pm" && h !== 12) h += 12;
     if (m[3].toLowerCase() === "am" && h === 12) h = 0;
@@ -1829,7 +1842,7 @@ function extractTimes(text: string): TimeSlot[] {
   const re24 = /\b([01]?\d|2[0-3]):([0-5]\d)\b(?!\s*(?:am|pm))/gi;
   while ((m = re24.exec(text)) !== null) {
     const ctx = text.slice(Math.max(0, m.index-60), m.index+m[0].length+60).toLowerCase();
-    if (/notify|sold\s*out|waitlist|unavailable/i.test(ctx)) continue;
+    if (/notify|sold\s*out|waitlist|unavailable|try\s+(these\s+)?dates?|other\s+dates?|also\s+available|opening\s+hours?|hours?\s+of\s+operation/i.test(ctx)) continue;
     const h = +m[1], mn = +m[2];
     if (h < 6) continue;
     const t = `${h % 12 || 12}:${mn.toString().padStart(2,"0")} ${h >= 12 ? "PM" : "AM"}`;
