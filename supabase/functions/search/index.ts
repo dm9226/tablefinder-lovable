@@ -174,8 +174,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v17h-bb-more-wait",
-      _ot_bb_error:        (globalThis as any).__otBBError ?? null,
+      _v:                  "v17-final",
       _debug: {
         elapsed_ms:     elapsed,
         discovery:      { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -725,21 +724,17 @@ async function discoverOTViaBB(
   const searchUrl = `https://www.${domain}/s/?covers=${params.partySize}&dateTime=${dt}&term=${cityQ}${cuiQ}`;
 
   try {
-    const pageInfo = await bbLoad(searchUrl, bbKey, bbProject, {
+    const linksJson = await bbLoad(searchUrl, bbKey, bbProject, {
       waitMs: 6000,
       useProxy: false,
       timeoutMs: 28_000,
-      evalExpr: `JSON.stringify({title:document.title,allLinks:[...new Set(Array.from(document.querySelectorAll('a[href]')).map(a=>a.getAttribute('href')).filter(h=>h&&(h.includes('/r/')||h.includes('restaurant'))))].slice(0,30),snippet:document.body.innerText.substring(0,1500)})`,
+      evalExpr: `JSON.stringify([...new Set(Array.from(document.querySelectorAll('a[href*="/r/"]')).map(a=>a.href.split('#')[0]).filter(h=>/opentable\\.(?:com|co\\.uk)\\/r\\//.test(h)))].slice(0,20))`,
     });
-    const { title = "", allLinks = [], snippet = "" } = JSON.parse(pageInfo || "{}");
-    console.log(`[OT BB] title="${title}" allLinks=${allLinks.length}`);
-    (globalThis as any).__otBBError = `title=${title}|allLinks=${JSON.stringify(allLinks).substring(0,400)}|snippet=${snippet.substring(0,200)}`;
-    return [];
+    const links: string[] = JSON.parse(linksJson || "[]");
+    console.log(`[OT BB] ${links.length} restaurants discovered`);
+    return links.map(u => normToOT({ url: u, title: "", description: "" }, params)).filter(Boolean) as Restaurant[];
   } catch (err: any) {
-    const msg = err?.message ?? String(err);
-    console.log(`[OT BB] discovery error: ${msg}`);
-    // Temporarily surface error in results for debugging
-    (globalThis as any).__otBBError = msg;
+    console.log(`[OT BB] discovery error: ${err?.message}`);
     return [];
   }
 }
