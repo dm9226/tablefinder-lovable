@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v41",
+      _v:                  "v42",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1042,18 +1042,67 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
     return scrapeOTItems.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
   })();
 
-  // Merge results from both parallel approaches
-  const [directItems, scrapeItems] = await Promise.all([directP, scrapeP]);
+  // ── Approach 3: Firecrawl search (Google) for OT restaurant profile URLs ─────
+  // Firecrawl /search uses Google, which indexes OT canonical /restaurant/profile/NNN
+  // URLs — giving us numeric RIDs at discovery time so verifyOTviaRestref can be
+  // called directly without ever loading an Akamai-protected OT page.
+  const fcProfileP = (async () => {
+    const cityState = `${city}${state}`;
+    const cuiQ      = params.cuisine ? ` ${params.cuisine}` : "";
+    const queries   = [
+      `site:opentable.com/restaurant/profile "${city}"${cuiQ} restaurant`,
+      `site:opentable.com "${city}"${state ? ` "${params.state}"` : ""}${cuiQ} restaurant reservation`,
+    ];
+    const fcItems: Restaurant[] = [];
+    const fcSeen  = new Set<string>();
+    await Promise.all(queries.map(async (query) => {
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 14_000);
+      try {
+        const resp  = await fetch(`${FC_API}/search`, {
+          method:  "POST",
+          headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+          signal:  ctrl.signal,
+          body:    JSON.stringify({ query, limit: 10 }),
+        });
+        clearTimeout(timer);
+        if (!resp.ok) { console.log(`[OT FC search] HTTP ${resp.status}`); return; }
+        const data  = await resp.json();
+        const items: any[] = Array.isArray(data) ? data
+          : (Array.isArray(data.data)           ? data.data
+          : (Array.isArray(data.results)         ? data.results
+          : (Array.isArray(data.data?.results)   ? data.data.results : [])));
+        console.log(`[OT FC search] "${query.slice(0, 60)}": ${items.length} results`);
+        for (const item of items) {
+          const r = normToOT(item, params);
+          if (r && !fcSeen.has(r.id)) { fcSeen.add(r.id); fcItems.push(r); }
+        }
+      } catch (err: any) {
+        clearTimeout(timer);
+        console.log(`[OT FC search] ${err?.message}`);
+      }
+    }));
+    console.log(`[OT FC search] ${fcItems.length} OT restaurants (rids=${fcItems.filter(r=>r._rid).length})`);
+    return fcItems;
+  })();
+
+  // Merge results from all three parallel approaches.
+  // When the same restaurant appears in multiple results, prefer the version that has
+  // a numeric RID (needed for verifyOTviaRestref).
+  const [directItems, scrapeItems, fcProfileItems] = await Promise.all([directP, scrapeP, fcProfileP]);
   const merged   = new Map<string, Restaurant>();
-  for (const r of [...directItems, ...scrapeItems]) {
-    if (r.id && !merged.has(r.id)) merged.set(r.id, r);
+  for (const r of [...directItems, ...scrapeItems, ...fcProfileItems]) {
+    if (!r.id) continue;
+    const existing = merged.get(r.id);
+    // Prefer whichever version has a RID
+    if (!existing || (!existing._rid && r._rid)) merged.set(r.id, r);
   }
   const candidates = [...merged.values()];
   const dt = `${params.date}T${params.time}`;
   for (const c of candidates) {
     if (c._rid) c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
   }
-  const dbg = `direct=${directItems.length} scrape=${scrapeItems.length} total=${candidates.length} rids=${candidates.filter(c=>c._rid).length}`;
+  const dbg = `direct=${directItems.length} scrape=${scrapeItems.length} fc=${fcProfileItems.length} total=${candidates.length} rids=${candidates.filter(c=>c._rid).length}`;
   console.log(`[OT discovery] ${dbg}`);
   (globalThis as any).__otDiscoveryDebug = dbg;
   return candidates;
@@ -2487,8 +2536,10 @@ function pickClosest(feats: any[], userLat?: number, userLng?: number, maxMiles 
 async function enrich(restaurants: Restaurant[], params: SearchParams, aiKey: string): Promise<Restaurant[]> {
   if (restaurants.length === 0 || !aiKey) return restaurants;
   const tops   = restaurants.slice(0, 12);
+  const n      = tops.length;
   const prompt = `For each restaurant, write a one-sentence evocative description and pick 1-3 vibe tags.
 Tags: Romantic, Lively, Date Night, Outdoor Seating, Chef's Table, Wine Bar, Hidden Gem, Business Dinner, Rooftop, Casual, Fine Dining, Family Friendly.
+IMPORTANT: You MUST return EXACTLY ${n} objects in the items array — one per restaurant, in the same order. Never skip, combine, or omit any item.
 Restaurants:
 ${tops.map((r, i) => `${i + 1}. ${r.name} — ${r.cuisine}${r.neighborhood ? ` in ${r.neighborhood}` : ""}`).join("\n")}
 Respond ONLY with valid JSON (no markdown):
@@ -2505,14 +2556,27 @@ Respond ONLY with valid JSON (no markdown):
       }),
     });
     if (!resp.ok) return restaurants;
-    const data   = await resp.json();
-    const raw    = data.choices?.[0]?.message?.content ?? "{}";
-    const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
+    const data    = await resp.json();
+    const raw     = data.choices?.[0]?.message?.content ?? "{}";
+    const parsed  = JSON.parse(raw.replace(/```json|```/g, "").trim());
     const enriched: any[] = Array.isArray(parsed)
       ? parsed
       : (parsed.items ?? parsed.enrichments ?? parsed.restaurants ?? []);
     tops.forEach((r, i) => {
-      if (enriched[i]) { r.description = enriched[i].description; r.vibeTags = enriched[i].vibeTags; }
+      const e = enriched[i];
+      if (e && typeof e.description === "string" && e.description.length > 0) {
+        r.description = e.description;
+        r.vibeTags    = Array.isArray(e.vibeTags)
+          ? e.vibeTags.filter((t: any) => typeof t === "string")
+          : [];
+      } else {
+        // AI skipped this position — generate a minimal fallback so the card isn't blank
+        if (!r.description) {
+          const plat = r.platform === "resy" ? "Resy" : r.platform === "opentable" ? "OpenTable" : "Yelp";
+          r.description = `${r.cuisine || "Contemporary"} restaurant accepting reservations via ${plat}.`;
+        }
+        if (!r.vibeTags || r.vibeTags.length === 0) r.vibeTags = [];
+      }
     });
   } catch { /* optional */ }
   return restaurants;
