@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v37
+// TableFinder Search Edge Function — v38
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v37",
+      _v:                  "v38",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -879,45 +879,49 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
-  // ── Approach 1: Bing search page scrape → OT restaurant pages ───────────────
-  // Firecrawl's Google search API returns 0 for all OT-related queries (broken).
-  // Instead: scrape bing.com/search directly — it's a normal HTML page Firecrawl
-  // can fetch. Bing markdown includes OT profile URLs (/restaurant/profile/XXXXX)
-  // whose numeric path segment is the rid used by verifyOTviaRestref.
-  // Also try DuckDuckGo HTML as a fallback.
+  // ── Approach 1: Search engine scrape + OT sitemap → OT restaurant rids ─────
+  // Bing/DDG both serve CAPTCHA/challenge pages to Firecrawl (total_md ≈7k for 3 pages).
+  // Yahoo and Ecosia have less aggressive bot detection.
+  // OT sitemap (robots.txt-accessible) lists all restaurant URLs and must be publicly
+  // crawlable for Google indexing — likely bypasses Akamai's page-level protection.
   const directP = (async () => {
     const cityEnc = encodeURIComponent(`${city}${state}`);
     const cuiEnc  = params.cuisine ? `+${encodeURIComponent(params.cuisine)}` : "";
-    const bingUrls = [
-      `https://www.bing.com/search?q=site%3Aopentable.com+${cityEnc}${cuiEnc}+restaurant&count=20`,
-      `https://www.bing.com/search?q=site%3Aopentable.com+${cityEnc}+restaurant+dinner&count=20`,
-      `https://html.duckduckgo.com/html/?q=site%3Aopentable.com+${cityEnc}+restaurant`,
+    const searchUrls = [
+      // Yahoo — less aggressive anti-bot than Bing
+      `https://search.yahoo.com/search?p=site%3Aopentable.com+${cityEnc}${cuiEnc}+restaurant&n=20`,
+      `https://search.yahoo.com/search?p=site%3Aopentable.com+${cityEnc}+restaurant+dinner&n=20`,
+      // OT sitemap — must be publicly crawlable for Google indexing, may bypass Akamai
+      `https://www.opentable.com/sitemap_restaurant_profile_en_US.xml`,
     ];
     const directSeen  = new Set<string>();
     const directItems: Restaurant[] = [];
     let   totalMdLen  = 0;
+    let   bingSample  = "";
 
-    await Promise.all(bingUrls.map(async (searchUrl) => {
+    await Promise.all(searchUrls.map(async (searchUrl) => {
       try {
         const ctrl  = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 18_000);
+        const isSitemap = searchUrl.includes("sitemap");
         const resp  = await fetch(`${FC_API}/scrape`, {
           method:  "POST",
           headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
           signal:  ctrl.signal,
           body:    JSON.stringify({
             url: searchUrl, formats: ["markdown"],
-            onlyMainContent: false, waitFor: 2000, timeout: 15000,
+            onlyMainContent: false, waitFor: isSitemap ? 0 : 2000, timeout: 15000,
           }),
         });
         clearTimeout(timer);
-        if (!resp.ok) { console.log(`[OT Bing] HTTP ${resp.status} for ${searchUrl.slice(0, 60)}`); return; }
+        if (!resp.ok) { console.log(`[OT search] HTTP ${resp.status} for ${searchUrl.slice(0, 60)}`); return; }
         const data = await resp.json();
         const md: string = data.data?.markdown ?? "";
         totalMdLen += md.length;
-        console.log(`[OT Bing] "${searchUrl.slice(0, 70)}": md=${md.length}`);
+        console.log(`[OT search] "${searchUrl.slice(0, 70)}": md=${md.length}`);
+        if (!bingSample && md.length > 50) bingSample = md.substring(0, 500);
 
-        // Profile URLs: /restaurant/profile/XXXXX → rid = XXXXX
+        // Profile URLs: /restaurant/profile/XXXXX → rid = XXXXX (appears in sitemaps + OT pages)
         const profRe = /opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/gi;
         let m: RegExpExecArray | null;
         while ((m = profRe.exec(md)) !== null) {
@@ -928,7 +932,8 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
             if (r) directItems.push(r);
           }
         }
-        // Slug URLs: /r/restaurant-name
+        // Sitemap <loc> tags also use /restaurant/profile/ — already matched above
+        // Slug URLs: /r/restaurant-name (appears in Yahoo search snippets)
         const slugRe = /opentable\.(?:com|co\.uk)\/r\/([^/\s"'&?#,()<>\]]+)/gi;
         while ((m = slugRe.exec(md)) !== null) {
           const slug = m[1].replace(/[.,;:)>\]]+$/, "");
@@ -940,12 +945,12 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
           }
         }
       } catch (err: any) {
-        console.log(`[OT Bing] ${err?.message}`);
+        console.log(`[OT search] ${err?.message}`);
       }
     }));
 
-    console.log(`[OT Bing] ${directItems.length} candidates (totalMd=${totalMdLen})`);
-    (globalThis as any).__otApiDebug = `bing_candidates=${directItems.length} total_md=${totalMdLen}`;
+    console.log(`[OT search] ${directItems.length} candidates (totalMd=${totalMdLen})`);
+    (globalThis as any).__otApiDebug = `search_candidates=${directItems.length} total_md=${totalMdLen} sample=${bingSample.substring(0, 300)}`;
     return directItems;
   })();
 
@@ -2166,37 +2171,51 @@ async function verifyYelpViaLambda(
   const slug        = slugM[1];
   const timeNoColon = params.time.replace(":", "");
 
-  // Strategy: load yelp.com/biz/slug (regular review page — Cloudflare does NOT
-  // challenge /biz/ paths the way it challenges /reservations/).  Once the page
-  // loads the browser has valid Yelp session cookies.  We then execute a same-origin
-  // fetch() to the SeatMe availability API from within that page context.
-  // Same-origin means CORS is not an issue and the cookies are included automatically.
-  const bizUrl = `https://www.yelp.com/biz/${slug}`;
-  const evalExpr = `(async () => {
+  // Strategy A (v37): load biz page, call SeatMe API via same-origin fetch
+  //   → DataDome blocks the availability API even from within page context
+  // Strategy B (v38): load biz page, inject iframe pointing to /reservations/ page.
+  //   iframe src requests come from within Yelp's own origin with session cookies.
+  //   Sec-Fetch-Site=same-origin, so Cloudflare's bot check (which fires on direct
+  //   /reservations/ loads from datacenter IPs) may not apply to same-origin iframes.
+  //   We access iframe.contentDocument to extract rendered time slots.
+  const bizUrl    = `https://www.yelp.com/biz/${slug}`;
+  const reservUrl = `/reservations/${slug}?covers=${params.partySize}&date=${params.date}&time=${timeNoColon}`;
+  const evalExpr  = `(async () => {
+    // Inject an invisible iframe for the /reservations/ page.
+    // Same-origin iframes are accessible via contentDocument.
+    const iframe = document.createElement('iframe');
+    iframe.src = '${reservUrl}';
+    iframe.style.cssText = 'position:fixed;width:1280px;height:800px;top:0;left:0;opacity:0.01;z-index:-1';
+    document.body.appendChild(iframe);
+    // Wait for the reservations page + React widget to load (Yelp widget needs ~10s)
+    await new Promise(r => setTimeout(r, 12000));
     try {
-      const resp = await fetch(
-        '/reservations/${slug}/availability?covers=${params.partySize}&date=${params.date}&time=${timeNoColon}',
-        { credentials: 'include', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' } }
-      );
-      const txt = await resp.text();
-      return 'api_' + resp.status + ':' + txt;
-    } catch(e) {
-      // API fetch failed — fall back to scanning DOM for rendered time slots
-      const timeEls = document.querySelectorAll('[data-testid*="time"], [class*="timeslot"], [class*="time-slot"], button[aria-label*="PM"], button[aria-label*="AM"]');
+      const iDoc = iframe.contentDocument || iframe.contentWindow && iframe.contentWindow.document;
+      if (!iDoc) return 'iframe_no_doc:possibly_blocked';
+      const iUrl  = (iframe.contentWindow && iframe.contentWindow.location && iframe.contentWindow.location.href) || 'unknown';
+      const iText = iDoc.body ? (iDoc.body.innerText || '') : '';
+      // Look for time slot DOM elements
+      const timeEls = iDoc.querySelectorAll('[data-testid*="time"], [class*="timeslot"], [class*="time-slot"], button[aria-label*="PM"], button[aria-label*="AM"], [class*="TimeSlot"], [class*="timeSlot"]');
       const fromEls = Array.from(timeEls).map(function(e){ return (e.textContent || e.getAttribute('aria-label') || '').trim(); }).filter(Boolean);
       if (fromEls.length) return 'dom:' + fromEls.join('\\n');
-      return 'err:' + e.message;
+      // Fallback: scan innerText for time patterns
+      const timeMatch = iText.match(/\\b(1[0-2]|[1-9]):[0-5][0-9]\\s*(am|pm|AM|PM)\\b/g);
+      if (timeMatch && timeMatch.length > 0) return 'text:' + timeMatch.join('\\n');
+      // Return diagnostics — iframe URL shows if Cloudflare redirected
+      return 'iframe_diag:url=' + iUrl.substring(0, 100) + ' textLen=' + iText.length + ' sample=' + iText.substring(0, 200);
+    } catch(e) {
+      return 'iframe_err:' + e.message;
     }
   })()`;
 
   try {
     const text = await lambdaLoad(bizUrl, scraperUrl, scraperSecret, {
-      waitMs:    2000,   // just enough for the biz page to load and set cookies
-      timeoutMs: 35_000,
+      waitMs:    1500,   // load biz page, then evalExpr handles iframe + 12s wait internally
+      timeoutMs: 50_000, // 1.5s biz load + 12s iframe widget wait + overhead
       evalExpr,
     });
     // Capture for _debug regardless of outcome
-    (globalThis as any).__yelpLambdaDebug = `biz_page|len=${text?.length ?? 0} sample=${(text ?? "").substring(0, 300)}`;
+    (globalThis as any).__yelpLambdaDebug = `biz_iframe|len=${text?.length ?? 0} sample=${(text ?? "").substring(0, 300)}`;
     if (!text || text.length < 5) {
       console.log(`[Yelp Lambda] ${r.name}: empty response`);
       return null;
