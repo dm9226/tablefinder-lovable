@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v40
+// TableFinder Search Edge Function — v41
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v40",
+      _v:                  "v41",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -196,6 +196,7 @@ serve(async (req) => {
         ot_bing:         (globalThis as any).__otApiDebug      ?? null,
         ot_discovery:    (globalThis as any).__otDiscoveryDebug ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
+        ot_verify:       (globalThis as any).__otVerifyDebug    ?? null,
         ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
         yelp_api:        (globalThis as any).__yelpApiDebug      ?? null,
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug ?? null,
@@ -891,13 +892,12 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
     // disallows most paths so Yahoo/Bing have very little of OT indexed.
     // Instead search for the literal string "opentable.com/r" — this surfaces OT
     // restaurant pages and restaurant sites that link to OT with /r/ slugs.
-    // DuckDuckGo HTML returns direct (non-redirect-wrapped) OT URLs — our slugRe
-    // matches them without needing the breadcrumb regex.
+    // DuckDuckGo HTML (html.duckduckgo.com) confirmed blocked with CAPTCHA — removed.
     const searchUrls = [
       // Yahoo — "opentable.com/r" as quoted phrase; appears in OT restaurant page snippets
       `https://search.yahoo.com/search?p=%22opentable.com%2Fr%22+${cityEnc}${cuiEnc}+restaurant&n=20`,
-      // DuckDuckGo HTML — no-JS endpoint, returns direct hrefs (not Yahoo-style redirects)
-      `https://html.duckduckgo.com/html/?q=%22opentable.com%2Fr%22+${cityEnc}${cuiEnc}+restaurant`,
+      // Second Yahoo query without cuisine filter — broader net
+      `https://search.yahoo.com/search?p=%22opentable.com%2Fr%22+${cityEnc}+restaurant+dinner&n=20`,
       // OT sitemap — must be publicly crawlable for Google indexing, may bypass Akamai
       `https://www.opentable.com/sitemap_restaurant_profile_en_US.xml`,
     ];
@@ -2140,33 +2140,90 @@ async function verifyOTviaLambda(
 
   console.log(`[OT Lambda] ${r.name}: loading ${rid ? `widget (rid=${rid})` : "direct /r/ page"}`);
 
+  // evalExpr extracts the numeric RID from the canonical/og:url meta tags
+  // (OT restaurant pages have <link rel="canonical" href=".../restaurant/profile/RID">)
+  // and returns a tagged string: "blocked:<text>" or "rid=NNN\n<bodyText>".
+  // This lets us call verifyOTviaRestref with the real RID instead of parsing
+  // time slots from whatever innerText the page renders.
+  const evalExpr = `(() => {
+    const bodyText = document.body ? (document.body.innerText || '') : '';
+    if (/access denied|security check|enable javascript|are you a robot|just a moment/i.test(bodyText)) {
+      return 'blocked:' + bodyText.substring(0, 150);
+    }
+    // Extract numeric RID from canonical URL (/restaurant/profile/RID)
+    let rid = '';
+    try {
+      const canon = document.querySelector('link[rel="canonical"]');
+      const ogUrl = document.querySelector('meta[property="og:url"]');
+      const src   = ((canon && canon.getAttribute('href')) || '') + ' ' + ((ogUrl && ogUrl.getAttribute('content')) || '');
+      const m = src.match(/\\/restaurant\\/profile\\/(\\d+)/);
+      if (m) rid = m[1];
+    } catch(e) {}
+    // Fallback: search inline scripts for restaurantId / rid JSON keys
+    if (!rid) {
+      try {
+        for (const s of Array.from(document.querySelectorAll('script:not([src])'))) {
+          const m = (s.textContent || '').match(/"(?:restaurantId|\\brid\\b)"\\s*:\\s*(\\d{4,})/);
+          if (m) { rid = m[1]; break; }
+        }
+      } catch(e) {}
+    }
+    return 'rid=' + rid + '\\n' + bodyText.substring(0, 3000);
+  })()`;
+
   try {
-    const text = await lambdaLoad(urlToLoad, scraperUrl, scraperSecret, {
+    const raw = await lambdaLoad(urlToLoad, scraperUrl, scraperSecret, {
       waitMs:    5000,
       timeoutMs: 55_000,
+      evalExpr,
     });
-    if (!text || text.length < 50) {
-      console.log(`[OT Lambda] ${r.name}: short content (${text?.length ?? 0})`);
+
+    // Capture for _debug
+    if (!(globalThis as any).__otVerifyDebug) {
+      (globalThis as any).__otVerifyDebug = `${r.name}|raw_len=${raw?.length ?? 0}|sample=${(raw ?? "").substring(0, 200)}`;
+    }
+
+    if (!raw || raw.length < 10) {
+      console.log(`[OT Lambda] ${r.name}: empty response`);
       return null;
     }
-    if (/access denied|security check|enable javascript|are you a robot|just a moment/i.test(text)) {
-      console.log(`[OT Lambda] ${r.name}: Akamai blocked — soft-verified`);
-      return { ...r, timeSlots: [], softVerified: true };
+    if (raw.startsWith("blocked:")) {
+      console.log(`[OT Lambda] ${r.name}: Akamai blocked`);
+      return null;
     }
-    const slots    = extractTimes(text);
+
+    // Parse "rid=NNN\n<bodyText>"
+    const firstNewline = raw.indexOf("\n");
+    const ridLine   = firstNewline >= 0 ? raw.substring(0, firstNewline) : raw;
+    const bodyText  = firstNewline >= 0 ? raw.substring(firstNewline + 1) : "";
+    const ridM      = ridLine.match(/^rid=(\d+)$/);
+    const extractedRid = ridM ? ridM[1] : (rid ?? "");
+
+    console.log(`[OT Lambda] ${r.name}: page loaded, extractedRid=${extractedRid}, bodyLen=${bodyText.length}`);
+
+    // If we have a RID, call the proven restref API for hard slot data
+    if (extractedRid) {
+      const mockR = { ...r, _rid: extractedRid };
+      const restrefResult = await verifyOTviaRestref(mockR, params);
+      if (restrefResult) {
+        console.log(`[OT Lambda] ${r.name}: RID=${extractedRid} → restref ✓`);
+        return restrefResult;
+      }
+      console.log(`[OT Lambda] ${r.name}: restref returned no slots for rid=${extractedRid}`);
+    }
+
+    // Fallback: parse time slots directly from the page body text
+    const slots    = extractTimes(bodyText);
     const windowed = filterWindow(slots, params.time);
     if (windowed.length === 0) {
-      if (text.length > 200) {
-        console.log(`[OT Lambda] ${r.name}: no slots in window — soft-verified`);
-        return { ...r, timeSlots: [], softVerified: true };
-      }
+      console.log(`[OT Lambda] ${r.name}: no slots in body text (len=${bodyText.length})`);
       return null;
     }
     const base          = r.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
-    const ratingM = text.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
-    const reviewM = text.match(/\(([\d,]+)\s*review/i);
-    console.log(`[OT Lambda] ${r.name}: ${windowed.length} slots ✓ (rid=${rid})`);
+    const ratingM = bodyText.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM = bodyText.match(/\(([\d,]+)\s*review/i);
+    console.log(`[OT Lambda] ${r.name}: ${windowed.length} slots ✓ from page text`);
     return {
       ...r,
       timeSlots:   slotsWithUrls,
