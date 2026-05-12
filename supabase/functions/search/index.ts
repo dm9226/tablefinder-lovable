@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v39
+// TableFinder Search Edge Function — v40
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v39",
+      _v:                  "v40",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -887,10 +887,17 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const directP = (async () => {
     const cityEnc = encodeURIComponent(`${city}${state}`);
     const cuiEnc  = params.cuisine ? `+${encodeURIComponent(params.cuisine)}` : "";
+    // Note: site:opentable.com returns 0 results on Yahoo because OT's robots.txt
+    // disallows most paths so Yahoo/Bing have very little of OT indexed.
+    // Instead search for the literal string "opentable.com/r" — this surfaces OT
+    // restaurant pages and restaurant sites that link to OT with /r/ slugs.
+    // DuckDuckGo HTML returns direct (non-redirect-wrapped) OT URLs — our slugRe
+    // matches them without needing the breadcrumb regex.
     const searchUrls = [
-      // Yahoo — less aggressive anti-bot than Bing
-      `https://search.yahoo.com/search?p=site%3Aopentable.com+${cityEnc}${cuiEnc}+restaurant&n=20`,
-      `https://search.yahoo.com/search?p=site%3Aopentable.com+${cityEnc}+restaurant+dinner&n=20`,
+      // Yahoo — "opentable.com/r" as quoted phrase; appears in OT restaurant page snippets
+      `https://search.yahoo.com/search?p=%22opentable.com%2Fr%22+${cityEnc}${cuiEnc}+restaurant&n=20`,
+      // DuckDuckGo HTML — no-JS endpoint, returns direct hrefs (not Yahoo-style redirects)
+      `https://html.duckduckgo.com/html/?q=%22opentable.com%2Fr%22+${cityEnc}${cuiEnc}+restaurant`,
       // OT sitemap — must be publicly crawlable for Google indexing, may bypass Akamai
       `https://www.opentable.com/sitemap_restaurant_profile_en_US.xml`,
     ];
@@ -919,7 +926,8 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
         const md: string = data.data?.markdown ?? "";
         totalMdLen += md.length;
         console.log(`[OT search] "${searchUrl.slice(0, 70)}": md=${md.length}`);
-        if (!bingSample && md.length > 50) bingSample = md.substring(0, 500);
+        // Capture sample past nav bar (first 500 chars are usually just nav links)
+        if (!bingSample && md.length > 50) bingSample = md.substring(400, 1000);
 
         // Profile URLs: /restaurant/profile/XXXXX → rid = XXXXX (appears in sitemaps + OT pages)
         const profRe = /opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/gi;
@@ -2187,48 +2195,37 @@ async function verifyYelpViaLambda(
   // Strategy A (v37): load biz page, call SeatMe API via same-origin fetch
   //   → DataDome blocks the availability API even from within page context
   // Strategy B (v38): load biz page, inject iframe pointing to /reservations/ page.
-  //   iframe src requests come from within Yelp's own origin with session cookies.
-  //   Sec-Fetch-Site=same-origin, so Cloudflare's bot check (which fires on direct
-  //   /reservations/ loads from datacenter IPs) may not apply to same-origin iframes.
-  //   We access iframe.contentDocument to extract rendered time slots.
-  const bizUrl    = `https://www.yelp.com/biz/${slug}`;
-  const reservUrl = `/reservations/${slug}?covers=${params.partySize}&date=${params.date}&time=${timeNoColon}`;
+  //   → iframe URL set correctly but textLen=0; SPA renders nothing because
+  //     DataDome blocks the underlying SeatMe availability API calls.
+  // Strategy C (v40): load /reservations/ URL directly in real Chrome.
+  //   Better diagnostic: if DataDome blocks by IP, body text will contain challenge.
+  //   If DataDome blocks by fingerprint, real Chrome might pass it.
+  //   Either way we get richer diagnostics than textLen=0 from an iframe.
+  const reservUrl = `https://www.yelp.com/reservations/${slug}?covers=${params.partySize}&date=${params.date}&time=${timeNoColon}`;
   const evalExpr  = `(async () => {
-    // Inject an invisible iframe for the /reservations/ page.
-    // Same-origin iframes are accessible via contentDocument.
-    const iframe = document.createElement('iframe');
-    iframe.src = '${reservUrl}';
-    iframe.style.cssText = 'position:fixed;width:1280px;height:800px;top:0;left:0;opacity:0.01;z-index:-1';
-    document.body.appendChild(iframe);
-    // Wait for the reservations page + React widget to load (Yelp widget needs ~10s)
-    await new Promise(r => setTimeout(r, 12000));
-    try {
-      const iDoc = iframe.contentDocument || iframe.contentWindow && iframe.contentWindow.document;
-      if (!iDoc) return 'iframe_no_doc:possibly_blocked';
-      const iUrl  = (iframe.contentWindow && iframe.contentWindow.location && iframe.contentWindow.location.href) || 'unknown';
-      const iText = iDoc.body ? (iDoc.body.innerText || '') : '';
-      // Look for time slot DOM elements
-      const timeEls = iDoc.querySelectorAll('[data-testid*="time"], [class*="timeslot"], [class*="time-slot"], button[aria-label*="PM"], button[aria-label*="AM"], [class*="TimeSlot"], [class*="timeSlot"]');
-      const fromEls = Array.from(timeEls).map(function(e){ return (e.textContent || e.getAttribute('aria-label') || '').trim(); }).filter(Boolean);
-      if (fromEls.length) return 'dom:' + fromEls.join('\\n');
-      // Fallback: scan innerText for time patterns
-      const timeMatch = iText.match(/\\b(1[0-2]|[1-9]):[0-5][0-9]\\s*(am|pm|AM|PM)\\b/g);
-      if (timeMatch && timeMatch.length > 0) return 'text:' + timeMatch.join('\\n');
-      // Return diagnostics — iframe URL shows if Cloudflare redirected
-      return 'iframe_diag:url=' + iUrl.substring(0, 100) + ' textLen=' + iText.length + ' sample=' + iText.substring(0, 200);
-    } catch(e) {
-      return 'iframe_err:' + e.message;
-    }
+    // Wait for React + SeatMe widget to render (needs ~10s for API calls)
+    await new Promise(r => setTimeout(r, 10000));
+    const bodyText = document.body ? (document.body.innerText || '') : '';
+    const finalUrl = window.location.href;
+    // Look for time slot DOM elements first (fastest path)
+    const timeEls = document.querySelectorAll('[data-testid*="time"], [class*="timeslot"], [class*="time-slot"], button[aria-label*="PM"], button[aria-label*="AM"], [class*="TimeSlot"], [class*="timeSlot"]');
+    const fromEls = Array.from(timeEls).map(function(e){ return (e.textContent || e.getAttribute('aria-label') || '').trim(); }).filter(Boolean);
+    if (fromEls.length) return 'dom:' + fromEls.join('\\n');
+    // Fallback: scan innerText for time patterns
+    const timeMatch = bodyText.match(/\\b(1[0-2]|[1-9]):[0-5][0-9]\\s*(am|pm|AM|PM)\\b/g);
+    if (timeMatch && timeMatch.length > 0) return 'text:' + timeMatch.join('\\n');
+    // Diagnostics: capture URL (redirect?) + body sample
+    return 'diag:url=' + finalUrl.substring(0, 120) + ' textLen=' + bodyText.length + ' sample=' + bodyText.substring(0, 400);
   })()`;
 
   try {
-    const text = await lambdaLoad(bizUrl, scraperUrl, scraperSecret, {
-      waitMs:    1500,   // load biz page, then evalExpr handles iframe + 12s wait internally
-      timeoutMs: 50_000, // 1.5s biz load + 12s iframe widget wait + overhead
+    const text = await lambdaLoad(reservUrl, scraperUrl, scraperSecret, {
+      waitMs:    500,    // minimal waitMs — evalExpr handles the actual 10s wait internally
+      timeoutMs: 55_000, // 0.5s nav + 10s widget wait + overhead
       evalExpr,
     });
     // Capture for _debug regardless of outcome
-    (globalThis as any).__yelpLambdaDebug = `biz_iframe|len=${text?.length ?? 0} sample=${(text ?? "").substring(0, 300)}`;
+    (globalThis as any).__yelpLambdaDebug = `direct_reserv|len=${text?.length ?? 0} sample=${(text ?? "").substring(0, 300)}`;
     if (!text || text.length < 5) {
       console.log(`[Yelp Lambda] ${r.name}: empty response`);
       return null;
