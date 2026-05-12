@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v38
+// TableFinder Search Edge Function — v39
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v38",
+      _v:                  "v39",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -933,11 +933,24 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
           }
         }
         // Sitemap <loc> tags also use /restaurant/profile/ — already matched above
-        // Slug URLs: /r/restaurant-name (appears in Yahoo search snippets)
+        // Slug URLs: /r/restaurant-name (appears in Yahoo search snippets as hyperlinks)
         const slugRe = /opentable\.(?:com|co\.uk)\/r\/([^/\s"'&?#,()<>\]]+)/gi;
         while ((m = slugRe.exec(md)) !== null) {
           const slug = m[1].replace(/[.,;:)>\]]+$/, "");
           const u    = `https://www.opentable.com/r/${slug}`;
+          if (!directSeen.has(u)) {
+            directSeen.add(u);
+            const r = normToOT({ url: u, title: "", description: "" }, params);
+            if (r) directItems.push(r);
+          }
+        }
+        // Yahoo breadcrumb format: "opentable.com › r › restaurant-name-city"
+        // Yahoo renders OT result URLs as breadcrumbs using › (U+203A) instead of /
+        const bcRe = /opentable\.(?:com|co\.uk)\s*[›>]\s*r\s*[›>]\s*([a-z0-9][a-z0-9-]+)/gi;
+        while ((m = bcRe.exec(md)) !== null) {
+          const slug = m[1].replace(/[.,;:)>\]›]+$/, "");
+          if (slug.length < 3) continue;
+          const u = `https://www.opentable.com/r/${slug}`;
           if (!directSeen.has(u)) {
             directSeen.add(u);
             const r = normToOT({ url: u, title: "", description: "" }, params);
