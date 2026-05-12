@@ -186,7 +186,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v32",
+      _v:                  "v33",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -880,14 +880,14 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
   // ── Approach 1: Google search → OT restaurant pages directly ────────────────
-  // "opentable.com/r" as a quoted phrase lets Google match pages that contain or
-  // ARE the OT restaurant URL — better than inurl: which Firecrawl returns 0 for.
-  // Also scans title/snippet text for OT slugs (Google often shows OT URLs in
-  // snippets even when the indexed page is a restaurant's own website).
+  // site:opentable.com (no path restriction) is the operator proven to work with
+  // Firecrawl's Google search — path-restricted site: and inurl: both return 0.
+  // OT profile URLs (/restaurant/profile/XXXXX) contain the numeric rid directly
+  // in the path, which extractRid() parses → verifyOTviaRestref() confirms slots.
   const directP = (async () => {
     const directQueries = [
-      `"opentable.com/r" ${city}${state}${cuisine} restaurant reservation`,
-      `"opentable.com/r" ${city}${state} restaurant dinner reservation`,
+      `site:opentable.com ${city}${state}${cuisine} restaurant`,
+      `site:opentable.com ${city}${state} restaurant dinner`,
     ];
     const directRaw  = await firecrawlSearch(directQueries, fcKey, 12);
     const directSeen = new Set<string>();
