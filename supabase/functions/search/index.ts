@@ -148,14 +148,10 @@ serve(async (req) => {
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
-    // Hard-verified first (real confirmed time slots), then soft-verified as supplements.
-    // Soft-verified = platform confirmed the restaurant takes reservations but couldn't
-    // extract specific times (JS widget, bot block, etc.). The UI renders them with a
-    // "check availability on [platform]" notice so users still get actionable results.
-    const allVer  = dedup([...resyVer, ...otVer, ...yelpVer]);
-    const hardVer = allVer.filter(r => !r.softVerified);
-    const softVer = allVer.filter(r =>  r.softVerified);
-    let verified  = [...hardVer, ...softVer];
+    // Hard-verified only — real confirmed time slots.
+    // Soft-verified results are dropped: they have no actionable slot data.
+    let verified = dedup([...resyVer, ...otVer, ...yelpVer])
+      .filter(r => !r.softVerified);
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
     const [ranked] = await Promise.all([
@@ -189,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v35",
+      _v:                  "v36",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1543,14 +1539,8 @@ async function verifyOne(
     console.log(`[verifyOne Yelp] ${r.name}: lambda=${lSlots} slots fc=${fSlots} slots fc_platform=${fcResult?.platform ?? "null"}`);
     if (lambdaResult && lSlots > 0) return lambdaResult;
     if (fcResult    && fSlots > 0) return fcResult;
-    // No hard slots from either path — fall back to soft-verified Firecrawl result.
-    // fcResult may be: (a) soft-verified Yelp ("check availability on Yelp" CTA),
-    // (b) an OT/Resy bridge result with 0 slots (OT restref blocked or no availability).
-    // Both are better than null — the UI shows "check availability" notices for soft results.
-    if (fcResult) {
-      console.log(`[verifyOne Yelp] ${r.name}: soft-verified via ${fcResult.platform} — keeping`);
-      return fcResult;
-    }
+    // OT/Resy bridge with confirmed slots is already handled above via fSlots > 0.
+    // Soft-verified results (no slots) are dropped — not actionable.
     return null;
   }
   return null;
