@@ -189,7 +189,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v34",
+      _v:                  "v35",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -198,6 +198,7 @@ serve(async (req) => {
         resy_api:        (globalThis as any).__resyApiDebug    ?? null,
         ot_lambda:       (globalThis as any).__otLambdaDebug   ?? null,
         ot_api:          (globalThis as any).__otApiDebug      ?? null,
+        ot_bing:         (globalThis as any).__otBingDebug     ?? null,
         ot_discovery:    (globalThis as any).__otDiscoveryDebug ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
         ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
@@ -882,42 +883,73 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
   const domain  = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
 
-  // ── Approach 1: Google search → OT restaurant pages directly ────────────────
-  // site:opentable.com (no path restriction) is the operator proven to work with
-  // Firecrawl's Google search — path-restricted site: and inurl: both return 0.
-  // OT profile URLs (/restaurant/profile/XXXXX) contain the numeric rid directly
-  // in the path, which extractRid() parses → verifyOTviaRestref() confirms slots.
+  // ── Approach 1: Bing search page scrape → OT restaurant pages ───────────────
+  // Firecrawl's Google search API returns 0 for all OT-related queries (broken).
+  // Instead: scrape bing.com/search directly — it's a normal HTML page Firecrawl
+  // can fetch. Bing markdown includes OT profile URLs (/restaurant/profile/XXXXX)
+  // whose numeric path segment is the rid used by verifyOTviaRestref.
+  // Also try DuckDuckGo HTML as a fallback.
   const directP = (async () => {
-    const directQueries = [
-      `site:opentable.com ${city}${state}${cuisine} restaurant`,
-      `site:opentable.com ${city}${state} restaurant dinner`,
+    const cityEnc = encodeURIComponent(`${city}${state}`);
+    const cuiEnc  = params.cuisine ? `+${encodeURIComponent(params.cuisine)}` : "";
+    const bingUrls = [
+      `https://www.bing.com/search?q=site%3Aopentable.com+${cityEnc}${cuiEnc}+restaurant&count=20`,
+      `https://www.bing.com/search?q=site%3Aopentable.com+${cityEnc}+restaurant+dinner&count=20`,
+      `https://html.duckduckgo.com/html/?q=site%3Aopentable.com+${cityEnc}+restaurant`,
     ];
-    const directRaw  = await firecrawlSearch(directQueries, fcKey, 12);
-    const directSeen = new Set<string>();
+    const directSeen  = new Set<string>();
     const directItems: Restaurant[] = [];
-    for (const item of directRaw) {
-      // Direct URL hit — the result page is itself an OT restaurant page
-      if (/opentable\.(?:com|co\.uk)\/(r\/|restaurant\/profile\/)/i.test(item.url ?? "")) {
-        const r = normToOT(item, params);
-        if (r && !directSeen.has(r.id)) { directSeen.add(r.id); directItems.push(r); }
+    let   totalMdLen  = 0;
+
+    await Promise.all(bingUrls.map(async (searchUrl) => {
+      try {
+        const ctrl  = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 18_000);
+        const resp  = await fetch(`${FC_API}/scrape`, {
+          method:  "POST",
+          headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+          signal:  ctrl.signal,
+          body:    JSON.stringify({
+            url: searchUrl, formats: ["markdown"],
+            onlyMainContent: false, waitFor: 2000, timeout: 15000,
+          }),
+        });
+        clearTimeout(timer);
+        if (!resp.ok) { console.log(`[OT Bing] HTTP ${resp.status} for ${searchUrl.slice(0, 60)}`); return; }
+        const data = await resp.json();
+        const md: string = data.data?.markdown ?? "";
+        totalMdLen += md.length;
+        console.log(`[OT Bing] "${searchUrl.slice(0, 70)}": md=${md.length}`);
+
+        // Profile URLs: /restaurant/profile/XXXXX → rid = XXXXX
+        const profRe = /opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/gi;
+        let m: RegExpExecArray | null;
+        while ((m = profRe.exec(md)) !== null) {
+          const u = `https://www.opentable.com/restaurant/profile/${m[1]}`;
+          if (!directSeen.has(u)) {
+            directSeen.add(u);
+            const r = normToOT({ url: u, title: "", description: "" }, params);
+            if (r) directItems.push(r);
+          }
+        }
+        // Slug URLs: /r/restaurant-name
+        const slugRe = /opentable\.(?:com|co\.uk)\/r\/([^/\s"'&?#,()<>\]]+)/gi;
+        while ((m = slugRe.exec(md)) !== null) {
+          const slug = m[1].replace(/[.,;:)>\]]+$/, "");
+          const u    = `https://www.opentable.com/r/${slug}`;
+          if (!directSeen.has(u)) {
+            directSeen.add(u);
+            const r = normToOT({ url: u, title: "", description: "" }, params);
+            if (r) directItems.push(r);
+          }
+        }
+      } catch (err: any) {
+        console.log(`[OT Bing] ${err?.message}`);
       }
-      // Also scan title + snippet text for OT restaurant slugs
-      // (Google returns restaurant websites whose snippets mention "Book on opentable.com/r/...")
-      const txt     = `${item.url ?? ""} ${item.title ?? ""} ${item.description ?? ""}`;
-      const slugRe  = /opentable\.(?:com|co\.uk)\/r\/([^/\s"'&?#,()<>\]]+)/gi;
-      let m;
-      while ((m = slugRe.exec(txt)) !== null) {
-        // Skip if the result URL itself is OT (already handled above)
-        if (/opentable\.(?:com|co\.uk)\/(r\/|restaurant\/profile\/)/i.test(item.url ?? "")) continue;
-        const slug  = m[1].replace(/[.,;:)>\]]+$/, "");
-        const u     = `https://www.opentable.com/r/${slug}`;
-        const synth = { url: u, title: item.title ?? "", description: "" };
-        const r     = normToOT(synth, params);
-        if (r && !directSeen.has(r.id)) { directSeen.add(r.id); directItems.push(r); }
-      }
-    }
-    console.log(`[OT direct] ${directRaw.length} raw → ${directItems.length} OT URLs`);
-    (globalThis as any).__otApiDebug = `direct_raw=${directRaw.length} direct_ot=${directItems.length}`;
+    }));
+
+    console.log(`[OT Bing] ${directItems.length} candidates (totalMd=${totalMdLen})`);
+    (globalThis as any).__otApiDebug = `bing_candidates=${directItems.length} total_md=${totalMdLen}`;
     return directItems;
   })();
 
@@ -1889,8 +1921,8 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       body: JSON.stringify({
         url: r.platformUrl, formats: ["markdown", "rawHtml"],
         onlyMainContent: false,
-        waitFor: 5000,  // Yelp /reservations/ pages are heavily JS-rendered
-        timeout: 15000,
+        waitFor: 9000,  // Yelp reservation widget needs ~8-9s to fully hydrate
+        timeout: 20000,
       }),
     });
     if (!resp.ok) { console.log(`[verifyYelp] ${r.name}: HTTP ${resp.status}`); return null; }
@@ -2022,12 +2054,15 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
       return null;
     }
 
-    const slots    = extractTimes(md);
-    const windowed = filterWindow(slots, params.time);
-    const ratingM  = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
-    const reviewM  = md.match(/\(([\d,]+)\s*review/i);
-    const priceM   = md.match(/(\$+)\s*(?:·|•|,|\s)/);
-    const meta     = {
+    // Also scan rawHtml for times — Yelp may embed slot data in Next.js __NEXT_DATA__
+    // JSON or other script tags that don't appear in the markdown.
+    const htmlTimes = html.length > 500 ? extractTimes(html.substring(0, 120_000)) : [];
+    const slots     = [...extractTimes(md), ...htmlTimes];
+    const windowed  = filterWindow(slots, params.time);
+    const ratingM   = md.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
+    const reviewM   = md.match(/\(([\d,]+)\s*review/i);
+    const priceM    = md.match(/(\$+)\s*(?:·|•|,|\s)/);
+    const meta      = {
       rating:      ratingM ? parseFloat(ratingM[1])                 : rr.rating,
       reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : rr.reviewCount,
       priceRange:  priceM  ? priceM[1]                              : rr.priceRange,
