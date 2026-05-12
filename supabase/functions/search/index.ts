@@ -148,11 +148,14 @@ serve(async (req) => {
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
-    // Only show hard-verified results (real confirmed time slots).
-    // Soft-verified = "we think this restaurant takes reservations but couldn't confirm times" —
-    // not useful to users; drop them entirely.
-    let verified = dedup([...resyVer, ...otVer, ...yelpVer])
-      .filter(r => !r.softVerified);
+    // Hard-verified first (real confirmed time slots), then soft-verified as supplements.
+    // Soft-verified = platform confirmed the restaurant takes reservations but couldn't
+    // extract specific times (JS widget, bot block, etc.). The UI renders them with a
+    // "check availability on [platform]" notice so users still get actionable results.
+    const allVer  = dedup([...resyVer, ...otVer, ...yelpVer]);
+    const hardVer = allVer.filter(r => !r.softVerified);
+    const softVer = allVer.filter(r =>  r.softVerified);
+    let verified  = [...hardVer, ...softVer];
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
     const [ranked] = await Promise.all([
@@ -186,7 +189,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v33",
+      _v:                  "v34",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1508,9 +1511,13 @@ async function verifyOne(
     console.log(`[verifyOne Yelp] ${r.name}: lambda=${lSlots} slots fc=${fSlots} slots fc_platform=${fcResult?.platform ?? "null"}`);
     if (lambdaResult && lSlots > 0) return lambdaResult;
     if (fcResult    && fSlots > 0) return fcResult;
-    // fc may have found a bridge result on another platform (OT/Resy) with slots
-    if (fcResult && fcResult.platform !== "yelp" && fSlots === 0) {
-      console.log(`[verifyOne Yelp] ${r.name}: bridge result ${fcResult.platform} has 0 slots — dropping`);
+    // No hard slots from either path — fall back to soft-verified Firecrawl result.
+    // fcResult may be: (a) soft-verified Yelp ("check availability on Yelp" CTA),
+    // (b) an OT/Resy bridge result with 0 slots (OT restref blocked or no availability).
+    // Both are better than null — the UI shows "check availability" notices for soft results.
+    if (fcResult) {
+      console.log(`[verifyOne Yelp] ${r.name}: soft-verified via ${fcResult.platform} — keeping`);
+      return fcResult;
     }
     return null;
   }
@@ -2132,8 +2139,13 @@ async function verifyYelpViaLambda(
       const timeEls = document.querySelectorAll('[data-testid*="time"], [class*="timeslot"], [class*="time-slot"], button[aria-label*="PM"], button[aria-label*="AM"]');
       const fromEls = Array.from(timeEls).map(e => (e.textContent || e.getAttribute('aria-label') || '').trim()).filter(Boolean);
       if (fromEls.length) return fromEls.join('\\n');
-      // Fallback: full innerText (extractTimes will parse it)
-      return document.body.innerText;
+      // Fallback: full innerText
+      const bodyText = document.body.innerText || '';
+      if (bodyText.length > 100) return bodyText;
+      // Last resort: scan raw HTML for time patterns (handles bot-block pages where innerText=empty)
+      const html = document.documentElement.innerHTML.substring(0, 80000);
+      const times = html.match(/\\b(1[0-2]|[1-9]):[0-5][0-9]\\s*(am|pm|AM|PM)\\b/g) || [];
+      return times.length ? times.join('\\n') : html.substring(0, 3000);
     })()`;
     const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, {
       waitMs:    10000,  // Yelp's reservation widget needs ~8-10s to fully hydrate
