@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v31
+// TableFinder Search Edge Function — v37
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v36",
+      _v:                  "v37",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -193,13 +193,13 @@ serve(async (req) => {
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
         resy_api:        (globalThis as any).__resyApiDebug    ?? null,
         ot_lambda:       (globalThis as any).__otLambdaDebug   ?? null,
-        ot_api:          (globalThis as any).__otApiDebug      ?? null,
-        ot_bing:         (globalThis as any).__otBingDebug     ?? null,
+        ot_bing:         (globalThis as any).__otApiDebug      ?? null,
         ot_discovery:    (globalThis as any).__otDiscoveryDebug ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
         ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
         yelp_api:        (globalThis as any).__yelpApiDebug      ?? null,
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug ?? null,
+        yelp_fc_sample:  (globalThis as any).__yelpFcSample    ?? null,
       },
     });
 
@@ -1921,6 +1921,11 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     const html: string = data.data?.rawHtml ?? "";
     if (md.length < 50) { console.log(`[verifyYelp] ${r.name}: short markdown (${md.length})`); return null; }
 
+    // Capture first FC markdown sample so _debug shows what Firecrawl returned
+    if (!(globalThis as any).__yelpFcSample) {
+      (globalThis as any).__yelpFcSample = `${r.name}|md_len=${md.length}|html_len=${html.length}|sample=${md.substring(0, 400)}`;
+    }
+
     // Extract actual restaurant name from page og:title (slug-derived fallback names
     // include Yelp city-disambiguation suffixes like "Fox Bros Bar B Q Atlanta").
     const pageMetaTitle = (data.data?.metadata?.ogTitle ?? data.data?.metadata?.title ?? "") as string;
@@ -2155,60 +2160,86 @@ async function verifyOTviaLambda(
 async function verifyYelpViaLambda(
   r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant | null> {
-  try {
-    // Use a targeted evalExpr to pull time slot text directly from Yelp's DOM.
-    // Yelp renders available times as buttons/spans — body.innerText misses them
-    // because they're inside components that don't surface in plain text order.
-    const yelpEvalExpr = `(function(){
-      // Try dedicated time-slot elements first
+  // Extract slug from URL
+  const slugM = r.platformUrl.match(/yelp\.com\/(?:reservations\/|biz\/)([^/?#\s]+)/i);
+  if (!slugM) { console.log(`[Yelp Lambda] ${r.name}: no slug`); return null; }
+  const slug        = slugM[1];
+  const timeNoColon = params.time.replace(":", "");
+
+  // Strategy: load yelp.com/biz/slug (regular review page — Cloudflare does NOT
+  // challenge /biz/ paths the way it challenges /reservations/).  Once the page
+  // loads the browser has valid Yelp session cookies.  We then execute a same-origin
+  // fetch() to the SeatMe availability API from within that page context.
+  // Same-origin means CORS is not an issue and the cookies are included automatically.
+  const bizUrl = `https://www.yelp.com/biz/${slug}`;
+  const evalExpr = `(async () => {
+    try {
+      const resp = await fetch(
+        '/reservations/${slug}/availability?covers=${params.partySize}&date=${params.date}&time=${timeNoColon}',
+        { credentials: 'include', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' } }
+      );
+      const txt = await resp.text();
+      return 'api_' + resp.status + ':' + txt;
+    } catch(e) {
+      // API fetch failed — fall back to scanning DOM for rendered time slots
       const timeEls = document.querySelectorAll('[data-testid*="time"], [class*="timeslot"], [class*="time-slot"], button[aria-label*="PM"], button[aria-label*="AM"]');
-      const fromEls = Array.from(timeEls).map(e => (e.textContent || e.getAttribute('aria-label') || '').trim()).filter(Boolean);
-      if (fromEls.length) return fromEls.join('\\n');
-      // Fallback: full innerText
-      const bodyText = document.body.innerText || '';
-      if (bodyText.length > 100) return bodyText;
-      // Last resort: scan raw HTML for time patterns (handles bot-block pages where innerText=empty)
-      const html = document.documentElement.innerHTML.substring(0, 80000);
-      const times = html.match(/\\b(1[0-2]|[1-9]):[0-5][0-9]\\s*(am|pm|AM|PM)\\b/g) || [];
-      return times.length ? times.join('\\n') : html.substring(0, 3000);
-    })()`;
-    const text = await lambdaLoad(r.platformUrl, scraperUrl, scraperSecret, {
-      waitMs:    10000,  // Yelp's reservation widget needs ~8-10s to fully hydrate
-      timeoutMs: 55_000,
-      evalExpr:  yelpEvalExpr,
+      const fromEls = Array.from(timeEls).map(function(e){ return (e.textContent || e.getAttribute('aria-label') || '').trim(); }).filter(Boolean);
+      if (fromEls.length) return 'dom:' + fromEls.join('\\n');
+      return 'err:' + e.message;
+    }
+  })()`;
+
+  try {
+    const text = await lambdaLoad(bizUrl, scraperUrl, scraperSecret, {
+      waitMs:    2000,   // just enough for the biz page to load and set cookies
+      timeoutMs: 35_000,
+      evalExpr,
     });
     // Capture for _debug regardless of outcome
-    (globalThis as any).__yelpLambdaDebug = `len=${text?.length ?? 0} sample=${(text ?? "").substring(0, 200)}`;
-    if (!text || text.length < 100) {
-      console.log(`[Yelp Lambda] ${r.name}: short content (${text?.length ?? 0})`);
+    (globalThis as any).__yelpLambdaDebug = `biz_page|len=${text?.length ?? 0} sample=${(text ?? "").substring(0, 300)}`;
+    if (!text || text.length < 5) {
+      console.log(`[Yelp Lambda] ${r.name}: empty response`);
       return null;
     }
 
-    // Extract restaurant name from first non-empty line (innerText page title area)
-    const firstLine = text.split("\n").map(l => l.trim()).find(l => l.length > 2 && l.length < 100) ?? "";
-    const extractedName = firstLine.replace(/\s*[|–-]\s*(Yelp|Make a Reservation|Reservations?).*$/i, "").trim();
-    const name = extractedName.length > 1 ? extractedName : r.name;
-    const rr   = { ...r, name };
+    // ── Path 1: API responded ────────────────────────────────────────────────
+    const apiM = text.match(/^api_(\d+):([\s\S]*)$/);
+    if (apiM) {
+      const statusCode = apiM[1];
+      const apiBody    = apiM[2];
+      console.log(`[Yelp Lambda] ${r.name}: API ${statusCode} (len=${apiBody.length})`);
+      if (statusCode !== "200") return null;
 
-    const slots    = extractTimes(text);
-    const windowed = filterWindow(slots, params.time);
-
-    if (windowed.length === 0) {
-      console.log(`[Yelp Lambda] ${rr.name}: no slots in window — dropping`);
-      return null;
+      const slots    = extractTimes(apiBody);
+      const windowed = filterWindow(slots, params.time);
+      if (windowed.length === 0) {
+        console.log(`[Yelp Lambda] ${r.name}: API 200 but no slots in window — ${apiBody.substring(0, 200)}`);
+        return null;
+      }
+      const base          = `https://www.yelp.com/reservations/${slug}`;
+      const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
+      console.log(`[Yelp Lambda] ${r.name}: ${windowed.length} slots via API ✓`);
+      return { ...r, timeSlots: slotsWithUrls, softVerified: false };
     }
 
-    const base          = rr.platformUrl.split("?")[0];
-    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
-    const ratingM = text.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
-    const reviewM = text.match(/\(([\d,]+)\s*review/i);
-    console.log(`[Yelp Lambda] ${rr.name}: ${windowed.length} slots ✓`);
-    return {
-      ...rr,
-      timeSlots:   slotsWithUrls,
-      rating:      ratingM ? parseFloat(ratingM[1])                 : rr.rating,
-      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : rr.reviewCount,
-    };
+    // ── Path 2: DOM time elements found ─────────────────────────────────────
+    const domM = text.match(/^dom:([\s\S]*)$/);
+    if (domM) {
+      const slots    = extractTimes(domM[1]);
+      const windowed = filterWindow(slots, params.time);
+      if (windowed.length === 0) {
+        console.log(`[Yelp Lambda] ${r.name}: DOM elements found but no slots — ${domM[1].substring(0, 100)}`);
+        return null;
+      }
+      const base          = `https://www.yelp.com/reservations/${slug}`;
+      const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
+      console.log(`[Yelp Lambda] ${r.name}: ${windowed.length} slots via DOM ✓`);
+      return { ...r, timeSlots: slotsWithUrls, softVerified: false };
+    }
+
+    // ── Path 3: Neither prefix — unexpected (Cloudflare challenge on biz page?) ──
+    console.log(`[Yelp Lambda] ${r.name}: unexpected response: ${text.substring(0, 200)}`);
+    return null;
   } catch (err: any) {
     console.log(`[Yelp Lambda] ${r.name}: ${err?.message}`);
     return null;
