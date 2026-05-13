@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v48",
+      _v:                  "v49",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1639,10 +1639,10 @@ async function verifyOne(
     if (restref) return restref;
     // Fall back to browser-based methods if restref fails or no rid available.
     return bbKey && bbProject
-      ? verifyOTViaBB(rr, params, bbKey, bbProject)
+      ? verifyOTViaBB(r, params, bbKey, bbProject)
       : scraperUrl && scraperSecret
-        ? verifyOTviaLambda(rr, params, scraperUrl, scraperSecret)
-        : verifyOT(rr, params, fcKey);
+        ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
+        : verifyOT(r, params, fcKey);
   }
   if (r.platform === "yelp") {
     // Run Firecrawl path (has OT/Resy bridge) and Lambda path (renders JS widget) in parallel.
@@ -2343,16 +2343,21 @@ async function verifyOTviaLambda(
     });
 
     // Capture for _debug
+    const _lambdaEntry = `${r.name}|raw_len=${raw?.length ?? 0}|sample=${(raw ?? "").substring(0, 100)}`;
+    (globalThis as any).__otLambdaDebug = ((globalThis as any).__otLambdaDebug
+      ? (globalThis as any).__otLambdaDebug + " || " : "") + _lambdaEntry;
     if (!(globalThis as any).__otVerifyDebug) {
       (globalThis as any).__otVerifyDebug = `${r.name}|raw_len=${raw?.length ?? 0}|sample=${(raw ?? "").substring(0, 200)}`;
     }
 
     if (!raw || raw.length < 10) {
       console.log(`[OT Lambda] ${r.name}: empty response`);
+      (globalThis as any).__otLambdaDebug += `[EMPTY]`;
       return null;
     }
     if (raw.startsWith("blocked:")) {
       console.log(`[OT Lambda] ${r.name}: Akamai blocked`);
+      (globalThis as any).__otLambdaDebug += `[BLOCKED]`;
       return null;
     }
 
