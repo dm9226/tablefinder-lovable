@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v52
+// TableFinder Search Edge Function — v53
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v52",
+      _v:                  "v53",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1646,13 +1646,13 @@ async function verifyOne(
     // Attempt restref immediately. Without a RID it returns null fast (<1ms).
     const restref = await verifyOTviaRestref(r, params);
     if (restref) return restref;
-    // Fall back to browser-based methods. Lambda (AWS real Chrome) takes precedence
-    // over BB (Browserbase CDP) since V16 replaced BB with Lambda. If neither is
-    // configured, fall through to Firecrawl (which Akamai blocks, but try anyway).
-    return scraperUrl && scraperSecret
-      ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
-      : bbKey && bbProject
-        ? verifyOTViaBB(r, params, bbKey, bbProject)
+    // Lambda AWS IPs are blocked by Akamai (ERR_HTTP2_PROTOCOL_ERROR — confirmed v52).
+    // Browserbase residential proxy bypasses Akamai's IP-based blocking, so BB takes
+    // precedence over Lambda for OT. Lambda kept as fallback if BB keys not configured.
+    return bbKey && bbProject
+      ? verifyOTViaBB(r, params, bbKey, bbProject)
+      : scraperUrl && scraperSecret
+        ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
         : verifyOT(r, params, fcKey);
   }
   if (r.platform === "yelp") {
@@ -2003,30 +2003,48 @@ async function verifyOTviaRestref(r: Restaurant, params: SearchParams): Promise<
   }
 }
 
-// Real-browser OT verification — residential proxy bypasses Akamai on restaurant pages.
+// Real-browser OT verification via Browserbase residential proxy.
+// Lambda AWS IPs are blocked by Akamai (ERR_HTTP2_PROTOCOL_ERROR).
+// Browserbase's residential proxy pool bypasses Akamai's IP-based blocking.
 async function verifyOTViaBB(
   r: Restaurant, params: SearchParams, bbKey: string, bbProject: string,
 ): Promise<Restaurant | null> {
+  const rid = r._rid ?? extractRid(r.platformUrl);
+
+  // Prefer widget canvas (lighter Akamai target) when RID is available.
+  // Falls back to the /r/slug page directly.
+  const dt        = `${params.date}T${params.time}`;
+  const urlToLoad = rid
+    ? `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`
+    : r.platformUrl;
+
+  // Write debug before bbLoad so we capture the call even if it times out
+  (globalThis as any).__otVerifyDebug = ((globalThis as any).__otVerifyDebug
+    ? (globalThis as any).__otVerifyDebug + " || " : "") + `CALL:${r.name}(rid=${rid ?? "none"})`;
+
   try {
-    const text = await bbLoad(r.platformUrl, bbKey, bbProject, {
-      waitMs: 5000,
-      useProxy: false,
-      timeoutMs: 20_000,
+    const text = await bbLoad(urlToLoad, bbKey, bbProject, {
+      waitMs:    4000,
+      useProxy:  true,   // residential proxy bypasses Akamai IP blocks
+      timeoutMs: 22_000, // fail fast enough for catch to write debug before response sent
     });
-    if (!(globalThis as any).__otVerifyDebug) {
-      (globalThis as any).__otVerifyDebug = `${r.name}|len=${text.length}|url=${r.platformUrl}|snippet=${text.substring(0,300)}`;
-    }
-    console.log(`[OT BB verify] ${r.name}: text len=${text.length} snippet="${text.substring(0,200)}"`);
+
+    (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 150)}`;
+    console.log(`[OT BB] ${r.name}: text len=${text.length}`);
+
     if (text.length < 50) { console.log(`[OT BB] ${r.name}: short text`); return null; }
     if (/access denied|security check|are you a robot|just a moment/i.test(text)) {
-      console.log(`[OT BB] ${r.name}: Akamai blocked`);
+      console.log(`[OT BB] ${r.name}: Akamai blocked even with proxy`);
+      (globalThis as any).__otVerifyDebug += `[BLOCKED]`;
       return null;
     }
+
     const slots    = extractTimes(text);
     const windowed = filterWindow(slots, params.time);
-    console.log(`[OT BB verify] ${r.name}: slots=${JSON.stringify(slots.slice(0,5))} windowed=${windowed.length}`);
+    console.log(`[OT BB] ${r.name}: slots=${slots.length} windowed=${windowed.length}`);
+
     if (windowed.length === 0) {
-      console.log(`[OT BB] ${r.name}: no slots`);
+      console.log(`[OT BB] ${r.name}: no slots in window`);
       return null;
     }
     const base          = r.platformUrl.split("?")[0];
@@ -2041,6 +2059,7 @@ async function verifyOTViaBB(
       reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
     };
   } catch (err: any) {
+    (globalThis as any).__otVerifyDebug += `→ERR:${err?.message?.substring(0, 80)}`;
     console.log(`[OT BB] ${r.name}: ${err?.message}`);
     return null;
   }
