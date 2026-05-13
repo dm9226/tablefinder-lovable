@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v42",
+      _v:                  "v43",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -898,8 +898,10 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
       `https://search.yahoo.com/search?p=%22opentable.com%2Fr%22+${cityEnc}${cuiEnc}+restaurant&n=20`,
       // Second Yahoo query without cuisine filter — broader net
       `https://search.yahoo.com/search?p=%22opentable.com%2Fr%22+${cityEnc}+restaurant+dinner&n=20`,
-      // OT sitemap — must be publicly crawlable for Google indexing, may bypass Akamai
-      `https://www.opentable.com/sitemap_restaurant_profile_en_US.xml`,
+      // Third Yahoo query: search for /restaurant/profile/ URLs which include numeric RIDs.
+      // Third-party pages (restaurant sites, aggregators) often link to OT with the canonical
+      // profile URL format, which includes the numeric RID we need for verifyOTviaRestref.
+      `https://search.yahoo.com/search?p=%22opentable.com%2Frestaurant%2Fprofile%22+${cityEnc}+restaurant&n=20`,
     ];
     const directSeen  = new Set<string>();
     const directItems: Restaurant[] = [];
@@ -1047,11 +1049,16 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   // URLs — giving us numeric RIDs at discovery time so verifyOTviaRestref can be
   // called directly without ever loading an Akamai-protected OT page.
   const fcProfileP = (async () => {
-    const cityState = `${city}${state}`;
-    const cuiQ      = params.cuisine ? ` ${params.cuisine}` : "";
-    const queries   = [
-      `site:opentable.com/restaurant/profile "${city}"${cuiQ} restaurant`,
-      `site:opentable.com "${city}"${state ? ` "${params.state}"` : ""}${cuiQ} restaurant reservation`,
+    const cuiQ  = params.cuisine ? ` ${params.cuisine}` : "";
+    const state2 = params.state ? ` "${params.state}"` : "";
+    // ── Key insight: `site:opentable.com/restaurant/profile` is a path-based site:
+    // operator which Google ignores (treats path as search terms). Instead, search
+    // for the literal string "opentable.com/restaurant/profile" as quoted text —
+    // this surfaces third-party pages (restaurant sites, aggregators, review sites)
+    // that link to OT with the canonical profile URL which includes the numeric RID.
+    const queries = [
+      `"opentable.com/restaurant/profile" "${city}"${state2}${cuiQ} restaurant`,
+      `opentable.com "${city}"${state2}${cuiQ} restaurant reservation`,
     ];
     const fcItems: Restaurant[] = [];
     const fcSeen  = new Set<string>();
@@ -1072,9 +1079,23 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
           : (Array.isArray(data.data)           ? data.data
           : (Array.isArray(data.results)         ? data.results
           : (Array.isArray(data.data?.results)   ? data.data.results : [])));
-        console.log(`[OT FC search] "${query.slice(0, 60)}": ${items.length} results`);
+        console.log(`[OT FC search] "${query.slice(0, 65)}": ${items.length} results`);
         for (const item of items) {
-          const r = normToOT(item, params);
+          // Try URL-based extraction first
+          let r = normToOT(item, params);
+          if (!r) {
+            // URL didn't match OT format — check snippet/description text for a profile URL
+            const snippet = [item.description, item.markdown, item.content, item.snippet]
+              .filter(Boolean).join(" ");
+            const profM = snippet.match(/opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
+            if (profM) r = normToOT({ ...item, url: `https://www.opentable.com/restaurant/profile/${profM[1]}` }, params);
+          } else if (!r._rid) {
+            // We have a slug URL but no RID — check snippet for a profile URL to get the RID
+            const snippet = [item.description, item.markdown, item.content, item.snippet]
+              .filter(Boolean).join(" ");
+            const profM = snippet.match(/opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
+            if (profM) r._rid = profM[1];
+          }
           if (r && !fcSeen.has(r.id)) { fcSeen.add(r.id); fcItems.push(r); }
         }
       } catch (err: any) {
