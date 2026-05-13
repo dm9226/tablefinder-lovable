@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v57
+// TableFinder Search Edge Function — v58
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v57",
+      _v:                  "v58",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2046,18 +2046,21 @@ async function verifyOTViaBB(
     }
   }
 
-  // Fast path: navigate to OT homepage to establish residential-IP session + cookies,
-  // then fetch() the restref JSON API from inside the browser context.
+  // Fast path: navigate to the RESTAURANT PAGE (not just homepage) to establish
+  // the auth cookies + JS session state that restref requires. The restref API is
+  // the same JSON endpoint called by OT's own widget when it renders on the restaurant
+  // page — so navigating there ensures the exact auth context is initialized.
   // Akamai sees: Chrome TLS fingerprint + residential IP + same-origin fetch = allowed.
+  const restaurantPageUrl = r.platformUrl.split("?")[0];
   const restrefUrl = `https://www.opentable.com/restref/api/availability?rid=${rid}&covers=${params.partySize}&day=${params.date}&lang=en-US&ref=5`;
-  const evalExpr   = `(async()=>{try{const r=await fetch(${JSON.stringify(restrefUrl)},{credentials:'include',headers:{'Accept':'application/json,text/javascript,*/*;q=0.01','Referer':'https://www.opentable.com/','Accept-Language':'en-US,en;q=0.9','X-Requested-With':'XMLHttpRequest'}});return await r.text();}catch(e){return'FETCH_ERR:'+e.message;}})()`;
+  const evalExpr   = `(async()=>{try{const r=await fetch(${JSON.stringify(restrefUrl)},{credentials:'include',headers:{'Accept':'application/json,text/javascript,*/*;q=0.01','Referer':window.location.href,'Accept-Language':'en-US,en;q=0.9','X-Requested-With':'XMLHttpRequest'}});return await r.text();}catch(e){return'FETCH_ERR:'+e.message;}})()`;
 
   try {
-    const text = await bbLoad("https://www.opentable.com", bbKey, bbProject, {
-      waitMs:    4000,   // 4s for OT homepage to fully init and set session cookies
+    const text = await bbLoad(restaurantPageUrl, bbKey, bbProject, {
+      waitMs:    5000,   // 5s for restaurant page JS to fully initialize session + auth cookies
       useProxy:  true,
       evalExpr,
-      timeoutMs: 18_000,
+      timeoutMs: 22_000,
     });
 
     (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 100)}`;
