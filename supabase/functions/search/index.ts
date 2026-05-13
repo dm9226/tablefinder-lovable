@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v59
+// TableFinder Search Edge Function — v60
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -144,7 +144,7 @@ serve(async (req) => {
     const [resyVer, otVer, yelpVer] = await Promise.all([
       verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL, SCRAPER_SECRET, "", ""),
       verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL,  SCRAPER_SECRET, BB_KEY, BB_PROJECT),
-      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET),  // extra budget for Lambda widget render
+      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET, BB_KEY, BB_PROJECT),
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v59",
+      _v:                  "v60",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -203,6 +203,7 @@ serve(async (req) => {
         yelp_api:        (globalThis as any).__yelpApiDebug      ?? null,
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug ?? null,
         yelp_fc_sample:  (globalThis as any).__yelpFcSample    ?? null,
+        yelp_bb:         (globalThis as any).__yelpBBDebug     ?? null,
       },
     });
 
@@ -257,7 +258,7 @@ async function runExtendedSearch(
   const [resyVer, otVer, yelpVer] = await Promise.all([
     verifyBatch(batch.filter(r => r.platform === "resy"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",        ""),
     verifyBatch(batch.filter(r => r.platform === "opentable"), params, FIRECRAWL, VERIFY_MS, "",           "",             BB_KEY2, BB_PROJECT2),
-    verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS),
+    verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, BB_KEY2, BB_PROJECT2),
   ]);
 
   let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
@@ -1642,6 +1643,72 @@ async function verifyBatch(
   return results;
 }
 
+// ── Yelp: Real-browser verification via Browserbase ───────────────────────────
+// DataDome (Yelp's bot protection) blocks Lambda IPs and rejects Firecrawl.
+// A real Chrome browser with Browserbase's residential proxy bypasses DataDome.
+// We intercept Yelp's own availability API call (same pattern as OT above).
+async function verifyYelpViaBB(
+  r: Restaurant, params: SearchParams, bbKey: string, bbProject: string,
+): Promise<Restaurant | null> {
+  const slugM = r.platformUrl.match(/yelp\.com\/(?:reservations\/|biz\/)([^/?#\s]+)/i);
+  if (!slugM) return null;
+  const slug = slugM[1];
+
+  // Navigate to the reservations page with date/time/covers — Yelp's widget fires
+  // availability requests automatically. Our init script intercepts them.
+  const pageUrl = `https://www.yelp.com/reservations/${slug}?covers=${params.partySize}&date=${params.date}&time=${params.time}`;
+
+  const initScript = [
+    "(function(){",
+    "var _f=window.fetch;window.__tf_yelp='';",
+    "window.fetch=function(u,i){",
+    "  var p=_f.apply(this,arguments);",
+    "  if(typeof u==='string'&&(u.indexOf('/availability')!==-1||u.indexOf('seatme')!==-1)){",
+    "    p.then(function(r){var c=r.clone();c.text().then(function(t){if(!window.__tf_yelp)window.__tf_yelp=t;}).catch(function(){});}).catch(function(){});",
+    "  }",
+    "  return p;",
+    "};",
+    "})();",
+  ].join("");
+
+  const evalExpr = "window.__tf_yelp || document.body.innerText";
+
+  try {
+    const text = await bbLoad(pageUrl, bbKey, bbProject, {
+      waitMs:    8000,
+      useProxy:  true,
+      initScript,
+      evalExpr,
+      timeoutMs: 30_000,
+    });
+
+    (globalThis as any).__yelpBBDebug = ((globalThis as any).__yelpBBDebug
+      ? (globalThis as any).__yelpBBDebug + " || " : "") + `${r.name}:len=${text.length}|s=${text.substring(0, 60)}`;
+
+    if (text.length < 50 || /access denied|you don't have permission|are you a robot|just a moment|datadome/i.test(text)) {
+      console.log(`[Yelp BB] ${r.name}: blocked (${text.length})`);
+      return null;
+    }
+
+    const slots    = extractTimes(text);
+    const windowed = filterWindow(slots, params.time);
+    if (windowed.length === 0) {
+      console.log(`[Yelp BB] ${r.name}: no slots in window (len=${text.length})`);
+      return null;
+    }
+
+    const base          = r.platformUrl.split("?")[0];
+    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
+    console.log(`[Yelp BB] ${r.name}: ${windowed.length} slots ✓`);
+    return { ...r, timeSlots: slotsWithUrls, softVerified: false };
+  } catch (err: any) {
+    (globalThis as any).__yelpBBDebug = ((globalThis as any).__yelpBBDebug
+      ? (globalThis as any).__yelpBBDebug + " || " : "") + `${r.name}:ERR:${err?.message?.substring(0, 50)}`;
+    console.log(`[Yelp BB] ${r.name}: ${err?.message}`);
+    return null;
+  }
+}
+
 async function verifyOne(
   r: Restaurant, params: SearchParams, fcKey: string,
   scraperUrl = "", scraperSecret = "", bbKey = "", bbProject = "",
@@ -1673,7 +1740,12 @@ async function verifyOne(
     return verifyOT(r, params, fcKey);
   }
   if (r.platform === "yelp") {
-    // Run Firecrawl path (has OT/Resy bridge) and Lambda path (renders JS widget) in parallel.
+    // v60: When BB is configured, use real Chrome + residential proxy to bypass DataDome.
+    // DataDome blocks Lambda IPs and rejects Firecrawl's headless browser fingerprint.
+    if (bbKey && bbProject) {
+      return verifyYelpViaBB(r, params, bbKey, bbProject);
+    }
+    // Fallback: Firecrawl (soft-verify) + Lambda (JS render) in parallel
     const [lambdaResult, fcResult] = await Promise.all([
       scraperUrl && scraperSecret
         ? verifyYelpViaLambda(r, params, scraperUrl, scraperSecret)
@@ -1685,8 +1757,6 @@ async function verifyOne(
     console.log(`[verifyOne Yelp] ${r.name}: lambda=${lSlots} slots fc=${fSlots} slots fc_platform=${fcResult?.platform ?? "null"}`);
     if (lambdaResult && lSlots > 0) return lambdaResult;
     if (fcResult    && fSlots > 0) return fcResult;
-    // OT/Resy bridge with confirmed slots is already handled above via fSlots > 0.
-    // Soft-verified results (no slots) are dropped — not actionable.
     return null;
   }
   return null;
@@ -2079,15 +2149,32 @@ async function verifyOTViaBB(
 
     (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 120)}`;
 
-    if (text.length < 10 || /access denied|just a moment/i.test(text)) {
-      console.log(`[OT BB] ${r.name}: blocked/empty`);
+    // Access Denied = Akamai blocked this proxy IP. Retry once — new bbLoad call =
+    // new Browserbase session = fresh residential proxy IP from the pool.
+    let finalText = text;
+    if (text.length < 500 && /access denied|you don't have permission/i.test(text)) {
+      console.log(`[OT BB] ${r.name}: access denied, retrying with fresh proxy IP…`);
+      (globalThis as any).__otVerifyDebug += `|RETRY`;
+      try {
+        finalText = await bbLoad(pageUrl, bbKey, bbProject, {
+          waitMs: 8000, useProxy: true, initScript, evalExpr, timeoutMs: 30_000,
+        });
+        (globalThis as any).__otVerifyDebug += `→retry_len=${finalText.length}`;
+      } catch (retryErr: any) {
+        (globalThis as any).__otVerifyDebug += `→retry_ERR:${retryErr?.message?.substring(0, 50)}`;
+        return null;
+      }
+    }
+
+    if (finalText.length < 10 || /access denied|just a moment/i.test(finalText)) {
+      console.log(`[OT BB] ${r.name}: blocked/empty after retry`);
       return null;
     }
 
-    const slots    = extractTimes(text);
+    const slots    = extractTimes(finalText);
     const windowed = filterWindow(slots, params.time);
     if (windowed.length === 0) {
-      console.log(`[OT BB] ${r.name}: no slots in window (len=${text.length})`);
+      console.log(`[OT BB] ${r.name}: no slots in window (len=${finalText.length})`);
       return null;
     }
     const base          = r.platformUrl.split("?")[0];
