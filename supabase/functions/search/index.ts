@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v61
+// TableFinder Search Edge Function — v62
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -144,7 +144,7 @@ serve(async (req) => {
     const [resyVer, otVer, yelpVer] = await Promise.all([
       verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL, SCRAPER_SECRET, "", ""),
       verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL,  SCRAPER_SECRET, BB_KEY, BB_PROJECT),
-      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET, BB_KEY, BB_PROJECT),
+      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET, "", ""),   // BB blocked by DataDome
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v61",
+      _v:                  "v62",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -265,7 +265,7 @@ async function runExtendedSearch(
   const [resyVer, otVer, yelpVer] = await Promise.all([
     verifyBatch(batch.filter(r => r.platform === "resy"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",        ""),
     verifyBatch(batch.filter(r => r.platform === "opentable"), params, FIRECRAWL, VERIFY_MS, "",           "",             BB_KEY2, BB_PROJECT2),
-    verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, BB_KEY2, BB_PROJECT2),
+    verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",       ""),   // BB blocked by DataDome
   ]);
 
   let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
@@ -1759,12 +1759,11 @@ async function verifyOne(
     return verifyOT(r, params, fcKey);
   }
   if (r.platform === "yelp") {
-    // v60: When BB is configured, use real Chrome + residential proxy to bypass DataDome.
-    // DataDome blocks Lambda IPs and rejects Firecrawl's headless browser fingerprint.
-    if (bbKey && bbProject) {
-      return verifyYelpViaBB(r, params, bbKey, bbProject);
-    }
-    // Fallback: Firecrawl (soft-verify) + Lambda (JS render) in parallel
+    // NOTE: Browserbase (BB) does NOT work for Yelp — DataDome blocks even real Chrome
+    // with residential proxy, returning a blank page (len=0). We skip BB entirely for
+    // Yelp and use Firecrawl + Lambda which work (DataDome is less aggressive on
+    // non-reservation Yelp pages / Firecrawl's infrastructure has clean IPs for Yelp).
+    // Firecrawl (soft-verify) + Lambda (JS render) in parallel
     const [lambdaResult, fcResult] = await Promise.all([
       scraperUrl && scraperSecret
         ? verifyYelpViaLambda(r, params, scraperUrl, scraperSecret)
