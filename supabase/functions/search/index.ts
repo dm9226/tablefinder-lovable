@@ -185,12 +185,13 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v49",
+      _v:                  "v50",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
         verified:        { resy: resyVer.length, ot: otVer.length, yelp: yelpVer.length },
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
+        bb_enabled:      !!(BB_KEY && BB_PROJECT),
         resy_api:        (globalThis as any).__resyApiDebug    ?? null,
         ot_lambda:       (globalThis as any).__otLambdaDebug   ?? null,
         ot_bing:         (globalThis as any).__otApiDebug      ?? null,
@@ -1637,11 +1638,13 @@ async function verifyOne(
     // Attempt restref immediately. Without a RID it returns null fast (<1ms).
     const restref = await verifyOTviaRestref(r, params);
     if (restref) return restref;
-    // Fall back to browser-based methods if restref fails or no rid available.
-    return bbKey && bbProject
-      ? verifyOTViaBB(r, params, bbKey, bbProject)
-      : scraperUrl && scraperSecret
-        ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
+    // Fall back to browser-based methods. Lambda (AWS real Chrome) takes precedence
+    // over BB (Browserbase CDP) since V16 replaced BB with Lambda. If neither is
+    // configured, fall through to Firecrawl (which Akamai blocks, but try anyway).
+    return scraperUrl && scraperSecret
+      ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
+      : bbKey && bbProject
+        ? verifyOTViaBB(r, params, bbKey, bbProject)
         : verifyOT(r, params, fcKey);
   }
   if (r.platform === "yelp") {
