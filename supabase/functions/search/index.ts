@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v44",
+      _v:                  "v45",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1613,15 +1613,14 @@ async function verifyOne(
     ? verifyResyViaBB(r, params, scraperUrl, scraperSecret)
     : verifyResy(r, params, fcKey);
   if (r.platform === "opentable") {
-    // If no RID yet, attempt a direct HTML fetch of the /r/slug page to extract it
-    // from embedded JSON-LD / canonical meta tags. Akamai protects against JS-rendered
-    // browser traffic, but simple HTML GETs (like SEO crawlers) may pass through.
-    // Costs <1s if blocked (HTTP 403); solves RID problem entirely if it works.
+    // If no RID yet, use Wayback Machine to find a cached snapshot of the /r/slug page
+    // and extract the numeric RID from archived HTML. archive.org has no Akamai protection.
+    // CDX API (4s timeout) + archive fetch (8s timeout) = 12s max before restref attempt.
     let rr = r;
     if (!r._rid) {
       const slugM = r.platformUrl.match(/opentable\.com\/r\/([^/?#]+)/i);
       if (slugM) {
-        const rid = await fetchOTRidFromSlug(slugM[1]);
+        const rid = await fetchOTRidFromWayback(slugM[1]);
         if (rid) rr = { ...r, _rid: rid };
       }
     }
@@ -1862,61 +1861,65 @@ async function verifyOTviaJina(r: Restaurant, params: SearchParams): Promise<Res
   }
 }
 
-// ── OT: Slug → RID via direct HTML fetch ─────────────────────────────────────
-// OT restaurant pages embed the numeric RID in JSON-LD structured data and
-// canonical/og meta tags. A plain HTML GET (no JS rendering) may pass through
-// Akamai's bot protection — Akamai's JS challenge can't execute without a browser,
-// so it often falls back to serving the initial HTML to apparent crawl-bots.
-// If the page is served: extract RID from JSON-LD @id field.
-// If Akamai blocks: returns HTTP 403 immediately (< 1s, no retries).
-async function fetchOTRidFromSlug(slug: string): Promise<string | null> {
-  const url   = `https://www.opentable.com/r/${slug}`;
-  const ctrl  = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 7_000);
+// ── OT: Slug → RID via Wayback Machine ───────────────────────────────────────
+// archive.org has crawled OT restaurant pages; their archived HTML contains the
+// numeric RID in <link rel="canonical"> and og:url meta tags (server-rendered
+// even in SPAs). archive.org has no Akamai protection.
+// Two-step: (1) CDX API finds the most recent snapshot timestamp, (2) fetch
+// the raw archived HTML and extract /restaurant/profile/NNN from any tag.
+async function fetchOTRidFromWayback(slug: string): Promise<string | null> {
   try {
-    const resp = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: "follow",
-      headers: {
-        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control":   "no-cache",
-      },
-    });
-    clearTimeout(timer);
-    if (!resp.ok) { console.log(`[OT slug→RID] ${slug}: HTTP ${resp.status}`); return null; }
-    const html = await resp.text();
-    // Detect Akamai/bot-protection challenge page
-    if (/access denied|akamai|enable javascript|just a moment|please wait|are you a robot/i.test(html.substring(0, 3000))) {
-      console.log(`[OT slug→RID] ${slug}: bot challenge (html=${html.length})`);
+    // Step 1: CDX API — find most recent snapshot
+    const cdxUrl  = `https://web.archive.org/cdx/search/cdx?url=opentable.com/r/${encodeURIComponent(slug)}&output=json&limit=1&fl=timestamp&fastLatest=true`;
+    const ctrl1   = new AbortController();
+    const timer1  = setTimeout(() => ctrl1.abort(), 4_000);
+    const cdxResp = await fetch(cdxUrl, { signal: ctrl1.signal });
+    clearTimeout(timer1);
+    if (!cdxResp.ok) {
+      console.log(`[OT wayback CDX] ${slug}: HTTP ${cdxResp.status}`);
       if (!(globalThis as any).__otSlugRidDebug)
-        (globalThis as any).__otSlugRidDebug = `blocked|slug=${slug}|len=${html.length}|sample=${html.substring(0,200)}`;
+        (globalThis as any).__otSlugRidDebug = `cdx_http_${cdxResp.status}|slug=${slug}`;
       return null;
     }
-    // JSON-LD: "@id":"https://www.opentable.com/restaurant/profile/12345"
-    const jldM  = html.match(/"@id"\s*:\s*"[^"]*\/restaurant\/profile\/(\d+)"/i);
-    if (jldM) {
-      console.log(`[OT slug→RID] ${slug}: rid=${jldM[1]} ✓ (json-ld)`);
+    const cdxData = await cdxResp.json();
+    // cdxData[0] = header ["timestamp"], cdxData[1+] = result rows
+    if (!Array.isArray(cdxData) || cdxData.length < 2) {
+      console.log(`[OT wayback CDX] ${slug}: no snapshots`);
       if (!(globalThis as any).__otSlugRidDebug)
-        (globalThis as any).__otSlugRidDebug = `success|slug=${slug}|rid=${jldM[1]}|source=json-ld`;
-      return jldM[1];
+        (globalThis as any).__otSlugRidDebug = `no_snapshot|slug=${slug}`;
+      return null;
     }
-    // Any occurrence of /restaurant/profile/NNN in the HTML (canonical, og:url, etc.)
-    const metaM = html.match(/opentable\.com\/restaurant\/profile\/(\d+)/i);
-    if (metaM) {
-      console.log(`[OT slug→RID] ${slug}: rid=${metaM[1]} ✓ (meta)`);
+    const ts = String(cdxData[1][0]); // e.g. "20241115123456"
+
+    // Step 2: Fetch archived snapshot with id_ modifier (raw original, no WB toolbar)
+    const archiveUrl = `https://web.archive.org/web/${ts}id_/https://www.opentable.com/r/${slug}`;
+    const ctrl2   = new AbortController();
+    const timer2  = setTimeout(() => ctrl2.abort(), 8_000);
+    const archResp = await fetch(archiveUrl, { signal: ctrl2.signal });
+    clearTimeout(timer2);
+    if (!archResp.ok) {
+      console.log(`[OT wayback] ${slug}: archive HTTP ${archResp.status}`);
       if (!(globalThis as any).__otSlugRidDebug)
-        (globalThis as any).__otSlugRidDebug = `success|slug=${slug}|rid=${metaM[1]}|source=meta`;
-      return metaM[1];
+        (globalThis as any).__otSlugRidDebug = `archive_http_${archResp.status}|slug=${slug}|ts=${ts}`;
+      return null;
     }
-    console.log(`[OT slug→RID] ${slug}: no RID found (html=${html.length})`);
+    const html = await archResp.text();
+    // Look for /restaurant/profile/NNN anywhere in the HTML (canonical, og:url, JSON-LD)
+    const ridM = html.match(/opentable\.com\/restaurant\/profile\/(\d+)/i);
+    if (ridM) {
+      console.log(`[OT wayback] ${slug}: rid=${ridM[1]} ✓ (ts=${ts})`);
+      if (!(globalThis as any).__otSlugRidDebug)
+        (globalThis as any).__otSlugRidDebug = `success|slug=${slug}|rid=${ridM[1]}|ts=${ts}`;
+      return ridM[1];
+    }
+    console.log(`[OT wayback] ${slug}: no RID in archive html=${html.length} ts=${ts}`);
     if (!(globalThis as any).__otSlugRidDebug)
-      (globalThis as any).__otSlugRidDebug = `no_rid|slug=${slug}|html=${html.length}|sample=${html.substring(0,300)}`;
+      (globalThis as any).__otSlugRidDebug = `no_rid|slug=${slug}|html=${html.length}|ts=${ts}|sample=${html.substring(0,300)}`;
     return null;
   } catch (err: any) {
-    clearTimeout(timer);
-    console.log(`[OT slug→RID] ${slug}: ${err?.message}`);
+    console.log(`[OT wayback] ${slug}: ${err?.message}`);
+    if (!(globalThis as any).__otSlugRidDebug)
+      (globalThis as any).__otSlugRidDebug = `error|${err?.message?.substring(0,80)}|slug=${slug}`;
     return null;
   }
 }
