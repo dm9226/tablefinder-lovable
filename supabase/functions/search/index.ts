@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v47",
+      _v:                  "v48",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1300,6 +1300,20 @@ async function discoverOTViaBB(
   }
 }
 
+// ─── STATIC OT SLUG→RID LOOKUP ────────────────────────────────────────────────
+// Numeric restaurant IDs required by the restref availability API.
+// The restref API is designed for cross-origin widget embedding — no Akamai
+// protection — but requires a numeric RID, not the human-readable slug.
+// Sources: OT legacy ?rid= URLs (aria, sun-dial), Ritz-Carlton dining page (ag),
+//          Facebook embed code (by-george), restaurant website restref= param (hartley).
+const OT_SLUG_TO_RID: Record<string, number> = {
+  "aria-atlanta":                    597,
+  "the-sun-dial-restaurant-atlanta": 70636,
+  "ag-modern-steakhouse-atlanta":    2392,
+  "by-george-atlanta":               1044556,
+  "hartley-atlanta":                 1244200,
+};
+
 function normToOT(fc: any, params: SearchParams): Restaurant | null {
   const url    = fc.url ?? "";
   const domain = params.country === "gb" ? "opentable.co.uk" : "opentable.com";
@@ -1308,7 +1322,9 @@ function normToOT(fc: any, params: SearchParams): Restaurant | null {
   if (!mSlug && !mNum) return null;
   const slug    = mSlug ? mSlug[1] : mNum![1];
   const baseUrl = `https://www.${domain}/r/${slug}`;
-  const rid     = mNum ? mNum[1] : extractRid(url);
+  const rid     = mNum ? mNum[1]
+    : extractRid(url)
+    ?? (OT_SLUG_TO_RID[slug] != null ? String(OT_SLUG_TO_RID[slug]) : null);
   return {
     id: `opentable-${slug}`,
     name: cleanTitle(fc.title, url, "opentable"),
