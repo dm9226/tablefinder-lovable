@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v58
+// TableFinder Search Edge Function — v59
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v58",
+      _v:                  "v59",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -396,9 +396,9 @@ async function bbLoad(
   url: string,
   bbKey: string,
   bbProject: string,
-  opts: { waitMs?: number; useProxy?: boolean; timeoutMs?: number; evalExpr?: string } = {},
+  opts: { waitMs?: number; useProxy?: boolean; timeoutMs?: number; evalExpr?: string; initScript?: string } = {},
 ): Promise<string> {
-  const { waitMs = 4000, useProxy = true, timeoutMs = 25_000, evalExpr } = opts;
+  const { waitMs = 4000, useProxy = true, timeoutMs = 25_000, evalExpr, initScript } = opts;
 
   // Step 1: Create Browserbase session (residential proxy enabled by default for OT)
   const sessResp = await fetch("https://api.browserbase.com/v1/sessions", {
@@ -469,6 +469,12 @@ async function bbLoad(
         targetId: page.targetId,
         flatten: true,
       });
+
+      // Inject init script BEFORE navigation so it runs at document creation time.
+      // Used to intercept fetch/XHR calls that fire during page JS execution.
+      if (initScript) {
+        await cdpSend("Page.addScriptToEvaluateOnNewDocument", { source: initScript }, pageSid);
+      }
 
       await cdpSend("Page.navigate", { url }, pageSid);
       await new Promise(r => setTimeout(r, waitMs));
@@ -1651,21 +1657,20 @@ async function verifyOne(
     (globalThis as any).__otCandDebug = ((globalThis as any).__otCandDebug
       ? (globalThis as any).__otCandDebug + " || " : "") + _candInfo;
 
-    // Attempt restref immediately. Without a RID it returns null fast (<1ms).
+    // v59: When BB is configured, go straight to it — skip restref (Supabase IPs blocked)
+    // and skip Lambda (datacenter IPs blocked). BB uses residential proxy + real Chrome.
+    if (bbKey && bbProject) {
+      return verifyOTViaBB(r, params, bbKey, bbProject);
+    }
+    // Attempt direct restref (works from non-datacenter IPs). Without RID → null fast.
     const restref = await verifyOTviaRestref(r, params);
     if (restref) return restref;
-    // v55: Lambda Chrome + HTTP/1.1 (--disable-http2 always-on) targeting widget canvas URL.
-    // fetchOnly restref timed out (v54): Akamai drops Node.js TLS fingerprint connections.
-    // Chrome HTTP/1.1 has legitimate JA3 fingerprint + HTTP/1.1 which Akamai accepts.
-    // fetch to the restref JSON API is untested from Lambda IPs and may succeed.
-    // BB residential proxy is fallback (free tier exhausted but kept for when account is replenished).
+    // Lambda fallback: Chrome + HTTP/1.1 (datacenter IPs, may be blocked by Akamai).
     if (scraperUrl && scraperSecret) {
       const lambdaResult = await verifyOTviaLambda(r, params, scraperUrl, scraperSecret);
       if (lambdaResult) return lambdaResult;
     }
-    return bbKey && bbProject
-      ? verifyOTViaBB(r, params, bbKey, bbProject)
-      : verifyOT(r, params, fcKey);
+    return verifyOT(r, params, fcKey);
   }
   if (r.platform === "yelp") {
     // Run Firecrawl path (has OT/Resy bridge) and Lambda path (renders JS widget) in parallel.
@@ -2016,10 +2021,12 @@ async function verifyOTviaRestref(r: Restaurant, params: SearchParams): Promise<
 }
 
 // Real-browser OT verification via Browserbase residential proxy.
-// v56: Instead of loading the full widget canvas page (~30s session time), we navigate
-// to opentable.com (establishes origin + cookies), then run a fetch() to the restref
-// JSON API from inside the browser JS context (~5s total). This is 6x faster, keeping
-// monthly session usage well under the 1,000 min free tier.
+// v59: Instead of calling the restref API ourselves (which returns "Service Unavailable"
+// because it requires auth tokens our browser session doesn't have), we let OT's own
+// React widget make the call. The widget fires a fetch() to /restref/api/availability
+// automatically when the restaurant page loads with ?dateTime=...&covers=... params.
+// An init script injected before page load intercepts that fetch and captures the response.
+// This bypasses all auth issues: OT's own code makes the authenticated call.
 async function verifyOTViaBB(
   r: Restaurant, params: SearchParams, bbKey: string, bbProject: string,
 ): Promise<Restaurant | null> {
@@ -2028,45 +2035,52 @@ async function verifyOTViaBB(
   (globalThis as any).__otVerifyDebug = ((globalThis as any).__otVerifyDebug
     ? (globalThis as any).__otVerifyDebug + " || " : "") + `CALL:${r.name}(rid=${rid ?? "none"})`;
 
-  if (!rid) {
-    // No RID — fall back to loading the full OT page (slower)
-    try {
-      const text = await bbLoad(r.platformUrl, bbKey, bbProject, {
-        waitMs: 4000, useProxy: true, timeoutMs: 22_000,
-      });
-      (globalThis as any).__otVerifyDebug += `→len=${text.length}`;
-      if (text.length < 50 || /access denied|just a moment/i.test(text)) return null;
-      const windowed = filterWindow(extractTimes(text), params.time);
-      if (windowed.length === 0) return null;
-      const base = r.platformUrl.split("?")[0];
-      return { ...r, timeSlots: windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) })), softVerified: false };
-    } catch (err: any) {
-      (globalThis as any).__otVerifyDebug += `→ERR:${err?.message?.substring(0, 60)}`;
-      return null;
-    }
-  }
+  // Navigate to the restaurant page WITH date/time/covers in URL — this triggers OT's
+  // React widget to fire /restref/api/availability automatically. Our init script
+  // intercepts that fetch response before it reaches OT's own widget handler.
+  // Works for both RID and no-RID restaurants (OT embeds the RID in page JSON).
+  const pageUrl = r.platformUrl; // already has ?dateTime=...&covers=... from discovery
 
-  // Fast path: navigate to the RESTAURANT PAGE (not just homepage) to establish
-  // the auth cookies + JS session state that restref requires. The restref API is
-  // the same JSON endpoint called by OT's own widget when it renders on the restaurant
-  // page — so navigating there ensures the exact auth context is initialized.
-  // Akamai sees: Chrome TLS fingerprint + residential IP + same-origin fetch = allowed.
-  const restaurantPageUrl = r.platformUrl.split("?")[0];
-  const restrefUrl = `https://www.opentable.com/restref/api/availability?rid=${rid}&covers=${params.partySize}&day=${params.date}&lang=en-US&ref=5`;
-  const evalExpr   = `(async()=>{try{const r=await fetch(${JSON.stringify(restrefUrl)},{credentials:'include',headers:{'Accept':'application/json,text/javascript,*/*;q=0.01','Referer':window.location.href,'Accept-Language':'en-US,en;q=0.9','X-Requested-With':'XMLHttpRequest'}});return await r.text();}catch(e){return'FETCH_ERR:'+e.message;}})()`;
+  // Injected before page load. Wraps window.fetch + XMLHttpRequest to capture
+  // any /restref/api/availability response that OT's widget fires during load.
+  const initScript = [
+    "(function(){",
+    "var _f=window.fetch;window.__tf_ot='';",
+    "window.fetch=function(u,i){",
+    "  var p=_f.apply(this,arguments);",
+    "  if(typeof u==='string'&&u.indexOf('/restref/api/availability')!==-1){",
+    "    p.then(function(r){var c=r.clone();c.text().then(function(t){window.__tf_ot=t;}).catch(function(){});}).catch(function(){});",
+    "  }",
+    "  return p;",
+    "};",
+    "var _xo=XMLHttpRequest.prototype.open,_xs=XMLHttpRequest.prototype.send;",
+    "XMLHttpRequest.prototype.open=function(m,u){",
+    "  if(typeof u==='string'&&u.indexOf('/restref/api/availability')!==-1)this._tf=true;",
+    "  return _xo.apply(this,arguments);",
+    "};",
+    "XMLHttpRequest.prototype.send=function(){",
+    "  if(this._tf){var x=this;this.addEventListener('load',function(){window.__tf_ot=x.responseText;});}",
+    "  return _xs.apply(this,arguments);",
+    "};",
+    "})();",
+  ].join("");
+
+  // evalExpr: return intercepted API response; fall back to page text if widget didn't fire
+  const evalExpr = "window.__tf_ot || document.body.innerText";
 
   try {
-    const text = await bbLoad(restaurantPageUrl, bbKey, bbProject, {
-      waitMs:    5000,   // 5s for restaurant page JS to fully initialize session + auth cookies
-      useProxy:  true,
+    const text = await bbLoad(pageUrl, bbKey, bbProject, {
+      waitMs:     8000,  // widget needs time to: init React app → parse URL params → fire API call
+      useProxy:   true,
+      initScript,
       evalExpr,
-      timeoutMs: 22_000,
+      timeoutMs:  30_000,
     });
 
-    (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 100)}`;
+    (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 120)}`;
 
-    if (text.length < 10 || text.startsWith("FETCH_ERR") || /access denied|just a moment/i.test(text)) {
-      console.log(`[OT BB] ${r.name}: restref blocked/empty (${text.substring(0, 60)})`);
+    if (text.length < 10 || /access denied|just a moment/i.test(text)) {
+      console.log(`[OT BB] ${r.name}: blocked/empty`);
       return null;
     }
 
