@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v53
+// TableFinder Search Edge Function — v54
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v53",
+      _v:                  "v54",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -346,9 +346,13 @@ async function lambdaLoad(
   url: string,
   scraperUrl: string,
   scraperSecret: string,
-  opts: { waitMs?: number; useProxy?: boolean; evalExpr?: string; timeoutMs?: number } = {},
+  opts: {
+    waitMs?: number; useProxy?: boolean; evalExpr?: string; timeoutMs?: number;
+    fetchOnly?: boolean; fetchHeaders?: Record<string, string>;
+  } = {},
 ): Promise<string> {
-  const { waitMs = 4000, useProxy = false, evalExpr, timeoutMs = 28_000 } = opts;
+  const { waitMs = 4000, useProxy = false, evalExpr, timeoutMs = 28_000,
+          fetchOnly = false, fetchHeaders } = opts;
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -356,7 +360,11 @@ async function lambdaLoad(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: ctrl.signal,
-      body: JSON.stringify({ url, waitMs, evalExpr, useProxy, secret: scraperSecret }),
+      body: JSON.stringify({
+        url, waitMs, evalExpr, useProxy, secret: scraperSecret,
+        ...(fetchOnly ? { fetchOnly: true } : {}),
+        ...(fetchHeaders ? { fetchHeaders } : {}),
+      }),
     });
     clearTimeout(timer);
     if (!resp.ok) {
@@ -1646,14 +1654,17 @@ async function verifyOne(
     // Attempt restref immediately. Without a RID it returns null fast (<1ms).
     const restref = await verifyOTviaRestref(r, params);
     if (restref) return restref;
-    // Lambda AWS IPs are blocked by Akamai (ERR_HTTP2_PROTOCOL_ERROR — confirmed v52).
-    // Browserbase residential proxy bypasses Akamai's IP-based blocking, so BB takes
-    // precedence over Lambda for OT. Lambda kept as fallback if BB keys not configured.
+    // v54: Lambda fetch-only proxy for restref (different AWS IPs from Supabase — may not be Akamai-blocked).
+    // Chrome page loads from Lambda ARE blocked (ERR_HTTP2_PROTOCOL_ERROR v52), but plain HTTP
+    // fetch to the restref JSON API is untested from Lambda IPs and may succeed.
+    // BB residential proxy is fallback (free tier exhausted but kept for when account is replenished).
+    if (scraperUrl && scraperSecret) {
+      const lambdaResult = await verifyOTviaLambda(r, params, scraperUrl, scraperSecret);
+      if (lambdaResult) return lambdaResult;
+    }
     return bbKey && bbProject
       ? verifyOTViaBB(r, params, bbKey, bbProject)
-      : scraperUrl && scraperSecret
-        ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
-        : verifyOT(r, params, fcKey);
+      : verifyOT(r, params, fcKey);
   }
   if (r.platform === "yelp") {
     // Run Firecrawl path (has OT/Resy bridge) and Lambda path (renders JS widget) in parallel.
@@ -2317,125 +2328,53 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
 // ─── OT LAMBDA VERIFICATION ───────────────────────────────────────────────────
 // The OT widget/reservation/canvas endpoint is designed for cross-origin embedding
 // on any restaurant website — including cloud-hosted ones. Akamai's rules for it
-// are much lighter than for the main opentable.com pages. Real Chrome (our Lambda)
-// renders the actual time-slot buttons that Firecrawl can't reach.
-
+// v54: Lambda used as an HTTP proxy for the OT restref availability API.
+// Chrome page loads from Lambda ARE blocked by Akamai (ERR_HTTP2_PROTOCOL_ERROR — confirmed v52).
+// BUT: Lambda AWS IPs are completely different from Supabase/Cloudflare IPs.
+// The restref API may be accessible from Lambda even though it's blocked from Supabase.
+// fetchOnly=true makes Lambda do a plain fetch() — no Chrome needed, fast, no cold start.
 async function verifyOTviaLambda(
   r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant | null> {
   const rid = r._rid ?? extractRid(r.platformUrl);
+  if (!rid) {
+    // No RID means we can't call restref — skip Lambda entirely
+    console.log(`[OT Lambda] ${r.name}: no RID — skip`);
+    return null;
+  }
 
-  // Prefer widget canvas (rid required, lighter Akamai). Fall back to the /r/ page
-  // directly — individual restaurant pages are less protected than search results.
-  const dt        = `${params.date}T${params.time}`;
-  const urlToLoad = rid
-    ? `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`
-    : r.platformUrl;  // /r/restaurant-slug — try directly with real Chrome
-
-  console.log(`[OT Lambda] ${r.name}: loading ${rid ? `widget (rid=${rid})` : "direct /r/ page"}`);
-
-  // evalExpr extracts the numeric RID from the canonical/og:url meta tags
-  // (OT restaurant pages have <link rel="canonical" href=".../restaurant/profile/RID">)
-  // and returns a tagged string: "blocked:<text>" or "rid=NNN\n<bodyText>".
-  // This lets us call verifyOTviaRestref with the real RID instead of parsing
-  // time slots from whatever innerText the page renders.
-  const evalExpr = `(() => {
-    const bodyText = document.body ? (document.body.innerText || '') : '';
-    if (/access denied|security check|enable javascript|are you a robot|just a moment/i.test(bodyText)) {
-      return 'blocked:' + bodyText.substring(0, 150);
-    }
-    // Extract numeric RID from canonical URL (/restaurant/profile/RID)
-    let rid = '';
-    try {
-      const canon = document.querySelector('link[rel="canonical"]');
-      const ogUrl = document.querySelector('meta[property="og:url"]');
-      const src   = ((canon && canon.getAttribute('href')) || '') + ' ' + ((ogUrl && ogUrl.getAttribute('content')) || '');
-      const m = src.match(/\\/restaurant\\/profile\\/(\\d+)/);
-      if (m) rid = m[1];
-    } catch(e) {}
-    // Fallback: search inline scripts for restaurantId / rid JSON keys
-    if (!rid) {
-      try {
-        for (const s of Array.from(document.querySelectorAll('script:not([src])'))) {
-          const m = (s.textContent || '').match(/"(?:restaurantId|\\brid\\b)"\\s*:\\s*(\\d{4,})/);
-          if (m) { rid = m[1]; break; }
-        }
-      } catch(e) {}
-    }
-    return 'rid=' + rid + '\\n' + bodyText.substring(0, 3000);
-  })()`;
-
-  // Write debug BEFORE lambdaLoad so we know this function was reached even if
-  // the outer withTimeout() kills the Promise before lambdaLoad() resolves.
   (globalThis as any).__otLambdaDebug = ((globalThis as any).__otLambdaDebug
-    ? (globalThis as any).__otLambdaDebug + " || " : "") + `CALL:${r.name}(rid=${rid ?? "none"})`;
+    ? (globalThis as any).__otLambdaDebug + " || " : "") + `CALL:${r.name}(rid=${rid})`;
+
+  const restrefUrl = `https://www.opentable.com/restref/api/availability?rid=${rid}&covers=${params.partySize}&day=${params.date}&lang=en-US&ref=5`;
 
   try {
-    const raw = await lambdaLoad(urlToLoad, scraperUrl, scraperSecret, {
-      waitMs:    2000,   // reduced from 5000 — saves 3s per call, helps cold starts fit in 24s budget
-      timeoutMs: 21_000, // reduced from 55_000 — fails fast enough for catch to write debug before response is sent
-      evalExpr,
+    const raw = await lambdaLoad(restrefUrl, scraperUrl, scraperSecret, {
+      fetchOnly: true,   // plain HTTP fetch — no Chrome, no cold start, no Akamai page-load block
+      fetchHeaders: {
+        "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept":           "application/json, text/javascript, */*; q=0.01",
+        "Referer":          "https://www.opentable.com/",
+        "Accept-Language":  "en-US,en;q=0.9",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      timeoutMs: 12_000,
     });
 
-    // Append result to pre-call debug entry
-    const _lambdaEntry = `→raw_len=${raw?.length ?? 0}|sample=${(raw ?? "").substring(0, 100)}`;
-    (globalThis as any).__otLambdaDebug = ((globalThis as any).__otLambdaDebug ?? "") + _lambdaEntry;
-    if (!(globalThis as any).__otVerifyDebug) {
-      (globalThis as any).__otVerifyDebug = `${r.name}|raw_len=${raw?.length ?? 0}|sample=${(raw ?? "").substring(0, 200)}`;
-    }
+    (globalThis as any).__otLambdaDebug += `→len=${raw.length}|sample=${raw.substring(0, 120)}`;
 
-    if (!raw || raw.length < 10) {
-      console.log(`[OT Lambda] ${r.name}: empty response`);
-      (globalThis as any).__otLambdaDebug += `[EMPTY]`;
-      return null;
-    }
-    if (raw.startsWith("blocked:")) {
-      console.log(`[OT Lambda] ${r.name}: Akamai blocked`);
-      (globalThis as any).__otLambdaDebug += `[BLOCKED]`;
-      return null;
-    }
-
-    // Parse "rid=NNN\n<bodyText>"
-    const firstNewline = raw.indexOf("\n");
-    const ridLine   = firstNewline >= 0 ? raw.substring(0, firstNewline) : raw;
-    const bodyText  = firstNewline >= 0 ? raw.substring(firstNewline + 1) : "";
-    const ridM      = ridLine.match(/^rid=(\d+)$/);
-    const extractedRid = ridM ? ridM[1] : (rid ?? "");
-
-    console.log(`[OT Lambda] ${r.name}: page loaded, extractedRid=${extractedRid}, bodyLen=${bodyText.length}`);
-
-    // If we have a RID, call the proven restref API for hard slot data
-    if (extractedRid) {
-      const mockR = { ...r, _rid: extractedRid };
-      const restrefResult = await verifyOTviaRestref(mockR, params);
-      if (restrefResult) {
-        console.log(`[OT Lambda] ${r.name}: RID=${extractedRid} → restref ✓`);
-        return restrefResult;
-      }
-      console.log(`[OT Lambda] ${r.name}: restref returned no slots for rid=${extractedRid}`);
-    }
-
-    // Fallback: parse time slots directly from the page body text
-    const slots    = extractTimes(bodyText);
+    const slots    = extractTimes(raw);
     const windowed = filterWindow(slots, params.time);
     if (windowed.length === 0) {
-      console.log(`[OT Lambda] ${r.name}: no slots in body text (len=${bodyText.length})`);
+      console.log(`[OT Lambda restref] ${r.name}: no slots (raw len=${raw.length})`);
       return null;
     }
     const base          = r.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
-    const ratingM = bodyText.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
-    const reviewM = bodyText.match(/\(([\d,]+)\s*review/i);
-    console.log(`[OT Lambda] ${r.name}: ${windowed.length} slots ✓ from page text`);
-    return {
-      ...r,
-      timeSlots:   slotsWithUrls,
-      rating:      ratingM ? parseFloat(ratingM[1])                 : r.rating,
-      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
-    };
+    console.log(`[OT Lambda restref] ${r.name}: ${windowed.length} slots ✓`);
+    return { ...r, timeSlots: slotsWithUrls, softVerified: false };
   } catch (err: any) {
-    // Write error to debug — catches timeouts (AbortError) and other failures
-    (globalThis as any).__otLambdaDebug = ((globalThis as any).__otLambdaDebug ?? "") + `→ERR:${err?.message?.substring(0, 60)}`;
+    (globalThis as any).__otLambdaDebug += `→ERR:${err?.message?.substring(0, 80)}`;
     console.log(`[OT Lambda] ${r.name}: ${err?.message}`);
     return null;
   }
