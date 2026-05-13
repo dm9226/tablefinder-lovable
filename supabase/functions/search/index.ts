@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v43",
+      _v:                  "v44",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -196,6 +196,7 @@ serve(async (req) => {
         ot_bing:         (globalThis as any).__otApiDebug      ?? null,
         ot_discovery:    (globalThis as any).__otDiscoveryDebug ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
+        ot_slug_rid:     (globalThis as any).__otSlugRidDebug   ?? null,
         ot_verify:       (globalThis as any).__otVerifyDebug    ?? null,
         ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
         yelp_api:        (globalThis as any).__yelpApiDebug      ?? null,
@@ -1079,7 +1080,7 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
           : (Array.isArray(data.data)           ? data.data
           : (Array.isArray(data.results)         ? data.results
           : (Array.isArray(data.data?.results)   ? data.data.results : [])));
-        console.log(`[OT FC search] "${query.slice(0, 65)}": ${items.length} results`);
+        console.log(`[OT FC search] "${query.slice(0, 65)}": ${items.length} results urls=${items.slice(0,3).map((i:any)=>i.url).join("|")}`);
         for (const item of items) {
           // Try URL-based extraction first
           let r = normToOT(item, params);
@@ -1612,15 +1613,26 @@ async function verifyOne(
     ? verifyResyViaBB(r, params, scraperUrl, scraperSecret)
     : verifyResy(r, params, fcKey);
   if (r.platform === "opentable") {
-    // Always try restref JSON API first — cross-origin widget endpoint, no Akamai.
-    const restref = await verifyOTviaRestref(r, params);
+    // If no RID yet, attempt a direct HTML fetch of the /r/slug page to extract it
+    // from embedded JSON-LD / canonical meta tags. Akamai protects against JS-rendered
+    // browser traffic, but simple HTML GETs (like SEO crawlers) may pass through.
+    // Costs <1s if blocked (HTTP 403); solves RID problem entirely if it works.
+    let rr = r;
+    if (!r._rid) {
+      const slugM = r.platformUrl.match(/opentable\.com\/r\/([^/?#]+)/i);
+      if (slugM) {
+        const rid = await fetchOTRidFromSlug(slugM[1]);
+        if (rid) rr = { ...r, _rid: rid };
+      }
+    }
+    const restref = await verifyOTviaRestref(rr, params);
     if (restref) return restref;
     // Fall back to browser-based methods if restref fails or no rid available.
     return bbKey && bbProject
-      ? verifyOTViaBB(r, params, bbKey, bbProject)
+      ? verifyOTViaBB(rr, params, bbKey, bbProject)
       : scraperUrl && scraperSecret
-        ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
-        : verifyOT(r, params, fcKey);
+        ? verifyOTviaLambda(rr, params, scraperUrl, scraperSecret)
+        : verifyOT(rr, params, fcKey);
   }
   if (r.platform === "yelp") {
     // Run Firecrawl path (has OT/Resy bridge) and Lambda path (renders JS widget) in parallel.
@@ -1846,6 +1858,65 @@ async function verifyOTviaJina(r: Restaurant, params: SearchParams): Promise<Res
   } catch (err: any) {
     clearTimeout(timer);
     if (err?.name !== "AbortError") console.log(`[OT Jina] ${r.name}: ${err?.message}`);
+    return null;
+  }
+}
+
+// ── OT: Slug → RID via direct HTML fetch ─────────────────────────────────────
+// OT restaurant pages embed the numeric RID in JSON-LD structured data and
+// canonical/og meta tags. A plain HTML GET (no JS rendering) may pass through
+// Akamai's bot protection — Akamai's JS challenge can't execute without a browser,
+// so it often falls back to serving the initial HTML to apparent crawl-bots.
+// If the page is served: extract RID from JSON-LD @id field.
+// If Akamai blocks: returns HTTP 403 immediately (< 1s, no retries).
+async function fetchOTRidFromSlug(slug: string): Promise<string | null> {
+  const url   = `https://www.opentable.com/r/${slug}`;
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 7_000);
+  try {
+    const resp = await fetch(url, {
+      signal: ctrl.signal,
+      redirect: "follow",
+      headers: {
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control":   "no-cache",
+      },
+    });
+    clearTimeout(timer);
+    if (!resp.ok) { console.log(`[OT slug→RID] ${slug}: HTTP ${resp.status}`); return null; }
+    const html = await resp.text();
+    // Detect Akamai/bot-protection challenge page
+    if (/access denied|akamai|enable javascript|just a moment|please wait|are you a robot/i.test(html.substring(0, 3000))) {
+      console.log(`[OT slug→RID] ${slug}: bot challenge (html=${html.length})`);
+      if (!(globalThis as any).__otSlugRidDebug)
+        (globalThis as any).__otSlugRidDebug = `blocked|slug=${slug}|len=${html.length}|sample=${html.substring(0,200)}`;
+      return null;
+    }
+    // JSON-LD: "@id":"https://www.opentable.com/restaurant/profile/12345"
+    const jldM  = html.match(/"@id"\s*:\s*"[^"]*\/restaurant\/profile\/(\d+)"/i);
+    if (jldM) {
+      console.log(`[OT slug→RID] ${slug}: rid=${jldM[1]} ✓ (json-ld)`);
+      if (!(globalThis as any).__otSlugRidDebug)
+        (globalThis as any).__otSlugRidDebug = `success|slug=${slug}|rid=${jldM[1]}|source=json-ld`;
+      return jldM[1];
+    }
+    // Any occurrence of /restaurant/profile/NNN in the HTML (canonical, og:url, etc.)
+    const metaM = html.match(/opentable\.com\/restaurant\/profile\/(\d+)/i);
+    if (metaM) {
+      console.log(`[OT slug→RID] ${slug}: rid=${metaM[1]} ✓ (meta)`);
+      if (!(globalThis as any).__otSlugRidDebug)
+        (globalThis as any).__otSlugRidDebug = `success|slug=${slug}|rid=${metaM[1]}|source=meta`;
+      return metaM[1];
+    }
+    console.log(`[OT slug→RID] ${slug}: no RID found (html=${html.length})`);
+    if (!(globalThis as any).__otSlugRidDebug)
+      (globalThis as any).__otSlugRidDebug = `no_rid|slug=${slug}|html=${html.length}|sample=${html.substring(0,300)}`;
+    return null;
+  } catch (err: any) {
+    clearTimeout(timer);
+    console.log(`[OT slug→RID] ${slug}: ${err?.message}`);
     return null;
   }
 }
