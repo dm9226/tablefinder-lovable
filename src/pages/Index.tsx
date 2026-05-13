@@ -240,7 +240,7 @@ const Index = () => {
       </Helmet>
       <header className="pt-6 pb-3 px-4 text-center">
         <Link to="/">
-          <h1 className="font-heading text-4xl md:text-5xl text-foreground tracking-tight">
+          <h1 className="font-heading text-4xl md:text-5xl text-primary tracking-tight">
             TableFinder
           </h1>
         </Link>
