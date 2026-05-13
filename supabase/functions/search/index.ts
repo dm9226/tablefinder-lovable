@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v55
+// TableFinder Search Edge Function — v56
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v55",
+      _v:                  "v56",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2016,60 +2016,67 @@ async function verifyOTviaRestref(r: Restaurant, params: SearchParams): Promise<
 }
 
 // Real-browser OT verification via Browserbase residential proxy.
-// Lambda AWS IPs are blocked by Akamai (ERR_HTTP2_PROTOCOL_ERROR).
-// Browserbase's residential proxy pool bypasses Akamai's IP-based blocking.
+// v56: Instead of loading the full widget canvas page (~30s session time), we navigate
+// to opentable.com (establishes origin + cookies), then run a fetch() to the restref
+// JSON API from inside the browser JS context (~5s total). This is 6x faster, keeping
+// monthly session usage well under the 1,000 min free tier.
 async function verifyOTViaBB(
   r: Restaurant, params: SearchParams, bbKey: string, bbProject: string,
 ): Promise<Restaurant | null> {
   const rid = r._rid ?? extractRid(r.platformUrl);
 
-  // Prefer widget canvas (lighter Akamai target) when RID is available.
-  // Falls back to the /r/slug page directly.
-  const dt        = `${params.date}T${params.time}`;
-  const urlToLoad = rid
-    ? `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`
-    : r.platformUrl;
-
-  // Write debug before bbLoad so we capture the call even if it times out
   (globalThis as any).__otVerifyDebug = ((globalThis as any).__otVerifyDebug
     ? (globalThis as any).__otVerifyDebug + " || " : "") + `CALL:${r.name}(rid=${rid ?? "none"})`;
 
+  if (!rid) {
+    // No RID — fall back to loading the full OT page (slower)
+    try {
+      const text = await bbLoad(r.platformUrl, bbKey, bbProject, {
+        waitMs: 4000, useProxy: true, timeoutMs: 22_000,
+      });
+      (globalThis as any).__otVerifyDebug += `→len=${text.length}`;
+      if (text.length < 50 || /access denied|just a moment/i.test(text)) return null;
+      const windowed = filterWindow(extractTimes(text), params.time);
+      if (windowed.length === 0) return null;
+      const base = r.platformUrl.split("?")[0];
+      return { ...r, timeSlots: windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) })), softVerified: false };
+    } catch (err: any) {
+      (globalThis as any).__otVerifyDebug += `→ERR:${err?.message?.substring(0, 60)}`;
+      return null;
+    }
+  }
+
+  // Fast path: navigate to OT homepage to establish residential-IP session + cookies,
+  // then fetch() the restref JSON API from inside the browser context.
+  // Akamai sees: Chrome TLS fingerprint + residential IP + same-origin fetch = allowed.
+  const restrefUrl = `https://www.opentable.com/restref/api/availability?rid=${rid}&covers=${params.partySize}&day=${params.date}&lang=en-US&ref=5`;
+  const evalExpr   = `(async()=>{try{const r=await fetch(${JSON.stringify(restrefUrl)},{credentials:'include',headers:{'Accept':'application/json,text/javascript,*/*;q=0.01','Referer':'https://www.opentable.com/','Accept-Language':'en-US,en;q=0.9','X-Requested-With':'XMLHttpRequest'}});return await r.text();}catch(e){return'FETCH_ERR:'+e.message;}})()`;
+
   try {
-    const text = await bbLoad(urlToLoad, bbKey, bbProject, {
-      waitMs:    4000,
-      useProxy:  true,   // residential proxy bypasses Akamai IP blocks
-      timeoutMs: 22_000, // fail fast enough for catch to write debug before response sent
+    const text = await bbLoad("https://www.opentable.com", bbKey, bbProject, {
+      waitMs:    1500,   // 1.5s for OT homepage to init (sets cookies/session context)
+      useProxy:  true,
+      evalExpr,
+      timeoutMs: 15_000,
     });
 
-    (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 150)}`;
-    console.log(`[OT BB] ${r.name}: text len=${text.length}`);
+    (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 100)}`;
 
-    if (text.length < 50) { console.log(`[OT BB] ${r.name}: short text`); return null; }
-    if (/access denied|security check|are you a robot|just a moment/i.test(text)) {
-      console.log(`[OT BB] ${r.name}: Akamai blocked even with proxy`);
-      (globalThis as any).__otVerifyDebug += `[BLOCKED]`;
+    if (text.length < 10 || text.startsWith("FETCH_ERR") || /access denied|just a moment/i.test(text)) {
+      console.log(`[OT BB] ${r.name}: restref blocked/empty (${text.substring(0, 60)})`);
       return null;
     }
 
     const slots    = extractTimes(text);
     const windowed = filterWindow(slots, params.time);
-    console.log(`[OT BB] ${r.name}: slots=${slots.length} windowed=${windowed.length}`);
-
     if (windowed.length === 0) {
-      console.log(`[OT BB] ${r.name}: no slots in window`);
+      console.log(`[OT BB] ${r.name}: no slots in window (len=${text.length})`);
       return null;
     }
     const base          = r.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
-    const ratingM = text.match(/(\d\.\d)\s*(?:stars?|★|\()/i);
-    const reviewM = text.match(/\(([\d,]+)\s*review/i);
     console.log(`[OT BB] ${r.name}: ${windowed.length} slots ✓`);
-    return {
-      ...r,
-      timeSlots:   slotsWithUrls,
-      rating:      ratingM ? parseFloat(ratingM[1])                 : r.rating,
-      reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
-    };
+    return { ...r, timeSlots: slotsWithUrls, softVerified: false };
   } catch (err: any) {
     (globalThis as any).__otVerifyDebug += `→ERR:${err?.message?.substring(0, 80)}`;
     console.log(`[OT BB] ${r.name}: ${err?.message}`);
