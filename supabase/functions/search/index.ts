@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v41
+// TableFinder Search Edge Function — v51
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v50",
+      _v:                  "v51",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2338,17 +2338,21 @@ async function verifyOTviaLambda(
     return 'rid=' + rid + '\\n' + bodyText.substring(0, 3000);
   })()`;
 
+  // Write debug BEFORE lambdaLoad so we know this function was reached even if
+  // the outer withTimeout() kills the Promise before lambdaLoad() resolves.
+  (globalThis as any).__otLambdaDebug = ((globalThis as any).__otLambdaDebug
+    ? (globalThis as any).__otLambdaDebug + " || " : "") + `CALL:${r.name}(rid=${rid ?? "none"})`;
+
   try {
     const raw = await lambdaLoad(urlToLoad, scraperUrl, scraperSecret, {
-      waitMs:    5000,
-      timeoutMs: 55_000,
+      waitMs:    2000,   // reduced from 5000 — saves 3s per call, helps cold starts fit in 24s budget
+      timeoutMs: 21_000, // reduced from 55_000 — fails fast enough for catch to write debug before response is sent
       evalExpr,
     });
 
-    // Capture for _debug
-    const _lambdaEntry = `${r.name}|raw_len=${raw?.length ?? 0}|sample=${(raw ?? "").substring(0, 100)}`;
-    (globalThis as any).__otLambdaDebug = ((globalThis as any).__otLambdaDebug
-      ? (globalThis as any).__otLambdaDebug + " || " : "") + _lambdaEntry;
+    // Append result to pre-call debug entry
+    const _lambdaEntry = `→raw_len=${raw?.length ?? 0}|sample=${(raw ?? "").substring(0, 100)}`;
+    (globalThis as any).__otLambdaDebug = ((globalThis as any).__otLambdaDebug ?? "") + _lambdaEntry;
     if (!(globalThis as any).__otVerifyDebug) {
       (globalThis as any).__otVerifyDebug = `${r.name}|raw_len=${raw?.length ?? 0}|sample=${(raw ?? "").substring(0, 200)}`;
     }
@@ -2403,6 +2407,8 @@ async function verifyOTviaLambda(
       reviewCount: reviewM ? parseInt(reviewM[1].replace(/,/g, "")) : r.reviewCount,
     };
   } catch (err: any) {
+    // Write error to debug — catches timeouts (AbortError) and other failures
+    (globalThis as any).__otLambdaDebug = ((globalThis as any).__otLambdaDebug ?? "") + `→ERR:${err?.message?.substring(0, 60)}`;
     console.log(`[OT Lambda] ${r.name}: ${err?.message}`);
     return null;
   }
