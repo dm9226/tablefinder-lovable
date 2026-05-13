@@ -204,6 +204,13 @@ serve(async (req) => {
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug ?? null,
         yelp_fc_sample:  (globalThis as any).__yelpFcSample    ?? null,
         yelp_bb:         (globalThis as any).__yelpBBDebug     ?? null,
+        // Resy URL samples — helps diagnose broken-link reports.
+        // Shows platformUrl + first slot URL for the first 3 Resy results.
+        resy_urls:       resyVer.slice(0, 3).map(r => ({
+          name:     r.name,
+          platform: r.platformUrl,
+          slot0:    r.timeSlots[0]?.url ?? null,
+        })),
       },
     });
 
