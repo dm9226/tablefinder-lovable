@@ -239,16 +239,12 @@ const Index = () => {
         })}</script>
       </Helmet>
       <header className="pt-6 pb-3 px-4 text-center">
-        <div className="flex justify-center mb-2">
-          <img
-            src="/tf-logo.png"
-            alt="TableFinder"
-            className="h-12 w-auto"
-            width={512}
-            height={512}
-          />
-        </div>
-        <p className="text-muted-foreground font-body text-base md:text-lg max-w-md mx-auto">
+        <Link to="/">
+          <h1 className="font-heading text-4xl md:text-5xl text-foreground tracking-tight">
+            TableFinder
+          </h1>
+        </Link>
+        <p className="text-muted-foreground font-body text-base md:text-lg max-w-md mx-auto mt-2">
           Multiple Reservation Platforms, One Search
         </p>
       </header>
