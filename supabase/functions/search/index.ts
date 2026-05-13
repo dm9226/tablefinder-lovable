@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v46",
+      _v:                  "v47",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -195,8 +195,8 @@ serve(async (req) => {
         ot_lambda:       (globalThis as any).__otLambdaDebug   ?? null,
         ot_bing:         (globalThis as any).__otApiDebug      ?? null,
         ot_discovery:    (globalThis as any).__otDiscoveryDebug ?? null,
+        ot_cand:         (globalThis as any).__otCandDebug       ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
-        ot_slug_rid:     (globalThis as any).__otSlugRidDebug   ?? null,
         ot_verify:       (globalThis as any).__otVerifyDebug    ?? null,
         ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
         yelp_api:        (globalThis as any).__yelpApiDebug      ?? null,
@@ -1613,18 +1613,13 @@ async function verifyOne(
     ? verifyResyViaBB(r, params, scraperUrl, scraperSecret)
     : verifyResy(r, params, fcKey);
   if (r.platform === "opentable") {
-    // If no RID yet, use Wayback Machine to find a cached snapshot of the /r/slug page
-    // and extract the numeric RID from archived HTML. archive.org has no Akamai protection.
-    // CDX API (4s timeout) + archive fetch (8s timeout) = 12s max before restref attempt.
-    let rr = r;
-    if (!r._rid) {
-      const slugM = r.platformUrl.match(/opentable\.com\/r\/([^/?#]+)/i);
-      if (slugM) {
-        const rid = await fetchOTRidFromWayback(slugM[1]);
-        if (rid) rr = { ...r, _rid: rid };
-      }
-    }
-    const restref = await verifyOTviaRestref(rr, params);
+    // Log this candidate for diagnostics (append to global, all run in parallel)
+    const _candInfo = `${r.name}|rid=${r._rid ?? "none"}|url=${r.platformUrl}`;
+    (globalThis as any).__otCandDebug = ((globalThis as any).__otCandDebug
+      ? (globalThis as any).__otCandDebug + " || " : "") + _candInfo;
+
+    // Attempt restref immediately. Without a RID it returns null fast (<1ms).
+    const restref = await verifyOTviaRestref(r, params);
     if (restref) return restref;
     // Fall back to browser-based methods if restref fails or no rid available.
     return bbKey && bbProject
@@ -1926,7 +1921,12 @@ async function fetchOTRidFromWayback(slug: string): Promise<string | null> {
 // Returns JSON availability data directly from Deno, no Lambda/scraping needed.
 async function verifyOTviaRestref(r: Restaurant, params: SearchParams): Promise<Restaurant | null> {
   const rid = r._rid ?? extractRid(r.platformUrl);
-  if (!rid) { console.log(`[OT restref] ${r.name}: no rid`); return null; }
+  if (!rid) {
+    console.log(`[OT restref] ${r.name}: no rid`);
+    (globalThis as any).__otRestrefDebug = ((globalThis as any).__otRestrefDebug
+      ? (globalThis as any).__otRestrefDebug + " | " : "") + `no_rid:${r.name}`;
+    return null;
+  }
 
   const url = `https://www.opentable.com/restref/api/availability?rid=${rid}&covers=${params.partySize}&day=${params.date}&lang=en-US&ref=5`;
   const ctrl  = new AbortController();
@@ -1943,12 +1943,18 @@ async function verifyOTviaRestref(r: Restaurant, params: SearchParams): Promise<
       signal: ctrl.signal,
     });
     clearTimeout(timer);
-    if (!resp.ok) { console.log(`[OT restref] ${r.name}: HTTP ${resp.status}`); return null; }
+    if (!resp.ok) {
+      console.log(`[OT restref] ${r.name}: HTTP ${resp.status}`);
+      (globalThis as any).__otRestrefDebug = ((globalThis as any).__otRestrefDebug
+        ? (globalThis as any).__otRestrefDebug + " | " : "") + `http_${resp.status}:rid=${rid}:${r.name}`;
+      return null;
+    }
     const raw  = await resp.json();
     const text = JSON.stringify(raw);
-    // Capture first response for schema inspection
-    if (!(globalThis as any).__otRestrefDebug) {
-      (globalThis as any).__otRestrefDebug = text.substring(0, 500);
+    // Capture first successful response for schema inspection
+    if (!(globalThis as any).__otRestrefDebug || !(globalThis as any).__otRestrefDebug.includes("success")) {
+      (globalThis as any).__otRestrefDebug = ((globalThis as any).__otRestrefDebug
+        ? (globalThis as any).__otRestrefDebug + " | " : "") + `success:rid=${rid}:${text.substring(0,200)}`;
     }
     // extractTimes handles both 12h ("7:30 PM") and 24h ("19:30") formats
     const slots    = extractTimes(text);
@@ -1964,6 +1970,8 @@ async function verifyOTviaRestref(r: Restaurant, params: SearchParams): Promise<
   } catch (err: any) {
     clearTimeout(timer);
     console.log(`[OT restref] ${r.name}: ${err?.message}`);
+    (globalThis as any).__otRestrefDebug = ((globalThis as any).__otRestrefDebug
+      ? (globalThis as any).__otRestrefDebug + " | " : "") + `err:${err?.message?.substring(0,40)}:rid=${rid}:${r.name}`;
     return null;
   }
 }
