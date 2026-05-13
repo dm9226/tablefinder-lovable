@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v56
+// TableFinder Search Edge Function — v57
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v56",
+      _v:                  "v57",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2054,10 +2054,10 @@ async function verifyOTViaBB(
 
   try {
     const text = await bbLoad("https://www.opentable.com", bbKey, bbProject, {
-      waitMs:    1500,   // 1.5s for OT homepage to init (sets cookies/session context)
+      waitMs:    4000,   // 4s for OT homepage to fully init and set session cookies
       useProxy:  true,
       evalExpr,
-      timeoutMs: 15_000,
+      timeoutMs: 18_000,
     });
 
     (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 100)}`;
