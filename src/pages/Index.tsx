@@ -240,8 +240,8 @@ const Index = () => {
       </Helmet>
       <header className="pt-6 pb-3 px-4 text-center">
         <Link to="/">
-          <h1 className="font-heading text-4xl md:text-5xl text-primary tracking-tight">
-            TableFinder
+          <h1 className="font-heading text-4xl md:text-5xl font-extrabold tracking-tight leading-none">
+            <span className="text-foreground">Table</span><span className="text-primary">Finder</span>
           </h1>
         </Link>
         <p className="text-muted-foreground font-body text-base md:text-lg max-w-md mx-auto mt-2">
