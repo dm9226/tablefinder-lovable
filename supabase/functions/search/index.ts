@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v51
+// TableFinder Search Edge Function — v52
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v51",
+      _v:                  "v52",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -359,7 +359,15 @@ async function lambdaLoad(
       body: JSON.stringify({ url, waitMs, evalExpr, useProxy, secret: scraperSecret }),
     });
     clearTimeout(timer);
-    if (!resp.ok) throw new Error(`Lambda scraper HTTP ${resp.status}`);
+    if (!resp.ok) {
+      // Read the error body so we know WHY Lambda failed (e.g. Chrome crash, nav timeout)
+      let errDetail = "";
+      try {
+        const errData = await resp.json();
+        errDetail = errData.error ?? JSON.stringify(errData).substring(0, 200);
+      } catch { try { errDetail = await resp.text(); } catch {} }
+      throw new Error(`Lambda HTTP ${resp.status}: ${errDetail.substring(0, 200)}`);
+    }
     const data = await resp.json();
     if (data.error) throw new Error(`Lambda: ${data.error}`);
     return String(data.content ?? "");
