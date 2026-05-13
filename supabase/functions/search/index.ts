@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v54
+// TableFinder Search Edge Function — v55
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v54",
+      _v:                  "v55",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1654,8 +1654,9 @@ async function verifyOne(
     // Attempt restref immediately. Without a RID it returns null fast (<1ms).
     const restref = await verifyOTviaRestref(r, params);
     if (restref) return restref;
-    // v54: Lambda fetch-only proxy for restref (different AWS IPs from Supabase — may not be Akamai-blocked).
-    // Chrome page loads from Lambda ARE blocked (ERR_HTTP2_PROTOCOL_ERROR v52), but plain HTTP
+    // v55: Lambda Chrome + HTTP/1.1 (--disable-http2 always-on) targeting widget canvas URL.
+    // fetchOnly restref timed out (v54): Akamai drops Node.js TLS fingerprint connections.
+    // Chrome HTTP/1.1 has legitimate JA3 fingerprint + HTTP/1.1 which Akamai accepts.
     // fetch to the restref JSON API is untested from Lambda IPs and may succeed.
     // BB residential proxy is fallback (free tier exhausted but kept for when account is replenished).
     if (scraperUrl && scraperSecret) {
@@ -2328,17 +2329,16 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
 // ─── OT LAMBDA VERIFICATION ───────────────────────────────────────────────────
 // The OT widget/reservation/canvas endpoint is designed for cross-origin embedding
 // on any restaurant website — including cloud-hosted ones. Akamai's rules for it
-// v54: Lambda used as an HTTP proxy for the OT restref availability API.
-// Chrome page loads from Lambda ARE blocked by Akamai (ERR_HTTP2_PROTOCOL_ERROR — confirmed v52).
-// BUT: Lambda AWS IPs are completely different from Supabase/Cloudflare IPs.
-// The restref API may be accessible from Lambda even though it's blocked from Supabase.
-// fetchOnly=true makes Lambda do a plain fetch() — no Chrome needed, fast, no cold start.
+// v55: Lambda uses Chrome + HTTP/1.1 to load the OT widget canvas URL.
+// fetchOnly restref timed out (v54): Akamai drops Node.js TLS fingerprint connections silently.
+// Chrome HTTP/1.1 (--disable-http2 always-on in handler.js) has a legitimate TLS JA3 fingerprint
+// AND uses HTTP/1.1 which Akamai accepts (vs HTTP/2 which it RSTs from cloud IPs).
+// Widget canvas URL is lighter than the full restaurant page and designed for cross-origin embedding.
 async function verifyOTviaLambda(
   r: Restaurant, params: SearchParams, scraperUrl: string, scraperSecret: string,
 ): Promise<Restaurant | null> {
   const rid = r._rid ?? extractRid(r.platformUrl);
   if (!rid) {
-    // No RID means we can't call restref — skip Lambda entirely
     console.log(`[OT Lambda] ${r.name}: no RID — skip`);
     return null;
   }
@@ -2346,32 +2346,33 @@ async function verifyOTviaLambda(
   (globalThis as any).__otLambdaDebug = ((globalThis as any).__otLambdaDebug
     ? (globalThis as any).__otLambdaDebug + " || " : "") + `CALL:${r.name}(rid=${rid})`;
 
-  const restrefUrl = `https://www.opentable.com/restref/api/availability?rid=${rid}&covers=${params.partySize}&day=${params.date}&lang=en-US&ref=5`;
+  const dt        = `${params.date}T${params.time}`;
+  const widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
 
   try {
-    const raw = await lambdaLoad(restrefUrl, scraperUrl, scraperSecret, {
-      fetchOnly: true,   // plain HTTP fetch — no Chrome, no cold start, no Akamai page-load block
-      fetchHeaders: {
-        "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept":           "application/json, text/javascript, */*; q=0.01",
-        "Referer":          "https://www.opentable.com/",
-        "Accept-Language":  "en-US,en;q=0.9",
-        "X-Requested-With": "XMLHttpRequest",
-      },
-      timeoutMs: 12_000,
+    const raw = await lambdaLoad(widgetUrl, scraperUrl, scraperSecret, {
+      useProxy:  true,   // Lambda uses PROXY_URL if configured; falls back to direct otherwise
+      waitMs:    5000,   // wait for widget JS to render time slots
+      evalExpr:  "document.body.innerText",
+      timeoutMs: 28_000,
     });
 
     (globalThis as any).__otLambdaDebug += `→len=${raw.length}|sample=${raw.substring(0, 120)}`;
 
+    if (raw.length < 50 || /access denied|security check|are you a robot|just a moment/i.test(raw)) {
+      console.log(`[OT Lambda] ${r.name}: blocked or empty (len=${raw.length})`);
+      return null;
+    }
+
     const slots    = extractTimes(raw);
     const windowed = filterWindow(slots, params.time);
     if (windowed.length === 0) {
-      console.log(`[OT Lambda restref] ${r.name}: no slots (raw len=${raw.length})`);
+      console.log(`[OT Lambda widget] ${r.name}: no slots in window (raw len=${raw.length})`);
       return null;
     }
     const base          = r.platformUrl.split("?")[0];
     const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
-    console.log(`[OT Lambda restref] ${r.name}: ${windowed.length} slots ✓`);
+    console.log(`[OT Lambda widget] ${r.name}: ${windowed.length} slots ✓`);
     return { ...r, timeSlots: slotsWithUrls, softVerified: false };
   } catch (err: any) {
     (globalThis as any).__otLambdaDebug += `→ERR:${err?.message?.substring(0, 80)}`;
