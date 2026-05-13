@@ -32,12 +32,10 @@ exports.handler = async (event) => {
   }
 
   // ── Browser mode: full headless Chrome ──────────────────────────────────────
-  // When using a residential proxy (for Akamai-protected sites like OT),
-  // force HTTP/1.1 so Akamai doesn't RST the HTTP/2 stream, and trust any
-  // certificate the proxy may present.
+  // Always force HTTP/1.1 (--disable-http2): Akamai rejects HTTP/2 from cloud IPs
+  // but accepts HTTP/1.1 connections. Trust proxy certificates when proxy is active.
   const proxyArgs = (useProxy && process.env.PROXY_URL)
     ? [
-        "--disable-http2",
         "--ignore-certificate-errors",
         "--ignore-certificate-errors-spki-list",
       ]
@@ -49,6 +47,7 @@ exports.handler = async (event) => {
       "--disable-web-security",
       "--no-sandbox",
       "--disable-setuid-sandbox",
+      "--disable-http2",  // always: forces HTTP/1.1 which Akamai accepts vs HTTP/2 which it RSTs
       ...proxyArgs,
     ],
     executablePath: await chromium.executablePath(),
