@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v60
+// TableFinder Search Edge Function — v61
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v60",
+      _v:                  "v61",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -277,9 +277,21 @@ async function parseQuery(
   const todayStr = new Date().toISOString().split("T")[0];
   const locCtx   = location ?? (lat && lng ? `${lat.toFixed(4)},${lng.toFixed(4)}` : "unknown");
 
+  // Pre-compute day-name → date map for today + next 6 days so the AI never miscalculates.
+  // "nearest upcoming" is ambiguous when today IS the named day — explicit map removes all doubt.
+  const _dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  const _dayMap: Record<string, string> = {};
+  for (let i = 0; i <= 6; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    const name = _dayNames[d.getDay()];
+    if (!_dayMap[name]) _dayMap[name] = d.toISOString().split("T")[0];
+  }
+  const tomorrowStr = _dayMap[_dayNames[new Date(new Date().setDate(new Date().getDate() + 1)).getDay()]];
+  const dayMapStr = Object.entries(_dayMap).map(([k, v]) => `${k}=${v}`).join(", ");
+
   const prompt = `Extract restaurant search parameters. Today is ${todayStr}.
 Rules:
-- date: YYYY-MM-DD. "tonight"/"today"=${todayStr}. "tomorrow"=next day. Day name=nearest upcoming.
+- date: YYYY-MM-DD. "tonight"/"today"=${todayStr}. "tomorrow"=${tomorrowStr}. Day names map (use exactly): ${dayMapStr}.
 - time: HH:MM 24h. Default 19:00. lunch≈12:00 brunch≈11:00 dinner≈19:00.
 - partySize: integer, default 2.
 - city: infer from location context. Do not guess.
