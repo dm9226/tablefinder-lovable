@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v45",
+      _v:                  "v46",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1872,21 +1872,19 @@ async function fetchOTRidFromWayback(slug: string): Promise<string | null> {
     // Step 1: CDX API — find most recent snapshot
     const cdxUrl  = `https://web.archive.org/cdx/search/cdx?url=opentable.com/r/${encodeURIComponent(slug)}&output=json&limit=1&fl=timestamp&fastLatest=true`;
     const ctrl1   = new AbortController();
-    const timer1  = setTimeout(() => ctrl1.abort(), 4_000);
+    const timer1  = setTimeout(() => ctrl1.abort(), 10_000);
     const cdxResp = await fetch(cdxUrl, { signal: ctrl1.signal });
     clearTimeout(timer1);
     if (!cdxResp.ok) {
       console.log(`[OT wayback CDX] ${slug}: HTTP ${cdxResp.status}`);
-      if (!(globalThis as any).__otSlugRidDebug)
-        (globalThis as any).__otSlugRidDebug = `cdx_http_${cdxResp.status}|slug=${slug}`;
+      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `cdx_http_${cdxResp.status}|slug=${slug}`;
       return null;
     }
     const cdxData = await cdxResp.json();
     // cdxData[0] = header ["timestamp"], cdxData[1+] = result rows
     if (!Array.isArray(cdxData) || cdxData.length < 2) {
       console.log(`[OT wayback CDX] ${slug}: no snapshots`);
-      if (!(globalThis as any).__otSlugRidDebug)
-        (globalThis as any).__otSlugRidDebug = `no_snapshot|slug=${slug}`;
+      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `no_snapshot|slug=${slug}`;
       return null;
     }
     const ts = String(cdxData[1][0]); // e.g. "20241115123456"
@@ -1894,13 +1892,12 @@ async function fetchOTRidFromWayback(slug: string): Promise<string | null> {
     // Step 2: Fetch archived snapshot with id_ modifier (raw original, no WB toolbar)
     const archiveUrl = `https://web.archive.org/web/${ts}id_/https://www.opentable.com/r/${slug}`;
     const ctrl2   = new AbortController();
-    const timer2  = setTimeout(() => ctrl2.abort(), 8_000);
+    const timer2  = setTimeout(() => ctrl2.abort(), 12_000);
     const archResp = await fetch(archiveUrl, { signal: ctrl2.signal });
     clearTimeout(timer2);
     if (!archResp.ok) {
       console.log(`[OT wayback] ${slug}: archive HTTP ${archResp.status}`);
-      if (!(globalThis as any).__otSlugRidDebug)
-        (globalThis as any).__otSlugRidDebug = `archive_http_${archResp.status}|slug=${slug}|ts=${ts}`;
+      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `archive_http_${archResp.status}|slug=${slug}|ts=${ts}`;
       return null;
     }
     const html = await archResp.text();
@@ -1908,18 +1905,17 @@ async function fetchOTRidFromWayback(slug: string): Promise<string | null> {
     const ridM = html.match(/opentable\.com\/restaurant\/profile\/(\d+)/i);
     if (ridM) {
       console.log(`[OT wayback] ${slug}: rid=${ridM[1]} ✓ (ts=${ts})`);
-      if (!(globalThis as any).__otSlugRidDebug)
-        (globalThis as any).__otSlugRidDebug = `success|slug=${slug}|rid=${ridM[1]}|ts=${ts}`;
+      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `success|slug=${slug}|rid=${ridM[1]}|ts=${ts}`;
       return ridM[1];
     }
     console.log(`[OT wayback] ${slug}: no RID in archive html=${html.length} ts=${ts}`);
     if (!(globalThis as any).__otSlugRidDebug)
-      (globalThis as any).__otSlugRidDebug = `no_rid|slug=${slug}|html=${html.length}|ts=${ts}|sample=${html.substring(0,300)}`;
+      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `no_rid|slug=${slug}|html=${html.length}|ts=${ts}|sample=${html.substring(0,200)}`;
     return null;
   } catch (err: any) {
     console.log(`[OT wayback] ${slug}: ${err?.message}`);
     if (!(globalThis as any).__otSlugRidDebug)
-      (globalThis as any).__otSlugRidDebug = `error|${err?.message?.substring(0,80)}|slug=${slug}`;
+      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `error|${err?.message?.substring(0,60)}|slug=${slug}`;
     return null;
   }
 }
