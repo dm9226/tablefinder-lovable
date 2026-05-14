@@ -175,11 +175,9 @@ serve(async (req) => {
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
-    // Hard-verified (real time slots) + soft-verified OT (real page loaded but restref
-    // not auto-fired; browser will stream in real slots via clientVerifyOT).
-    // Yelp soft-verify still excluded — those are client-side only.
+    // Hard-verified only — confirmed available time slots. No soft-verify.
     let verified = dedup([...resyVer, ...otVer, ...yelpVer])
-      .filter(r => !r.softVerified || r.platform === "opentable");
+      .filter(r => !r.softVerified);
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
     const [ranked] = await Promise.all([
@@ -284,7 +282,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v77",
+      _v:                  "v78",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2343,8 +2341,8 @@ async function verifyOTViaBB(
       const slots    = extractTimes(finalText);
       const windowed = filterWindow(slots, params.time);
       if (windowed.length === 0) {
-        console.log(`[OT BB] ${r.name}: restref captured but no slots in window → soft-verify`);
-        return { ...r, timeSlots: [], softVerified: true };
+        console.log(`[OT BB] ${r.name}: restref captured but no slots in window`);
+        return null;
       }
       const base          = r.platformUrl.split("?")[0];
       const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
@@ -2352,9 +2350,9 @@ async function verifyOTViaBB(
       return { ...r, timeSlots: slotsWithUrls, softVerified: false };
     }
 
-    // Case 3: Empty — page didn't load or restref not captured. Soft-verify.
-    console.log(`[OT BB] ${r.name}: empty response → soft-verify`);
-    return { ...r, timeSlots: [], softVerified: true };
+    // Case 3: Empty — page didn't load or restref not captured.
+    console.log(`[OT BB] ${r.name}: empty response → null`);
+    return null;
   } catch (err: any) {
     (globalThis as any).__otVerifyDebug += `→ERR:${err?.message?.substring(0, 80)}`;
     console.log(`[OT BB] ${r.name}: ${err?.message}`);
