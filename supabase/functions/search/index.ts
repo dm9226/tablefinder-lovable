@@ -232,28 +232,18 @@ serve(async (req) => {
 
     // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
     // businesses (hair salons, towing, auto glass, etc.). Exclude obvious non-food results.
-    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autoglass|auto\s*glass|safelite|windshield|repair|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage|car\s+rental|auto\s+rental|car\s+wash|national\s+car|enterprise\s+rent|hertz|budget\s+car)\b/i;
+    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autoglass|auto\s*glass|safelite|windshield|repair|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage|car\s+rental|auto\s+rental|car\s+wash|national\s+car|enterprise\s+rent|hertz|budget\s+car|bicycl|cyclery|bike\s+shop|cycling|yoga|pilates|fitness|gym\b|crossfit)\b/i;
 
     // Out-of-market city filter — Yelp returns results from surrounding suburbs.
     // Build a set of known non-local city names from the Yelp slug (e.g. "tenku-sushi-marietta"
     // ends in "marietta" which is not Atlanta). We detect this by checking if the slug ends
-    // in a city name that doesn't match the search metro.
-    const searchCity = params.city.toLowerCase().replace(/\s+/g, "");
-    const localAliases = new Set([
-      searchCity, "atlanta", "atl", "decatur", "buckhead", "midtown",
-      "inmanpark", "oldfourthdward", "summerhill", "grantpark",
-    ]);
+    // Distance-based out-of-market filter — works for all cities worldwide.
+    // If we have both user coordinates and venue coordinates, drop anything > 20 miles out.
+    // Falls back to allowing through if coordinates are missing (can't determine location).
     const isOutOfMarket = (r: Restaurant) => {
-      const slugM = r.platformUrl.match(/reservations\/([^?#]+)/i);
-      if (!slugM) return false;
-      const slugParts = slugM[1].toLowerCase().replace(/-\d+$/, "").split("-");
-      // Last word in slug is often the city: "tenku-sushi-marietta" → "marietta"
-      const lastWord = slugParts[slugParts.length - 1];
-      // Only flag if it's clearly a non-local city name (4+ chars, not a generic word)
-      if (lastWord.length < 4) return false;
-      if (localAliases.has(lastWord)) return false;
-      const NON_LOCAL_CITIES = ["marietta","norcross","conyers","lawrenceville","woodstock","alpharetta","roswell","canton","smyrna","kennesaw","duluth","peachtree","newnan","cumming","gainesville","cartersville","douglasville","lithonia","stonecrest","mcdonough","griffin","rome","athens","austell","hiram","tucker","chamblee","dunwoody","sandy","springs","mableton","riverdale","union","city","fayetteville","stockbridge","covington","buford","suwanee","sugar","hill","loganville","winder","jackson","jasper","villa","rica","clarkston","eastpoint","fairburn","palmetto","senoia","mcdonough","hampton","locust","grove","barnesville","milledgeville"];
-      return NON_LOCAL_CITIES.includes(lastWord);
+      if (params.lat == null || params.lng == null) return false;
+      if (r._lat == null || r._lng == null) return false;
+      return haversine(params.lat, params.lng, r._lat, r._lng) > 20;
     };
 
     const clientVerifyYelp = yelpCands
@@ -673,44 +663,41 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
     const data = JSON.parse(rawBody);
     const venues: any[] = data?.results?.venues ?? [];
     console.log(`[Resy API] ${venues.length} venues with availability`);
-    // Log location data to verify city slug construction
+    // Log sample venue to verify city slug construction via coordinates
     const sampleVenue = venues[0]?.venue ?? {};
-    (globalThis as any).__resyApiDebug = `status=200 venues=${venues.length} sample_name=${sampleVenue.name} city=${sampleVenue.location?.city} state=${sampleVenue.location?.state} url_slug=${sampleVenue.url_slug}`;
+    const sLat = sampleVenue.location?.geo?.lat;
+    const sLng = sampleVenue.location?.geo?.lon;
+    const sMetro = (sLat != null && sLng != null) ? nearestResyMetro(sLat, sLng)?.slug : "no_coords";
+    (globalThis as any).__resyApiDebug = `status=200 venues=${venues.length} sample=${sampleVenue.name}|slug=${sampleVenue.url_slug}|lat=${sLat}|lng=${sLng}|metro=${sMetro}`;
 
     return venues.flatMap((v: any) => {
       const venue = v.venue ?? {};
       const name  = (venue.name ?? "").trim();
       if (!name) return [];
 
-      // Build the Resy city slug from the VENUE's actual location, not the search city.
-      // "contact.url" is the restaurant's own website (e.g. scoutdecatur.com), not a
-      // resy.com URL, so it can't be relied upon for routing.
-      // Using the venue's location.city + location.state produces the correct slug for
-      // suburban venues (e.g. Scout in Decatur → decatur-ga, not atlanta-ga).
-      const locCity  = (venue.location?.city  ?? "").trim();
-      const locState = (venue.location?.state ?? "").trim();
-      const STATE_ABBR: Record<string,string> = {
-        "alabama":"al","alaska":"ak","arizona":"az","arkansas":"ar","california":"ca",
-        "colorado":"co","connecticut":"ct","delaware":"de","florida":"fl","georgia":"ga",
-        "hawaii":"hi","idaho":"id","illinois":"il","indiana":"in","iowa":"ia","kansas":"ks",
-        "kentucky":"ky","louisiana":"la","maine":"me","maryland":"md","massachusetts":"ma",
-        "michigan":"mi","minnesota":"mn","mississippi":"ms","missouri":"mo","montana":"mt",
-        "nebraska":"ne","nevada":"nv","new hampshire":"nh","new jersey":"nj","new mexico":"nm",
-        "new york":"ny","north carolina":"nc","north dakota":"nd","ohio":"oh","oklahoma":"ok",
-        "oregon":"or","pennsylvania":"pa","rhode island":"ri","south carolina":"sc",
-        "south dakota":"sd","tennessee":"tn","texas":"tx","utah":"ut","vermont":"vt",
-        "virginia":"va","washington":"wa","west virginia":"wv","wisconsin":"wi","wyoming":"wy",
-      };
-      const stateAbbr = locState.length === 2
-        ? locState.toLowerCase()
-        : (STATE_ABBR[locState.toLowerCase()] ?? "");
-      // Build venue-specific city slug; fall back to search city slug only if data is missing
-      const venueCitySlug = locCity && stateAbbr
-        ? `${locCity.toLowerCase().replace(/\s+/g, "-")}-${stateAbbr}`
-        : slug;
+      // Extract venue coordinates first — needed for both distance filtering and city slug.
+      // Resy API uses geo.lon (not geo.long). Cover all known field-name variants.
+      const vLat: number | undefined =
+        venue.location?.geo?.lat  ?? venue.location?.latitude  ?? venue.location?.lat;
+      const vLng: number | undefined =
+        venue.location?.geo?.lon  ??   // ← primary Resy API field
+        venue.location?.geo?.long ??   // fallback variant
+        venue.location?.longitude ??
+        venue.location?.long      ??
+        venue.location?.lng;
 
-      // If contact.url happens to be a resy.com URL, trust it (some venues link to their
-      // Resy page). Otherwise use url_slug + venue-specific city slug.
+      // Determine Resy city slug from the venue's own coordinates via nearestResyMetro.
+      // The API returns no city/state text fields usable for slug construction, but
+      // venue lat/lng lets us pick the correct metro entry (e.g., Scout at 33.760,-84.302
+      // snaps to decatur-ga, not atlanta-ga, because Decatur is 1.7 mi away vs 6.5 mi).
+      let venueCitySlug = slug; // default: search city slug
+      if (vLat != null && vLng != null) {
+        const nearestM = nearestResyMetro(vLat, vLng);
+        if (nearestM) venueCitySlug = nearestM.slug;
+      }
+
+      // contact.url is the restaurant's own website — not a resy.com URL. Keep the
+      // check as a rare override for venues that happen to embed their Resy link.
       const contactUrl: string = venue.contact?.url ?? "";
       const contactMatch = contactUrl.match(/resy\.com(\/cities\/[^/]+\/venues\/[^/?#\s]+)/i);
       const venueSlugFromApi = (venue.url_slug ?? "").toLowerCase();
@@ -728,26 +715,9 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
       if (!venueSlug || RESY_SKIP.has(venueSlug)) return [];
 
       // Distance filter — skip venues outside 12 miles of the user.
-      // Resy API uses geo.lon (not geo.long). Covers all known field-name variants.
-      const vLat: number | undefined =
-        venue.location?.geo?.lat     ?? venue.location?.latitude   ?? venue.location?.lat;
-      const vLng: number | undefined =
-        venue.location?.geo?.lon     ??   // ← primary Resy API field
-        venue.location?.geo?.long    ??   // fallback variant
-        venue.location?.longitude    ??
-        venue.location?.long         ??
-        venue.location?.lng;
       if (vLat != null && vLng != null) {
         if (haversine(lat, lng, vLat, vLng) > 12) {
           console.log(`[Resy API] skip ${name}: ${haversine(lat, lng, vLat, vLng).toFixed(1)}mi away`);
-          return [];
-        }
-      } else {
-        // No coordinates in response — filter by city name as a safety net
-        const locCity: string = (venue.location?.city ?? venue.location?.area?.name ?? "").toLowerCase();
-        const FAR_CITIES = ["peachtree city","newnan","mcdonough","griffin","covington","canton","cumming","gainesville","cartersville"];
-        if (FAR_CITIES.some(c => locCity.includes(c))) {
-          console.log(`[Resy API] skip ${name}: city="${locCity}" is far suburb (no coords)`);
           return [];
         }
       }
@@ -3316,6 +3286,7 @@ const RESY_METROS: { slug: string; name: string; lat: number; lng: number }[] = 
   { slug: "dfw",               name: "Dallas",          lat: 32.7767,  lng: -96.7970  },
   { slug: "houston-tx",        name: "Houston",         lat: 29.7604,  lng: -95.3698  },
   { slug: "atlanta-ga",        name: "Atlanta",         lat: 33.7490,  lng: -84.3880  },
+  { slug: "decatur-ga",        name: "Decatur",         lat: 33.7748,  lng: -84.2963  },
   { slug: "nashville-tn",      name: "Nashville",       lat: 36.1627,  lng: -86.7816  },
   { slug: "philadelphia-pa",   name: "Philadelphia",    lat: 39.9526,  lng: -75.1652  },
   { slug: "minneapolis-mn",    name: "Minneapolis",     lat: 44.9778,  lng: -93.2650  },
