@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v66
+// TableFinder Search Edge Function — v67
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -195,7 +195,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v66",
+      _v:                  "v67",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1734,6 +1734,21 @@ async function verifyYelpViaBB(
   }
 }
 
+// Resolves with the first non-null result from an array of promises.
+// Used to run BB, Lambda, and Firecrawl in parallel and take whichever wins first.
+function raceNonNull<T>(promises: Promise<T | null>[]): Promise<T | null> {
+  return new Promise<T | null>((resolve) => {
+    let pending = promises.length;
+    if (pending === 0) { resolve(null); return; }
+    promises.forEach(p => {
+      p.then(result => {
+        if (result !== null) resolve(result);
+        else if (--pending === 0) resolve(null);
+      }).catch(() => { if (--pending === 0) resolve(null); });
+    });
+  });
+}
+
 async function verifyOne(
   r: Restaurant, params: SearchParams, fcKey: string,
   scraperUrl = "", scraperSecret = "", bbKey = "", bbProject = "",
@@ -1749,23 +1764,22 @@ async function verifyOne(
     (globalThis as any).__otCandDebug = ((globalThis as any).__otCandDebug
       ? (globalThis as any).__otCandDebug + " || " : "") + _candInfo;
 
-    // v64: Fix early-return bug — BB blocked → fall through to Lambda instead of null.
-    // BB residential proxy blocks → Lambda (Chrome HTTP/1.1, different TLS fingerprint) may succeed.
-    if (bbKey && bbProject) {
-      const bbResult = await verifyOTViaBB(r, params, bbKey, bbProject);
-      if (bbResult) return bbResult;
-      // BB blocked — fall through to Lambda below
-    }
-    // restref: fast attempt (fail-fast if no RID or Supabase IP blocked)
-    const restref = await verifyOTviaRestref(r, params);
-    if (restref) return restref;
-    // Lambda: real Chrome + HTTP/1.1 forces away from HTTP/2 which Akamai RSTs
-    if (scraperUrl && scraperSecret) {
-      const lambdaResult = await verifyOTviaLambda(r, params, scraperUrl, scraperSecret);
-      if (lambdaResult) return lambdaResult;
-    }
-    // Firecrawl / Jina (last resort — also cloud IPs, rarely succeeds for OT)
-    return verifyOT(r, params, fcKey);
+    // v67: Run restref, BB, Lambda, and Firecrawl in parallel using raceNonNull.
+    // Previous sequential approach (BB → Lambda → Firecrawl) was broken:
+    // BB uses up to 18s of the 24s perScrapeMs budget, leaving Lambda only 0-6s
+    // which causes timeouts on cold starts (8-15s).  Running in parallel means
+    // whichever succeeds first wins — restref (~0.5s) almost always returns first
+    // when it has a valid RID, otherwise Lambda and BB race with full time budgets.
+    return raceNonNull([
+      verifyOTviaRestref(r, params),
+      bbKey && bbProject
+        ? verifyOTViaBB(r, params, bbKey, bbProject)
+        : Promise.resolve(null),
+      scraperUrl && scraperSecret
+        ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
+        : Promise.resolve(null),
+      verifyOT(r, params, fcKey),
+    ]);
   }
   if (r.platform === "yelp") {
     // NOTE: Browserbase (BB) does NOT work for Yelp — DataDome blocks even real Chrome
@@ -2491,9 +2505,9 @@ async function verifyOTviaLambda(
   try {
     const raw = await lambdaLoad(widgetUrl, scraperUrl, scraperSecret, {
       useProxy:  true,   // Lambda uses PROXY_URL if configured; falls back to direct otherwise
-      waitMs:    3000,   // v66: reduced from 5s — widget canvas is lighter than full page
+      waitMs:    3000,   // widget canvas is lighter than full page
       evalExpr:  "document.body.innerText",
-      timeoutMs: 12_000, // v66: fits within per-scrape budget after BB (~8s) + restref (~0.5s)
+      timeoutMs: 20_000, // v67: BB+Lambda now run in parallel — Lambda gets full budget (was 12s, silently killed)
     });
 
     (globalThis as any).__otLambdaDebug += `→len=${raw.length}|sample=${raw.substring(0, 120)}`;
