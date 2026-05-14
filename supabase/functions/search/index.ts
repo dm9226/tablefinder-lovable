@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v69
+// TableFinder Search Edge Function — v70
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -207,9 +207,17 @@ serve(async (req) => {
         _rid: r._rid ?? extractRid(r.platformUrl), _lat: r._lat, _lng: r._lng,
       }));
 
+    // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
+    // businesses (hair salons, towing, apartments). Exclude obvious non-food results.
+    const NON_FOOD_RE = /\b(towing|salon|clips|barber|apartments?|realty|real\s+estate|auto|repair|tires?|plumbing|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance)\b/i;
+
     const clientVerifyYelp = yelpCands
-      .filter(r => !verifiedYelpIds.has(r.id))
-      .slice(0, 15)
+      .filter(r =>
+        !verifiedYelpIds.has(r.id) &&
+        !(r as any)._topRated &&          // only reservation-date-filtered candidates
+        !NON_FOOD_RE.test(r.name)         // drop obvious non-restaurant businesses
+      )
+      .slice(0, 12)
       .map(r => ({
         id: r.id, name: r.name, cuisine: r.cuisine ?? "",
         neighborhood: r.neighborhood ?? "", rating: r.rating,
@@ -228,7 +236,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v69",
+      _v:                  "v70",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
