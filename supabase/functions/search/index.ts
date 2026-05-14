@@ -673,31 +673,55 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
     const data = JSON.parse(rawBody);
     const venues: any[] = data?.results?.venues ?? [];
     console.log(`[Resy API] ${venues.length} venues with availability`);
-    (globalThis as any).__resyApiDebug = `status=200 venues=${venues.length} first=${JSON.stringify(venues[0]?.venue?.name ?? null)}`;
-
-    // Dump first venue for slug debugging
-    (globalThis as any).__resyApiDebug = `status=200 venues=${venues.length} first_venue=${JSON.stringify(venues[0]?.venue ?? null).substring(0, 600)}`;
+    // Log location data to verify city slug construction
+    const sampleVenue = venues[0]?.venue ?? {};
+    (globalThis as any).__resyApiDebug = `status=200 venues=${venues.length} sample_name=${sampleVenue.name} city=${sampleVenue.location?.city} state=${sampleVenue.location?.state} url_slug=${sampleVenue.url_slug}`;
 
     return venues.flatMap((v: any) => {
       const venue = v.venue ?? {};
       const name  = (venue.name ?? "").trim();
       if (!name) return [];
 
-      // Use contact.url directly — it IS the verified real Resy URL for this venue.
-      // The API already confirmed availability and gave us the correct link.
-      // Only fall back to constructing a URL if contact.url is missing.
+      // Build the Resy city slug from the VENUE's actual location, not the search city.
+      // "contact.url" is the restaurant's own website (e.g. scoutdecatur.com), not a
+      // resy.com URL, so it can't be relied upon for routing.
+      // Using the venue's location.city + location.state produces the correct slug for
+      // suburban venues (e.g. Scout in Decatur → decatur-ga, not atlanta-ga).
+      const locCity  = (venue.location?.city  ?? "").trim();
+      const locState = (venue.location?.state ?? "").trim();
+      const STATE_ABBR: Record<string,string> = {
+        "alabama":"al","alaska":"ak","arizona":"az","arkansas":"ar","california":"ca",
+        "colorado":"co","connecticut":"ct","delaware":"de","florida":"fl","georgia":"ga",
+        "hawaii":"hi","idaho":"id","illinois":"il","indiana":"in","iowa":"ia","kansas":"ks",
+        "kentucky":"ky","louisiana":"la","maine":"me","maryland":"md","massachusetts":"ma",
+        "michigan":"mi","minnesota":"mn","mississippi":"ms","missouri":"mo","montana":"mt",
+        "nebraska":"ne","nevada":"nv","new hampshire":"nh","new jersey":"nj","new mexico":"nm",
+        "new york":"ny","north carolina":"nc","north dakota":"nd","ohio":"oh","oklahoma":"ok",
+        "oregon":"or","pennsylvania":"pa","rhode island":"ri","south carolina":"sc",
+        "south dakota":"sd","tennessee":"tn","texas":"tx","utah":"ut","vermont":"vt",
+        "virginia":"va","washington":"wa","west virginia":"wv","wisconsin":"wi","wyoming":"wy",
+      };
+      const stateAbbr = locState.length === 2
+        ? locState.toLowerCase()
+        : (STATE_ABBR[locState.toLowerCase()] ?? "");
+      // Build venue-specific city slug; fall back to search city slug only if data is missing
+      const venueCitySlug = locCity && stateAbbr
+        ? `${locCity.toLowerCase().replace(/\s+/g, "-")}-${stateAbbr}`
+        : slug;
+
+      // If contact.url happens to be a resy.com URL, trust it (some venues link to their
+      // Resy page). Otherwise use url_slug + venue-specific city slug.
       const contactUrl: string = venue.contact?.url ?? "";
       const contactMatch = contactUrl.match(/resy\.com(\/cities\/[^/]+\/venues\/[^/?#\s]+)/i);
       const venueSlugFromApi = (venue.url_slug ?? "").toLowerCase();
 
       let base: string;
       if (contactMatch) {
-        // Strip any existing query params from contact.url — we'll add our own
         base = `https://resy.com${contactMatch[1]}`;
       } else if (venueSlugFromApi) {
-        base = `https://resy.com/cities/${slug}/venues/${venueSlugFromApi}`;
+        base = `https://resy.com/cities/${venueCitySlug}/venues/${venueSlugFromApi}`;
       } else {
-        base = `https://resy.com/cities/${slug}/venues/${slugify(name)}`;
+        base = `https://resy.com/cities/${venueCitySlug}/venues/${slugify(name)}`;
       }
 
       const venueSlug = base.match(/\/venues\/([^/?#]+)/)?.[1]?.toLowerCase() ?? slugify(name);
