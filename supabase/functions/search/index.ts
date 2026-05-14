@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v63
+// TableFinder Search Edge Function — v64
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -159,10 +159,11 @@ serve(async (req) => {
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
-    // Hard-verified only — real confirmed time slots.
-    // Soft-verified results are dropped: they have no actionable slot data.
+    // Keep hard-verified results plus soft-verified OT (all cloud paths blocked by Akamai;
+    // soft-verify shows the restaurant with a direct OT link so user can check manually).
+    // Soft-verified Yelp is still dropped (too many false positives / DataDome blocks).
     let verified = dedup([...resyVer, ...otVer, ...yelpVer])
-      .filter(r => !r.softVerified);
+      .filter(r => !r.softVerified || r.platform === "opentable");
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
     const [ranked] = await Promise.all([
@@ -196,7 +197,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v63",
+      _v:                  "v64",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1754,12 +1755,21 @@ async function verifyOne(
     (globalThis as any).__otCandDebug = ((globalThis as any).__otCandDebug
       ? (globalThis as any).__otCandDebug + " || " : "") + _candInfo;
 
-    // v59: When BB is configured, go straight to it — skip restref (Supabase IPs blocked)
-    // and skip Lambda (datacenter IPs blocked). BB uses residential proxy + real Chrome.
+    // v64: BB blocks → fall through; skip Lambda/Jina (also cloud IPs, also blocked).
     if (bbKey && bbProject) {
-      return verifyOTViaBB(r, params, bbKey, bbProject);
+      const bbResult = await verifyOTViaBB(r, params, bbKey, bbProject);
+      if (bbResult) return bbResult;
+      // BB blocked (Access Denied ~215 chars from Akamai). Lambda + Jina share the same
+      // datacenter IP problem — trying them just burns the 24s budget with no upside.
+      // restref is fast (fail in <2s), always worth one try.
+      const restref = await verifyOTviaRestref(r, params);
+      if (restref) return restref;
+      // All cloud paths blocked. Soft-verify: restaurant is real (discovered via Bing/Yahoo
+      // OT search) — show it with a direct OT link so user can manually check availability.
+      console.log(`[OT] ${r.name}: BB+restref blocked — soft-verifying`);
+      return { ...r, softVerified: true, timeSlots: [{ time: params.time, url: r.platformUrl }] };
     }
-    // Attempt direct restref (works from non-datacenter IPs). Without RID → null fast.
+    // Non-BB path (no BB configured — dev/fallback mode):
     const restref = await verifyOTviaRestref(r, params);
     if (restref) return restref;
     // Lambda fallback: Chrome + HTTP/1.1 (datacenter IPs, may be blocked by Akamai).
