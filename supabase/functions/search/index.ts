@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v62
+// TableFinder Search Edge Function — v63
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -122,8 +122,19 @@ serve(async (req) => {
           console.log(`[Resy] API returned ${apiResults.length} pre-verified venues`);
           return apiResults;
         }
+        // Tier 2: Firecrawl Google search — works when the API key is rotated/blocked
         console.log("[Resy] API returned 0 — falling back to Firecrawl");
-        return discoverResy(params, FIRECRAWL);
+        const fcResults = await discoverResy(params, FIRECRAWL);
+        if (fcResults.length > 0) {
+          console.log(`[Resy] Firecrawl returned ${fcResults.length} venues`);
+          return fcResults;
+        }
+        // Tier 3: Lambda real-browser — renders the Resy SPA and extracts venue links
+        if (SCRAPER_URL && SCRAPER_SECRET) {
+          console.log("[Resy] Firecrawl returned 0 — falling back to Lambda browser");
+          return discoverResyViaBB(params, SCRAPER_URL, SCRAPER_SECRET);
+        }
+        return [];
       }, DISCOVER_MS),
       // OT: Lambda is permanently blocked by Akamai on the search page (HTTP 500 every time).
       // Go directly to Firecrawl-based discovery.
@@ -185,7 +196,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v62",
+      _v:                  "v63",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
