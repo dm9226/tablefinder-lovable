@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v84
+// TableFinder Search Edge Function — v85
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -166,37 +166,12 @@ serve(async (req) => {
     const otSlice   = otCands.slice(0, 12);   // restref API is fast (~1s each)
     const yelpSlice = yelpCands.slice(0, 6);
 
-    // ── Wayback RID enrichment (runs concurrently with verification) ──────────
-    // Discovery finds OT slug URLs (e.g. /r/white-bull-decatur) but not numeric
-    // profile IDs. Wayback Machine has archived OT pages with the RID embedded in
-    // their server-rendered HTML. Running this here (not inside discoverOpenTable)
-    // means it borrows the verify budget rather than adding to discovery time.
-    const dt_wb = `${params.date}T${params.time}`;
-    const waybackEnrich = (async () => {
-      const noRid = otCands.filter(c => !c._rid).slice(0, 3); // limit 3 to avoid rate limits
-      if (noRid.length === 0) return;
-      console.log(`[OT wayback] enriching ${noRid.length} no-RID candidates`);
-      await Promise.all(noRid.map(async c => {
-        const slugM = c.platformUrl.match(/opentable\.(?:com|co\.uk)\/r\/([^/?#\s]+)/i);
-        if (!slugM) return;
-        const slug = slugM[1].replace(/[?#].*$/, "");
-        const rid = await fetchOTRidFromWayback(slug);
-        if (rid) {
-          c._rid = rid;
-          c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt_wb}&styleid=5&disablegt=true`;
-        }
-      }));
-    })();
-
     // ── Verification ──────────────────────────────────────────────────────────
     const verifyStart = Date.now();
-    const [[resyVer, otVer, yelpVer]] = await Promise.all([
-      Promise.all([
-        verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL, SCRAPER_SECRET, "", ""),
-        verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL,  SCRAPER_SECRET, BB_KEY, BB_PROJECT),
-        verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET, "", ""),   // BB blocked by DataDome
-      ]),
-      waybackEnrich,  // runs in parallel; mutates otCands[*]._rid in place
+    const [resyVer, otVer, yelpVer] = await Promise.all([
+      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL, SCRAPER_SECRET, "", ""),
+      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL,  SCRAPER_SECRET, BB_KEY, BB_PROJECT),
+      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET, "", ""),   // BB blocked by DataDome
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
@@ -297,7 +272,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v84",
+      _v:                  "v85",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -311,7 +286,6 @@ serve(async (req) => {
         ot_cand:         (globalThis as any).__otCandDebug       ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
         ot_verify:       (globalThis as any).__otVerifyDebug    ?? null,
-        ot_slug_rid:     (globalThis as any).__otSlugRidDebug   ?? null,
         ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
         yelp_api:        (globalThis as any).__yelpApiDebug           ?? null,
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug       ?? null,
@@ -1140,9 +1114,13 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   // These URLs are invisible in markdown but present in the raw HTML source.
   // "powered by OpenTable" is a phrase on restaurant websites that embed the OT widget.
   const scrapeP = (async () => {
+    // These queries surface restaurant OWN websites that embed the OT booking widget.
+    // The widget HTML contains ?rid=NNNNN which gives us the numeric RID we need.
+    // "make a reservation" + opentable is more likely to appear on restaurant pages
+    // than the generic "powered by OpenTable" branding which OT removed from newer widgets.
     const scrapeQueries = [
-      `${city}${state}${cuisine} restaurant "powered by OpenTable"`,
-      `${city}${state} restaurant "powered by OpenTable" reservation`,
+      `${city}${state}${cuisine} restaurant "opentable.com" reservations -site:opentable.com -site:yelp.com`,
+      `${city}${state} restaurant "make a reservation" "opentable" -site:opentable.com`,
     ];
     const scrapeOTSeen  = new Set<string>();
     const scrapeOTItems: Array<{ url: string; title?: string }> = [];
@@ -2117,83 +2095,6 @@ async function verifyOTviaJina(r: Restaurant, params: SearchParams): Promise<Res
   } catch (err: any) {
     clearTimeout(timer);
     if (err?.name !== "AbortError") console.log(`[OT Jina] ${r.name}: ${err?.message}`);
-    return null;
-  }
-}
-
-// ── OT: Slug → RID via Wayback Machine ───────────────────────────────────────
-// archive.org has crawled OT restaurant pages; their archived HTML contains the
-// numeric RID in <link rel="canonical"> and og:url meta tags (server-rendered
-// even in SPAs). archive.org has no Akamai protection.
-// Two-step: (1) CDX API finds the most recent snapshot timestamp, (2) fetch
-// the raw archived HTML and extract /restaurant/profile/NNN from any tag.
-async function fetchOTRidFromWayback(slug: string): Promise<string | null> {
-  try {
-    // Step 1: CDX API — find most recent snapshot
-    const cdxUrl  = `https://web.archive.org/cdx/search/cdx?url=opentable.com/r/${encodeURIComponent(slug)}&output=json&limit=1&fl=timestamp&fastLatest=true`;
-    const ctrl1   = new AbortController();
-    const timer1  = setTimeout(() => ctrl1.abort(), 10_000);
-    const cdxResp = await fetch(cdxUrl, { signal: ctrl1.signal });
-    clearTimeout(timer1);
-    if (!cdxResp.ok) {
-      console.log(`[OT wayback CDX] ${slug}: HTTP ${cdxResp.status}`);
-      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `cdx_http_${cdxResp.status}|slug=${slug}`;
-      return null;
-    }
-    const cdxData = await cdxResp.json();
-    // cdxData[0] = header ["timestamp"], cdxData[1+] = result rows
-    if (!Array.isArray(cdxData) || cdxData.length < 2) {
-      console.log(`[OT wayback CDX] ${slug}: no snapshots`);
-      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `no_snapshot|slug=${slug}`;
-      return null;
-    }
-    const ts = String(cdxData[1][0]); // e.g. "20241115123456"
-
-    // Step 2: Fetch archived snapshot with id_ modifier (raw original, no WB toolbar)
-    const archiveUrl = `https://web.archive.org/web/${ts}id_/https://www.opentable.com/r/${slug}`;
-    const ctrl2   = new AbortController();
-    const timer2  = setTimeout(() => ctrl2.abort(), 12_000);
-    const archResp = await fetch(archiveUrl, { signal: ctrl2.signal });
-    clearTimeout(timer2);
-    if (!archResp.ok) {
-      console.log(`[OT wayback] ${slug}: archive HTTP ${archResp.status}`);
-      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `archive_http_${archResp.status}|slug=${slug}|ts=${ts}`;
-      return null;
-    }
-    const html = await archResp.text();
-    // Strategy 1: old-style /restaurant/profile/NNN URL (pre-Next.js OT pages)
-    const ridM = html.match(/opentable\.com\/restaurant\/profile\/(\d+)/i);
-    if (ridM) {
-      console.log(`[OT wayback] ${slug}: rid=${ridM[1]} ✓ via profile URL (ts=${ts})`);
-      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `success_profile|slug=${slug}|rid=${ridM[1]}|ts=${ts}`;
-      return ridM[1];
-    }
-    // Strategy 2: __NEXT_DATA__ JSON — modern OT pages embed restaurant RID in pageProps
-    // Patterns seen: restaurantData.rid, restaurant.rid, restaurantDetails.restaurantId, rid
-    const nextM = html.match(/"__NEXT_DATA__"[^>]*>|<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]{1,60000}?)<\/script>/i);
-    if (nextM) {
-      const json = nextM[1] ?? html.slice(html.indexOf(nextM[0]) + nextM[0].length, html.indexOf(nextM[0]) + 60000);
-      // Try common rid field names in __NEXT_DATA__ JSON
-      const ndRid = json.match(/"(?:rid|restaurantId|restaurant_id|restaurantRid)"\s*:\s*(\d{4,7})/i);
-      if (ndRid) {
-        console.log(`[OT wayback] ${slug}: rid=${ndRid[1]} ✓ via __NEXT_DATA__ (ts=${ts})`);
-        (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `success_nextdata|slug=${slug}|rid=${ndRid[1]}|ts=${ts}`;
-        return ndRid[1];
-      }
-    }
-    // Strategy 3: any standalone 5-7 digit number after "rid": in the full HTML
-    const anyRid = html.match(/"rid"\s*:\s*(\d{5,7})/);
-    if (anyRid) {
-      console.log(`[OT wayback] ${slug}: rid=${anyRid[1]} ✓ via "rid": pattern (ts=${ts})`);
-      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `success_rid_field|slug=${slug}|rid=${anyRid[1]}|ts=${ts}`;
-      return anyRid[1];
-    }
-    console.log(`[OT wayback] ${slug}: no RID in archive html=${html.length} ts=${ts}`);
-    (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `no_rid|slug=${slug}|html=${html.length}|ts=${ts}|sample=${html.substring(0,200)}`;
-    return null;
-  } catch (err: any) {
-    console.log(`[OT wayback] ${slug}: ${err?.message}`);
-    (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `error|${err?.message?.substring(0,60)}|slug=${slug}`;
     return null;
   }
 }
