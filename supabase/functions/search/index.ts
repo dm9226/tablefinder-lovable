@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v60
+// TableFinder Search Edge Function — v62
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -144,7 +144,7 @@ serve(async (req) => {
     const [resyVer, otVer, yelpVer] = await Promise.all([
       verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL, SCRAPER_SECRET, "", ""),
       verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL,  SCRAPER_SECRET, BB_KEY, BB_PROJECT),
-      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET, BB_KEY, BB_PROJECT),
+      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET, "", ""),   // BB blocked by DataDome
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
@@ -185,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v60",
+      _v:                  "v62",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -204,6 +204,13 @@ serve(async (req) => {
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug ?? null,
         yelp_fc_sample:  (globalThis as any).__yelpFcSample    ?? null,
         yelp_bb:         (globalThis as any).__yelpBBDebug     ?? null,
+        // Resy URL samples — helps diagnose broken-link reports.
+        // Shows platformUrl + first slot URL for the first 3 Resy results.
+        resy_urls:       resyVer.slice(0, 3).map(r => ({
+          name:     r.name,
+          platform: r.platformUrl,
+          slot0:    r.timeSlots[0]?.url ?? null,
+        })),
       },
     });
 
@@ -258,7 +265,7 @@ async function runExtendedSearch(
   const [resyVer, otVer, yelpVer] = await Promise.all([
     verifyBatch(batch.filter(r => r.platform === "resy"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",        ""),
     verifyBatch(batch.filter(r => r.platform === "opentable"), params, FIRECRAWL, VERIFY_MS, "",           "",             BB_KEY2, BB_PROJECT2),
-    verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, BB_KEY2, BB_PROJECT2),
+    verifyBatch(batch.filter(r => r.platform === "yelp"),      params, FIRECRAWL, VERIFY_MS, SCRAPER_URL, SCRAPER_SECRET, "",       ""),   // BB blocked by DataDome
   ]);
 
   let verified = dedup([...resyVer, ...otVer, ...yelpVer]);
@@ -277,9 +284,21 @@ async function parseQuery(
   const todayStr = new Date().toISOString().split("T")[0];
   const locCtx   = location ?? (lat && lng ? `${lat.toFixed(4)},${lng.toFixed(4)}` : "unknown");
 
+  // Pre-compute day-name → date map for today + next 6 days so the AI never miscalculates.
+  // "nearest upcoming" is ambiguous when today IS the named day — explicit map removes all doubt.
+  const _dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  const _dayMap: Record<string, string> = {};
+  for (let i = 0; i <= 6; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    const name = _dayNames[d.getDay()];
+    if (!_dayMap[name]) _dayMap[name] = d.toISOString().split("T")[0];
+  }
+  const tomorrowStr = _dayMap[_dayNames[new Date(new Date().setDate(new Date().getDate() + 1)).getDay()]];
+  const dayMapStr = Object.entries(_dayMap).map(([k, v]) => `${k}=${v}`).join(", ");
+
   const prompt = `Extract restaurant search parameters. Today is ${todayStr}.
 Rules:
-- date: YYYY-MM-DD. "tonight"/"today"=${todayStr}. "tomorrow"=next day. Day name=nearest upcoming.
+- date: YYYY-MM-DD. "tonight"/"today"=${todayStr}. "tomorrow"=${tomorrowStr}. Day names map (use exactly): ${dayMapStr}.
 - time: HH:MM 24h. Default 19:00. lunch≈12:00 brunch≈11:00 dinner≈19:00.
 - partySize: integer, default 2.
 - city: infer from location context. Do not guess.
@@ -1740,12 +1759,11 @@ async function verifyOne(
     return verifyOT(r, params, fcKey);
   }
   if (r.platform === "yelp") {
-    // v60: When BB is configured, use real Chrome + residential proxy to bypass DataDome.
-    // DataDome blocks Lambda IPs and rejects Firecrawl's headless browser fingerprint.
-    if (bbKey && bbProject) {
-      return verifyYelpViaBB(r, params, bbKey, bbProject);
-    }
-    // Fallback: Firecrawl (soft-verify) + Lambda (JS render) in parallel
+    // NOTE: Browserbase (BB) does NOT work for Yelp — DataDome blocks even real Chrome
+    // with residential proxy, returning a blank page (len=0). We skip BB entirely for
+    // Yelp and use Firecrawl + Lambda which work (DataDome is less aggressive on
+    // non-reservation Yelp pages / Firecrawl's infrastructure has clean IPs for Yelp).
+    // Firecrawl (soft-verify) + Lambda (JS render) in parallel
     const [lambdaResult, fcResult] = await Promise.all([
       scraperUrl && scraperSecret
         ? verifyYelpViaLambda(r, params, scraperUrl, scraperSecret)
