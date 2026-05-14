@@ -294,17 +294,10 @@ async function parseQuery(
   const todayStr = new Date().toISOString().split("T")[0];
   const locCtx   = location ?? (lat && lng ? `${lat.toFixed(4)},${lng.toFixed(4)}` : "unknown");
 
-  // Pre-compute day-name → date map for today + next 6 days so the AI never miscalculates.
-  // "nearest upcoming" is ambiguous when today IS the named day — explicit map removes all doubt.
-  const _dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
-  const _dayMap: Record<string, string> = {};
-  for (let i = 0; i <= 6; i++) {
-    const d = new Date(); d.setDate(d.getDate() + i);
-    const name = _dayNames[d.getDay()];
-    if (!_dayMap[name]) _dayMap[name] = d.toISOString().split("T")[0];
-  }
-  const tomorrowStr = _dayMap[_dayNames[new Date(new Date().setDate(new Date().getDate() + 1)).getDay()]];
-  const dayMapStr = Object.entries(_dayMap).map(([k, v]) => `${k}=${v}`).join(", ");
+  const _days = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  const _dayMap: Record<string,string> = {};
+  for (let i = 0; i <= 6; i++) { const d = new Date(); d.setDate(d.getDate()+i); if (!_dayMap[_days[d.getDay()]]) _dayMap[_days[d.getDay()]] = d.toISOString().split("T")[0]; }
+  const dayMapStr = Object.entries(_dayMap).map(([k,v])=>`${k}=${v}`).join(", ");
 
   const prompt = `Extract restaurant search parameters. Today is ${todayStr}.
 Rules:
