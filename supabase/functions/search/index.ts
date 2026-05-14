@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v64
+// TableFinder Search Edge Function — v65
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -195,7 +195,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v64",
+      _v:                  "v65",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -210,10 +210,11 @@ serve(async (req) => {
         ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
         ot_verify:       (globalThis as any).__otVerifyDebug    ?? null,
         ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
-        yelp_api:        (globalThis as any).__yelpApiDebug      ?? null,
-        yelp_lambda:     (globalThis as any).__yelpLambdaDebug ?? null,
-        yelp_fc_sample:  (globalThis as any).__yelpFcSample    ?? null,
-        yelp_bb:         (globalThis as any).__yelpBBDebug     ?? null,
+        yelp_api:        (globalThis as any).__yelpApiDebug           ?? null,
+        yelp_lambda:     (globalThis as any).__yelpLambdaDebug       ?? null,
+        yelp_lambda_fetch: (globalThis as any).__yelpLambdaFetchDebug ?? null,
+        yelp_fc_sample:  (globalThis as any).__yelpFcSample          ?? null,
+        yelp_bb:         (globalThis as any).__yelpBBDebug            ?? null,
         // Resy URL samples — helps diagnose broken-link reports.
         // Shows platformUrl + first slot URL for the first 3 Resy results.
         resy_urls:       resyVer.slice(0, 3).map(r => ({
@@ -2535,6 +2536,38 @@ async function verifyYelpViaLambda(
   if (!slugM) { console.log(`[Yelp Lambda] ${r.name}: no slug`); return null; }
   const slug        = slugM[1];
   const timeNoColon = params.time.replace(":", "");
+
+  // Strategy D (v65): fetchOnly fast path — plain HTTP to availability API from Lambda IP.
+  // Lambda's IP range ≠ Supabase IP range; DataDome may not block Lambda for API calls.
+  // Cost: ~200ms if blocked, saves 10s+ browser time if it works.
+  const availUrl = `https://www.yelp.com/reservations/${slug}/availability?covers=${params.partySize}&date=${params.date}&time=${params.time}`;
+  try {
+    const fetchText = await lambdaLoad(availUrl, scraperUrl, scraperSecret, {
+      fetchOnly: true,
+      fetchHeaders: {
+        "User-Agent":        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept":            "application/json, */*",
+        "Referer":           `https://www.yelp.com/reservations/${slug}`,
+        "Accept-Language":   "en-US,en;q=0.9",
+        "x-yelp-request-id": crypto.randomUUID(),
+      },
+      timeoutMs: 9_000,
+    });
+    (globalThis as any).__yelpLambdaFetchDebug = `status=ok len=${fetchText?.length ?? 0} sample=${(fetchText ?? "").substring(0, 200)}`;
+    if (fetchText && fetchText.length > 10) {
+      const slots    = extractTimes(fetchText);
+      const windowed = filterWindow(slots, params.time);
+      if (windowed.length > 0) {
+        const base          = `https://www.yelp.com/reservations/${slug}`;
+        const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
+        console.log(`[Yelp Lambda fetch] ${r.name}: ${windowed.length} slots ✓`);
+        (globalThis as any).__yelpLambdaDebug = `fetch_api_success|slots=${windowed.length}`;
+        return { ...r, timeSlots: slotsWithUrls, softVerified: false };
+      }
+    }
+  } catch (e: any) {
+    (globalThis as any).__yelpLambdaFetchDebug = `err=${e?.message?.substring(0, 80)}`;
+  }
 
   // Strategy A (v37): load biz page, call SeatMe API via same-origin fetch
   //   → DataDome blocks the availability API even from within page context
