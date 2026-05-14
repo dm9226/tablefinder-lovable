@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v81
+// TableFinder Search Edge Function — v82
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -272,7 +272,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v81",
+      _v:                  "v82",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1255,6 +1255,28 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   for (const c of candidates) {
     if (c._rid) c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
   }
+
+  // ── Wayback Machine RID lookup for no-RID candidates ────────────────────
+  // When Yahoo/FC find only slug URLs (no numeric profile IDs), resolve them
+  // via archive.org — which has crawled OT restaurant pages and preserved the
+  // server-rendered HTML (with /restaurant/profile/NNN in canonical/og:url).
+  // Runs in parallel for up to 5 no-RID candidates; gracefully no-ops if all
+  // candidates already have RIDs.
+  const noRidCands = candidates.filter(c => !c._rid).slice(0, 5);
+  if (noRidCands.length > 0) {
+    console.log(`[OT wayback] looking up RIDs for ${noRidCands.length} no-RID candidates`);
+    await Promise.all(noRidCands.map(async c => {
+      const slugM = c.platformUrl.match(/opentable\.(?:com|co\.uk)\/r\/([^/?#\s]+)/i);
+      if (!slugM) return;
+      const slug = slugM[1].replace(/[?#].*$/, "");
+      const rid = await fetchOTRidFromWayback(slug);
+      if (rid) {
+        c._rid = rid;
+        c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
+      }
+    }));
+  }
+
   const dbg = `direct=${directItems.length} scrape=${scrapeItems.length} fc=${fcProfileItems.length} total=${candidates.length} rids=${candidates.filter(c=>c._rid).length}`;
   console.log(`[OT discovery] ${dbg}`);
   (globalThis as any).__otDiscoveryDebug = dbg;
