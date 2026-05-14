@@ -256,7 +256,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v72",
+      _v:                  "v73",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -277,8 +277,7 @@ serve(async (req) => {
         yelp_fc_sample:  (globalThis as any).__yelpFcSample          ?? null,
         yelp_bb:         (globalThis as any).__yelpBBDebug            ?? null,
         // Resy URL samples — helps diagnose broken-link reports.
-        // Shows platformUrl + first slot URL for the first 3 Resy results.
-        resy_urls:       resyVer.slice(0, 3).map(r => ({
+        resy_urls:       resyVer.slice(0, 10).map(r => ({
           name:     r.name,
           platform: r.platformUrl,
           slot0:    r.timeSlots[0]?.url ?? null,
@@ -658,19 +657,18 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
       const name  = (venue.name ?? "").trim();
       if (!name) return [];
 
-      // Use contact.url as the canonical base URL — it contains the correct city slug
-      // AND venue slug as Resy knows them, avoiding 404s from wrong city or slug.
-      // Fall back to constructing from the city slug only if contact.url is absent.
+      // Always build the URL using OUR computed city slug (e.g. "atlanta-ga").
+      // contact.url may contain an old/stale city slug ("atlanta", "buckhead", etc.)
+      // that 404s on the current Resy website. Extract the venue slug from contact.url
+      // if present, but always pair it with the known-correct city slug.
       const contactUrl: string = venue.contact?.url ?? "";
-      let base: string;
-      if (contactUrl.match(/resy\.com\/cities\/[^/]+\/venues\/[^/?#]+/)) {
-        base = contactUrl.replace(/[?#].*$/, "").replace(/^https?:\/\//, "https://");
-      } else {
-        // contact.url absent — construct from city slug + url_slug or name slug
-        const venueSlug = (venue.url_slug ?? slugify(name)).toLowerCase();
-        if (!venueSlug || RESY_SKIP.has(venueSlug)) return [];
-        base = `https://resy.com/cities/${slug}/venues/${venueSlug}`;
-      }
+      const contactVenueSlugM = contactUrl.match(/resy\.com\/cities\/[^/]+\/venues\/([^/?#\s]+)/i);
+      const venueSlugFromContact = contactVenueSlugM?.[1]?.toLowerCase();
+      const venueSlugFromApi     = (venue.url_slug ?? "").toLowerCase();
+      // Prefer API url_slug (most authoritative), then slug extracted from contact.url
+      const resolvedVenueSlug = (venueSlugFromApi || venueSlugFromContact || slugify(name)).toLowerCase();
+      if (!resolvedVenueSlug || RESY_SKIP.has(resolvedVenueSlug)) return [];
+      const base = `https://resy.com/cities/${slug}/venues/${resolvedVenueSlug}`;
       // Extract venue slug from the confirmed base URL
       const slugM = base.match(/\/venues\/([^/?#]+)/);
       const venueSlug = slugM?.[1]?.toLowerCase() ?? slugify(name);
