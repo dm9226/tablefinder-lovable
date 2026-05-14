@@ -292,6 +292,8 @@ async function parseQuery(
   query: string, lat?: number, lng?: number, location?: string, aiKey?: string
 ): Promise<SearchParams> {
   const todayStr = new Date().toISOString().split("T")[0];
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate()+1);
+  const tomorrowStr = tomorrow.toISOString().split("T")[0];
   const locCtx   = location ?? (lat && lng ? `${lat.toFixed(4)},${lng.toFixed(4)}` : "unknown");
 
   const _days = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
