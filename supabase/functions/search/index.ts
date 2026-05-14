@@ -175,9 +175,11 @@ serve(async (req) => {
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
-    // Hard-verified only — real confirmed time slots. No fakes.
+    // Hard-verified (real time slots) + soft-verified OT (real page loaded but restref
+    // not auto-fired; browser will stream in real slots via clientVerifyOT).
+    // Yelp soft-verify still excluded — those are client-side only.
     let verified = dedup([...resyVer, ...otVer, ...yelpVer])
-      .filter(r => !r.softVerified);
+      .filter(r => !r.softVerified || r.platform === "opentable");
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
     const [ranked] = await Promise.all([
@@ -215,8 +217,10 @@ serve(async (req) => {
     // "verified" server-side by BB. The BB widget canvas fix above means those results now
     // correctly return null, but even if BB returned fake times we want the browser to call
     // restref and replace them with real availability. The browser's mergeVerified will replace.
+    // Include RIDs discovered server-side via __NEXT_DATA__ extraction in verifyOTViaBB.
+    const ridMap: Map<string, string> = (globalThis as any).__tfRidMap ?? new Map();
     const clientVerifyOT = otCands
-      .filter(r => !!(r._rid ?? extractRid(r.platformUrl)))
+      .filter(r => !!(r._rid ?? extractRid(r.platformUrl) ?? ridMap.get(r.id)))
       .slice(0, 10)
       .map(r => ({
         id: r.id, name: r.name, cuisine: r.cuisine ?? "",
@@ -224,7 +228,8 @@ serve(async (req) => {
         reviewCount: r.reviewCount, platform: r.platform,
         platformUrl: r.platformUrl, timeSlots: [],
         distanceMiles: (params.lat && r._lat) ? haversine(params.lat, params.lng!, r._lat!, r._lng!) : null,
-        _rid: r._rid ?? extractRid(r.platformUrl), _lat: r._lat, _lng: r._lng,
+        _rid: r._rid ?? extractRid(r.platformUrl) ?? ridMap.get(r.id),
+        _lat: r._lat, _lng: r._lng,
       }));
 
     // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
@@ -279,7 +284,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v76",
+      _v:                  "v77",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2266,14 +2271,32 @@ async function verifyOTViaBB(
     "})();",
   ].join("");
 
-  // v75: Only no-RID restaurants reach here (RID ones early-return above).
-  // Use full-page innerText fallback — no widget canvas to intercept.
-  const evalExpr = "window.__tf_ot || document.body.innerText";
+  // v77: Don't fall back to innerText. The full OT page does NOT auto-fire
+  // restref on load — it waits for user click. So window.__tf_ot stays empty and
+  // innerText gives us the time-picker dropdown (6:00, 6:30 … 8:00 PM on every page).
+  // Instead: try window.__tf_ot first; if empty, extract the real RID from OT's
+  // embedded __NEXT_DATA__ JSON so clientVerifyOT can call restref from the browser.
+  const evalExpr = [
+    "(function(){",
+    "  if(window.__tf_ot) return window.__tf_ot;",
+    "  try{",
+    "    var d=JSON.parse(document.getElementById('__NEXT_DATA__').textContent);",
+    "    var pp=d&&d.props&&d.props.pageProps;",
+    "    var rid=pp&&(",
+    "      (pp.restaurantData&&pp.restaurantData.rid)||",
+    "      (pp.restaurant&&pp.restaurant.rid)||",
+    "      (pp.restaurantDetails&&pp.restaurantDetails.restaurantId)||",
+    "      pp.rid",
+    "    );",
+    "    if(rid) return 'RID:'+String(rid);",
+    "  }catch(e){}",
+    "  return '';",
+    "})()",
+  ].join("");
 
   try {
     const text = await bbLoad(pageUrl, bbKey, bbProject, {
-      waitMs:     4000,  // v66: reduced from 8s — init-script intercepts XHR immediately when it fires;
-                         // Akamai-blocked pages return "Access Denied" in <1s anyway.
+      waitMs:     4000,
       useProxy:   true,
       initScript,
       evalExpr,
@@ -2282,8 +2305,7 @@ async function verifyOTViaBB(
 
     (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 120)}`;
 
-    // Access Denied = Akamai blocked this proxy IP. Retry once — new bbLoad call =
-    // new Browserbase session = fresh residential proxy IP from the pool.
+    // Access Denied = Akamai blocked. Retry once with fresh proxy IP.
     let finalText = text;
     if (text.length < 500 && /access denied|you don't have permission/i.test(text)) {
       console.log(`[OT BB] ${r.name}: access denied, retrying with fresh proxy IP…`);
@@ -2299,21 +2321,40 @@ async function verifyOTViaBB(
       }
     }
 
-    if (finalText.length < 10 || /access denied|just a moment/i.test(finalText)) {
-      console.log(`[OT BB] ${r.name}: blocked/empty after retry`);
+    if (/access denied|just a moment/i.test(finalText)) {
+      console.log(`[OT BB] ${r.name}: blocked after retry`);
       return null;
     }
 
-    const slots    = extractTimes(finalText);
-    const windowed = filterWindow(slots, params.time);
-    if (windowed.length === 0) {
-      console.log(`[OT BB] ${r.name}: no slots in window (len=${finalText.length})`);
-      return null;
+    // Case 1: Extracted a RID from __NEXT_DATA__ — page loaded but restref not intercepted.
+    // Store it so clientVerifyOT can send this restaurant to the browser with the real RID.
+    if (finalText.startsWith("RID:")) {
+      const discoveredRid = finalText.slice(4).trim();
+      console.log(`[OT BB] ${r.name}: discovered RID=${discoveredRid} via __NEXT_DATA__ → clientVerifyOT`);
+      (globalThis as any).__otVerifyDebug += `|RID_FOUND:${discoveredRid}`;
+      // Store in global map — clientVerifyOT builder reads this to promote no-RID candidates.
+      const ridMap: Map<string, string> = ((globalThis as any).__tfRidMap ??= new Map());
+      ridMap.set(r.id, discoveredRid);
+      return null; // client will verify with real RID
     }
-    const base          = r.platformUrl.split("?")[0];
-    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
-    console.log(`[OT BB] ${r.name}: ${windowed.length} slots ✓`);
-    return { ...r, timeSlots: slotsWithUrls, softVerified: false };
+
+    // Case 2: window.__tf_ot captured real restref JSON. Parse for actual availability.
+    if (finalText.length > 10) {
+      const slots    = extractTimes(finalText);
+      const windowed = filterWindow(slots, params.time);
+      if (windowed.length === 0) {
+        console.log(`[OT BB] ${r.name}: restref captured but no slots in window → soft-verify`);
+        return { ...r, timeSlots: [], softVerified: true };
+      }
+      const base          = r.platformUrl.split("?")[0];
+      const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", base, params, s.time) }));
+      console.log(`[OT BB] ${r.name}: ${windowed.length} real slots ✓`);
+      return { ...r, timeSlots: slotsWithUrls, softVerified: false };
+    }
+
+    // Case 3: Empty — page didn't load or restref not captured. Soft-verify.
+    console.log(`[OT BB] ${r.name}: empty response → soft-verify`);
+    return { ...r, timeSlots: [], softVerified: true };
   } catch (err: any) {
     (globalThis as any).__otVerifyDebug += `→ERR:${err?.message?.substring(0, 80)}`;
     console.log(`[OT BB] ${r.name}: ${err?.message}`);
