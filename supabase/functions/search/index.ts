@@ -195,8 +195,12 @@ serve(async (req) => {
     const verifiedOTIds   = new Set(otVer.map(r => r.id));
     const verifiedYelpIds = new Set(yelpVer.map(r => r.id));
 
+    // Always include ALL RID-bearing OT candidates in clientVerifyOT — even ones that were
+    // "verified" server-side by BB. The BB widget canvas fix above means those results now
+    // correctly return null, but even if BB returned fake times we want the browser to call
+    // restref and replace them with real availability. The browser's mergeVerified will replace.
     const clientVerifyOT = otCands
-      .filter(r => !verifiedOTIds.has(r.id) && !!(r._rid ?? extractRid(r.platformUrl)))
+      .filter(r => !!(r._rid ?? extractRid(r.platformUrl)))
       .slice(0, 10)
       .map(r => ({
         id: r.id, name: r.name, cuisine: r.cuisine ?? "",
@@ -236,7 +240,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v70",
+      _v:                  "v71",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2223,8 +2227,13 @@ async function verifyOTViaBB(
     "})();",
   ].join("");
 
-  // evalExpr: return intercepted API response; fall back to page text if widget didn't fire
-  const evalExpr = "window.__tf_ot || document.body.innerText";
+  // evalExpr: for RID restaurants (widget canvas) return ONLY the intercepted /restref/api/availability
+  // JSON — do NOT fall back to document.body.innerText. The widget canvas shows a date picker calendar
+  // on load; it only calls /restref/api/availability after the user clicks a date. So window.__tf_ot
+  // stays empty and the fallback innerText returns calendar UI times (6:00, 6:30, … 8:00 PM) that are
+  // just picker dropdown options, not real availability. If __tf_ot is empty → return "" → len<10 → null.
+  // For no-RID restaurants (full page URL) we keep the fallback since there's no widget to intercept.
+  const evalExpr = rid ? "window.__tf_ot" : "window.__tf_ot || document.body.innerText";
 
   try {
     const text = await bbLoad(pageUrl, bbKey, bbProject, {

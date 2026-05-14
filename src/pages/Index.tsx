@@ -134,7 +134,14 @@ const Index = () => {
             if (controller.signal.aborted) return;
             if (searchId !== searchIdRef.current) return;
             setResults(prev => {
-              if (prev.some(r => r.id === verified.id)) return prev;
+              // If this restaurant already exists (e.g. BB returned fake times), replace it
+              // with the browser-side restref result which has real availability data.
+              const alreadyExists = prev.some(r => r.id === verified.id);
+              if (alreadyExists) {
+                // Only replace if we got actual time slots (don't downgrade to empty)
+                if (verified.timeSlots.length === 0) return prev;
+                return prev.map(r => r.id === verified.id ? verified : r);
+              }
               const merged = [...prev, verified];
               merged.sort((a, b) => {
                 const dA = a.distanceMiles ?? Number.POSITIVE_INFINITY;
