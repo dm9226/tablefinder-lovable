@@ -249,7 +249,7 @@ serve(async (req) => {
       // Only flag if it's clearly a non-local city name (4+ chars, not a generic word)
       if (lastWord.length < 4) return false;
       if (localAliases.has(lastWord)) return false;
-      const NON_LOCAL_CITIES = ["marietta","norcross","conyers","lawrenceville","woodstock","alpharetta","roswell","canton","smyrna","kennesaw","duluth","peachtree","newnan","cumming","gainesville","cartersville","douglasville","lithonia","stonecrest","mcdonough","griffin","rome","athens"];
+      const NON_LOCAL_CITIES = ["marietta","norcross","conyers","lawrenceville","woodstock","alpharetta","roswell","canton","smyrna","kennesaw","duluth","peachtree","newnan","cumming","gainesville","cartersville","douglasville","lithonia","stonecrest","mcdonough","griffin","rome","athens","austell","hiram","tucker","chamblee","dunwoody","sandy","springs","mableton","riverdale","union","city","fayetteville","stockbridge","covington","buford","suwanee","sugar","hill","loganville","winder","jackson","jasper","villa","rica"];
       return NON_LOCAL_CITIES.includes(lastWord);
     };
 
@@ -279,7 +279,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v74",
+      _v:                  "v75",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2226,20 +2226,21 @@ async function verifyOTViaBB(
 ): Promise<Restaurant | null> {
   const rid = r._rid ?? extractRid(r.platformUrl);
 
+  // v75: Skip BB entirely for RID restaurants. The canvas widget URL requires a user
+  // click to trigger /restref/api/availability — it never auto-fires, so window.__tf_ot
+  // stays empty → returns null every time. This was burning BB session budget with 0 benefit.
+  // RID restaurants are handled client-side via verifyOTRestref (browser → restref API).
+  if (rid) {
+    console.log(`[OT BB] ${r.name}: has RID — skipping BB (client-side restref handles this)`);
+    return null;
+  }
+
   (globalThis as any).__otVerifyDebug = ((globalThis as any).__otVerifyDebug
     ? (globalThis as any).__otVerifyDebug + " || " : "") + `CALL:${r.name}(rid=${rid ?? "none"})`;
 
-  // v68: For RID restaurants, try the widget canvas URL instead of the full restaurant page.
-  // The widget canvas (/widget/reservation/canvas?rid=N) is designed for third-party embedding
-  // and sits on a different Akamai path than /r/restaurant-name — it's less aggressively blocked
-  // since OT's own embed partners load it constantly from datacenter IPs.
-  // Our initScript still works: the widget calls /restref/api/availability the same way.
-  //
-  // For no-RID restaurants, we must use the full page (widget requires a RID param).
+  // No-RID restaurants require the full page (widget canvas requires a RID param).
   const dt      = `${params.date}T${params.time}`;
-  const pageUrl = rid
-    ? `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`
-    : r.platformUrl;
+  const pageUrl = r.platformUrl;
 
   // Injected before page load. Wraps window.fetch + XMLHttpRequest to capture
   // any /restref/api/availability response that OT's widget fires during load.
@@ -2265,13 +2266,9 @@ async function verifyOTViaBB(
     "})();",
   ].join("");
 
-  // evalExpr: for RID restaurants (widget canvas) return ONLY the intercepted /restref/api/availability
-  // JSON — do NOT fall back to document.body.innerText. The widget canvas shows a date picker calendar
-  // on load; it only calls /restref/api/availability after the user clicks a date. So window.__tf_ot
-  // stays empty and the fallback innerText returns calendar UI times (6:00, 6:30, … 8:00 PM) that are
-  // just picker dropdown options, not real availability. If __tf_ot is empty → return "" → len<10 → null.
-  // For no-RID restaurants (full page URL) we keep the fallback since there's no widget to intercept.
-  const evalExpr = rid ? "window.__tf_ot" : "window.__tf_ot || document.body.innerText";
+  // v75: Only no-RID restaurants reach here (RID ones early-return above).
+  // Use full-page innerText fallback — no widget canvas to intercept.
+  const evalExpr = "window.__tf_ot || document.body.innerText";
 
   try {
     const text = await bbLoad(pageUrl, bbKey, bbProject, {
