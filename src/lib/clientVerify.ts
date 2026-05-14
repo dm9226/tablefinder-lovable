@@ -110,6 +110,7 @@ export async function verifyOTRestref(
 
   try {
     const url = `https://www.opentable.com/restref/api/availability?rid=${rid}&covers=${partySize}&day=${date}&lang=en-US&ref=5`;
+    console.log(`[clientVerifyOT] ${r.name} (rid=${rid}): fetching ${url}`);
     const resp = await fetch(url, {
       headers: {
         "Accept":          "application/json, text/javascript, */*; q=0.01",
@@ -118,10 +119,15 @@ export async function verifyOTRestref(
       },
       signal: AbortSignal.timeout(8000),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      console.warn(`[clientVerifyOT] ${r.name}: HTTP ${resp.status}`);
+      return null;
+    }
 
-    const text  = JSON.stringify(await resp.json());
+    const json = await resp.json();
+    const text = JSON.stringify(json);
     const slots = filterWindow(extractTimes(text), time24);
+    console.log(`[clientVerifyOT] ${r.name}: ${slots.length} slots in window (raw keys: ${Object.keys(json).join(",")})`);
     if (slots.length === 0) return null;
 
     const base = r.platformUrl.split("?")[0];
@@ -133,7 +139,8 @@ export async function verifyOTRestref(
       })),
       softVerified: false,
     };
-  } catch {
+  } catch (err) {
+    console.error(`[clientVerifyOT] ${r.name}: fetch error —`, err);
     return null;
   }
 }
@@ -143,6 +150,10 @@ export async function verifyOTRestref(
 // SeatMe widget endpoint — same cross-origin embedding use-case as OT restref.
 // DataDome allows real browsers (it checks TLS fingerprint + behavioral signals,
 // not just User-Agent). Blocked from datacenter IPs but works from user browsers.
+//
+// Note: we intentionally omit X-Requested-With here so the browser sends a
+// simple GET (no CORS preflight). OT's endpoint requires it; Yelp's does not —
+// preflight adds latency and may trigger DataDome challenge on the OPTIONS call.
 
 export async function verifyYelpAvailability(
   r: Restaurant,
@@ -155,20 +166,27 @@ export async function verifyYelpAvailability(
   const slug = slugM[1];
 
   const time24 = parseDisplayTime(displayTime);
+  // Yelp availability endpoint uses colon-free time (e.g. "1900" not "19:00")
+  const timeNoColon = time24.replace(":", "");
 
   try {
-    const url = `https://www.yelp.com/reservations/${slug}/availability?covers=${partySize}&date=${date}&time=${time24}`;
+    const url = `https://www.yelp.com/reservations/${slug}/availability?covers=${partySize}&date=${date}&time=${timeNoColon}`;
+    console.log(`[clientVerifyYelp] ${r.name}: fetching ${url}`);
     const resp = await fetch(url, {
       headers: {
-        "Accept":          "application/json",
-        "X-Requested-With":"XMLHttpRequest",
+        "Accept": "application/json",
       },
       signal: AbortSignal.timeout(8000),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      console.warn(`[clientVerifyYelp] ${r.name}: HTTP ${resp.status}`);
+      return null;
+    }
 
-    const text  = JSON.stringify(await resp.json());
+    const json = await resp.json();
+    const text  = JSON.stringify(json);
     const slots = filterWindow(extractTimes(text), time24);
+    console.log(`[clientVerifyYelp] ${r.name}: ${slots.length} slots in window (raw keys: ${Object.keys(json).join(",")})`);
     if (slots.length === 0) return null;
 
     const base = `https://www.yelp.com/reservations/${slug}`;
@@ -180,7 +198,8 @@ export async function verifyYelpAvailability(
       })),
       softVerified: false,
     };
-  } catch {
+  } catch (err) {
+    console.error(`[clientVerifyYelp] ${r.name}: fetch error —`, err);
     return null;
   }
 }

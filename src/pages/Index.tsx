@@ -129,10 +129,12 @@ const Index = () => {
         const cvParams = data?.params;
         const cvOT:   Restaurant[] = data?.clientVerifyOT   || [];
         const cvYelp: Restaurant[] = data?.clientVerifyYelp || [];
+        console.log(`[clientVerify] OT candidates=${cvOT.length} Yelp candidates=${cvYelp.length}`);
         if ((cvOT.length || cvYelp.length) && cvParams?.dateRaw && cvParams?.time) {
           const mergeVerified = (verified: Restaurant) => {
             if (controller.signal.aborted) return;
             if (searchId !== searchIdRef.current) return;
+            console.log(`[mergeVerified] ${verified.platform} ${verified.name}: ${verified.timeSlots.length} slots — streaming into results`);
             setResults(prev => {
               // If this restaurant already exists (e.g. BB returned fake times), replace it
               // with the browser-side restref result which has real availability data.
