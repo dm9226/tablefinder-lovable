@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v67
+// TableFinder Search Edge Function — v68
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -195,7 +195,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v67",
+      _v:                  "v68",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2146,11 +2146,17 @@ async function verifyOTViaBB(
   (globalThis as any).__otVerifyDebug = ((globalThis as any).__otVerifyDebug
     ? (globalThis as any).__otVerifyDebug + " || " : "") + `CALL:${r.name}(rid=${rid ?? "none"})`;
 
-  // Navigate to the restaurant page WITH date/time/covers in URL — this triggers OT's
-  // React widget to fire /restref/api/availability automatically. Our init script
-  // intercepts that fetch response before it reaches OT's own widget handler.
-  // Works for both RID and no-RID restaurants (OT embeds the RID in page JSON).
-  const pageUrl = r.platformUrl; // already has ?dateTime=...&covers=... from discovery
+  // v68: For RID restaurants, try the widget canvas URL instead of the full restaurant page.
+  // The widget canvas (/widget/reservation/canvas?rid=N) is designed for third-party embedding
+  // and sits on a different Akamai path than /r/restaurant-name — it's less aggressively blocked
+  // since OT's own embed partners load it constantly from datacenter IPs.
+  // Our initScript still works: the widget calls /restref/api/availability the same way.
+  //
+  // For no-RID restaurants, we must use the full page (widget requires a RID param).
+  const dt      = `${params.date}T${params.time}`;
+  const pageUrl = rid
+    ? `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`
+    : r.platformUrl;
 
   // Injected before page load. Wraps window.fetch + XMLHttpRequest to capture
   // any /restref/api/availability response that OT's widget fires during load.
@@ -2505,9 +2511,9 @@ async function verifyOTviaLambda(
   try {
     const raw = await lambdaLoad(widgetUrl, scraperUrl, scraperSecret, {
       useProxy:  true,   // Lambda uses PROXY_URL if configured; falls back to direct otherwise
-      waitMs:    3000,   // widget canvas is lighter than full page
+      waitMs:    1500,   // v68: reduced from 3s — widget canvas is lightweight, saves time on cold starts
       evalExpr:  "document.body.innerText",
-      timeoutMs: 20_000, // v67: BB+Lambda now run in parallel — Lambda gets full budget (was 12s, silently killed)
+      timeoutMs: 22_000, // v68: slight raise — cold starts (8-15s) + 1.5s wait ≈ 10-17s, within 22s
     });
 
     (globalThis as any).__otLambdaDebug += `→len=${raw.length}|sample=${raw.substring(0, 120)}`;
