@@ -228,14 +228,37 @@ serve(async (req) => {
       }));
 
     // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
-    // businesses (hair salons, towing, apartments). Exclude obvious non-food results.
-    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|repair|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations)\b/i;
+    // businesses (hair salons, towing, auto glass, etc.). Exclude obvious non-food results.
+    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autoglass|auto\s*glass|safelite|windshield|repair|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations)\b/i;
+
+    // Out-of-market city filter — Yelp returns results from surrounding suburbs.
+    // Build a set of known non-local city names from the Yelp slug (e.g. "tenku-sushi-marietta"
+    // ends in "marietta" which is not Atlanta). We detect this by checking if the slug ends
+    // in a city name that doesn't match the search metro.
+    const searchCity = params.city.toLowerCase().replace(/\s+/g, "");
+    const localAliases = new Set([
+      searchCity, "atlanta", "atl", "decatur", "buckhead", "midtown",
+      "inmanpark", "oldfourthdward", "summerhill", "grantpark",
+    ]);
+    const isOutOfMarket = (r: Restaurant) => {
+      const slugM = r.platformUrl.match(/reservations\/([^?#]+)/i);
+      if (!slugM) return false;
+      const slugParts = slugM[1].toLowerCase().replace(/-\d+$/, "").split("-");
+      // Last word in slug is often the city: "tenku-sushi-marietta" → "marietta"
+      const lastWord = slugParts[slugParts.length - 1];
+      // Only flag if it's clearly a non-local city name (4+ chars, not a generic word)
+      if (lastWord.length < 4) return false;
+      if (localAliases.has(lastWord)) return false;
+      const NON_LOCAL_CITIES = ["marietta","norcross","conyers","lawrenceville","woodstock","alpharetta","roswell","canton","smyrna","kennesaw","duluth","peachtree","newnan","cumming","gainesville","cartersville","douglasville","lithonia","stonecrest","mcdonough","griffin","rome","athens"];
+      return NON_LOCAL_CITIES.includes(lastWord);
+    };
 
     const clientVerifyYelp = yelpCands
       .filter(r =>
         !verifiedYelpIds.has(r.id) &&
         !(r as any)._topRated &&          // only reservation-date-filtered candidates
-        !NON_FOOD_RE.test(r.name)         // drop obvious non-restaurant businesses
+        !NON_FOOD_RE.test(r.name) &&      // drop obvious non-restaurant businesses
+        !isOutOfMarket(r)                 // drop out-of-market suburb results
       )
       .slice(0, 12)
       .map(r => ({
@@ -256,7 +279,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v73",
+      _v:                  "v74",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
