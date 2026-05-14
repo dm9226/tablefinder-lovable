@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v65
+// TableFinder Search Edge Function — v66
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -195,7 +195,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v65",
+      _v:                  "v66",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2167,11 +2167,12 @@ async function verifyOTViaBB(
 
   try {
     const text = await bbLoad(pageUrl, bbKey, bbProject, {
-      waitMs:     8000,  // widget needs time to: init React app → parse URL params → fire API call
+      waitMs:     4000,  // v66: reduced from 8s — init-script intercepts XHR immediately when it fires;
+                         // Akamai-blocked pages return "Access Denied" in <1s anyway.
       useProxy:   true,
       initScript,
       evalExpr,
-      timeoutMs:  30_000,
+      timeoutMs:  18_000,
     });
 
     (globalThis as any).__otVerifyDebug += `→len=${text.length}|sample=${text.substring(0, 120)}`;
@@ -2184,7 +2185,7 @@ async function verifyOTViaBB(
       (globalThis as any).__otVerifyDebug += `|RETRY`;
       try {
         finalText = await bbLoad(pageUrl, bbKey, bbProject, {
-          waitMs: 8000, useProxy: true, initScript, evalExpr, timeoutMs: 30_000,
+          waitMs: 4000, useProxy: true, initScript, evalExpr, timeoutMs: 18_000,
         });
         (globalThis as any).__otVerifyDebug += `→retry_len=${finalText.length}`;
       } catch (retryErr: any) {
@@ -2490,9 +2491,9 @@ async function verifyOTviaLambda(
   try {
     const raw = await lambdaLoad(widgetUrl, scraperUrl, scraperSecret, {
       useProxy:  true,   // Lambda uses PROXY_URL if configured; falls back to direct otherwise
-      waitMs:    5000,   // wait for widget JS to render time slots
+      waitMs:    3000,   // v66: reduced from 5s — widget canvas is lighter than full page
       evalExpr:  "document.body.innerText",
-      timeoutMs: 28_000,
+      timeoutMs: 12_000, // v66: fits within per-scrape budget after BB (~8s) + restref (~0.5s)
     });
 
     (globalThis as any).__otLambdaDebug += `→len=${raw.length}|sample=${raw.substring(0, 120)}`;
@@ -2548,7 +2549,16 @@ async function verifyYelpViaLambda(
       },
       timeoutMs: 9_000,
     });
-    (globalThis as any).__yelpLambdaFetchDebug = `status=ok len=${fetchText?.length ?? 0} sample=${(fetchText ?? "").substring(0, 200)}`;
+    // Detect DataDome CAPTCHA interstitial — means this Lambda IP is flagged.
+    // Browser mode will also be blocked; skip it to avoid wasting ~11s per candidate.
+    const isDataDome = (fetchText ?? "").includes("captcha-delivery.com") ||
+                       (fetchText ?? "").includes("datadome");
+    (globalThis as any).__yelpLambdaFetchDebug = `len=${fetchText?.length ?? 0} dd=${isDataDome} sample=${(fetchText ?? "").substring(0, 180)}`;
+    if (isDataDome) {
+      console.log(`[Yelp Lambda] ${r.name}: DataDome CAPTCHA detected — skip browser mode`);
+      (globalThis as any).__yelpLambdaDebug = `datadome_skip`;
+      return null;
+    }
     if (fetchText && fetchText.length > 10) {
       const slots    = extractTimes(fetchText);
       const windowed = filterWindow(slots, params.time);
