@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v83
+// TableFinder Search Edge Function — v84
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -166,12 +166,37 @@ serve(async (req) => {
     const otSlice   = otCands.slice(0, 12);   // restref API is fast (~1s each)
     const yelpSlice = yelpCands.slice(0, 6);
 
+    // ── Wayback RID enrichment (runs concurrently with verification) ──────────
+    // Discovery finds OT slug URLs (e.g. /r/white-bull-decatur) but not numeric
+    // profile IDs. Wayback Machine has archived OT pages with the RID embedded in
+    // their server-rendered HTML. Running this here (not inside discoverOpenTable)
+    // means it borrows the verify budget rather than adding to discovery time.
+    const dt_wb = `${params.date}T${params.time}`;
+    const waybackEnrich = (async () => {
+      const noRid = otCands.filter(c => !c._rid).slice(0, 3); // limit 3 to avoid rate limits
+      if (noRid.length === 0) return;
+      console.log(`[OT wayback] enriching ${noRid.length} no-RID candidates`);
+      await Promise.all(noRid.map(async c => {
+        const slugM = c.platformUrl.match(/opentable\.(?:com|co\.uk)\/r\/([^/?#\s]+)/i);
+        if (!slugM) return;
+        const slug = slugM[1].replace(/[?#].*$/, "");
+        const rid = await fetchOTRidFromWayback(slug);
+        if (rid) {
+          c._rid = rid;
+          c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt_wb}&styleid=5&disablegt=true`;
+        }
+      }));
+    })();
+
     // ── Verification ──────────────────────────────────────────────────────────
     const verifyStart = Date.now();
-    const [resyVer, otVer, yelpVer] = await Promise.all([
-      verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL, SCRAPER_SECRET, "", ""),
-      verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL,  SCRAPER_SECRET, BB_KEY, BB_PROJECT),
-      verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET, "", ""),   // BB blocked by DataDome
+    const [[resyVer, otVer, yelpVer]] = await Promise.all([
+      Promise.all([
+        verifyBatch(resySlice,  params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL, SCRAPER_SECRET, "", ""),
+        verifyBatch(otSlice,    params, FIRECRAWL, VERIFY_MS,        SCRAPER_URL,  SCRAPER_SECRET, BB_KEY, BB_PROJECT),
+        verifyBatch(yelpSlice,  params, FIRECRAWL, VERIFY_MS + 15_000, SCRAPER_URL, SCRAPER_SECRET, "", ""),   // BB blocked by DataDome
+      ]),
+      waybackEnrich,  // runs in parallel; mutates otCands[*]._rid in place
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
@@ -272,7 +297,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v83",
+      _v:                  "v84",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1255,27 +1280,6 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   const dt = `${params.date}T${params.time}`;
   for (const c of candidates) {
     if (c._rid) c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
-  }
-
-  // ── Wayback Machine RID lookup for no-RID candidates ────────────────────
-  // When Yahoo/FC find only slug URLs (no numeric profile IDs), resolve them
-  // via archive.org — which has crawled OT restaurant pages and preserved the
-  // server-rendered HTML (with /restaurant/profile/NNN in canonical/og:url).
-  // Runs in parallel for up to 5 no-RID candidates; gracefully no-ops if all
-  // candidates already have RIDs.
-  const noRidCands = candidates.filter(c => !c._rid).slice(0, 5);
-  if (noRidCands.length > 0) {
-    console.log(`[OT wayback] looking up RIDs for ${noRidCands.length} no-RID candidates`);
-    await Promise.all(noRidCands.map(async c => {
-      const slugM = c.platformUrl.match(/opentable\.(?:com|co\.uk)\/r\/([^/?#\s]+)/i);
-      if (!slugM) return;
-      const slug = slugM[1].replace(/[?#].*$/, "");
-      const rid = await fetchOTRidFromWayback(slug);
-      if (rid) {
-        c._rid = rid;
-        c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
-      }
-    }));
   }
 
   const dbg = `direct=${directItems.length} scrape=${scrapeItems.length} fc=${fcProfileItems.length} total=${candidates.length} rids=${candidates.filter(c=>c._rid).length}`;
