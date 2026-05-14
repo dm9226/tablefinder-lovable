@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v85
+// TableFinder Search Edge Function — v86
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -249,11 +249,14 @@ serve(async (req) => {
     const clientVerifyYelp = yelpCands
       .filter(r =>
         !verifiedYelpIds.has(r.id) &&
-        !(r as any)._topRated &&          // only reservation-date-filtered candidates
+        // Include both reservation-filtered AND top-rated candidates — the browser calls
+        // Yelp's real /reservations/${slug}/availability endpoint so false positives are
+        // naturally filtered (no slots returned). _topRated flag only gates server-side
+        // soft-verify strictness, not browser-side API calls.
         !NON_FOOD_RE.test(r.name) &&      // drop obvious non-restaurant businesses
         !isOutOfMarket(r)                 // drop out-of-market suburb results
       )
-      .slice(0, 12)
+      .slice(0, 15)
       .map(r => ({
         id: r.id, name: r.name, cuisine: r.cuisine ?? "",
         neighborhood: r.neighborhood ?? "", rating: r.rating,
@@ -272,7 +275,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v85",
+      _v:                  "v86",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
