@@ -229,7 +229,7 @@ serve(async (req) => {
 
     // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
     // businesses (hair salons, towing, auto glass, etc.). Exclude obvious non-food results.
-    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autoglass|auto\s*glass|safelite|windshield|repair|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations)\b/i;
+    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autoglass|auto\s*glass|safelite|windshield|repair|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage)\b/i;
 
     // Out-of-market city filter — Yelp returns results from surrounding suburbs.
     // Build a set of known non-local city names from the Yelp slug (e.g. "tenku-sushi-marietta"
@@ -279,7 +279,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v75",
+      _v:                  "v76",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
