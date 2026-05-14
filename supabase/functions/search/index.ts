@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v82
+// TableFinder Search Edge Function — v83
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -272,7 +272,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v82",
+      _v:                  "v83",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -286,6 +286,7 @@ serve(async (req) => {
         ot_cand:         (globalThis as any).__otCandDebug       ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
         ot_verify:       (globalThis as any).__otVerifyDebug    ?? null,
+        ot_slug_rid:     (globalThis as any).__otSlugRidDebug   ?? null,
         ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
         yelp_api:        (globalThis as any).__yelpApiDebug           ?? null,
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug       ?? null,
@@ -2156,21 +2157,39 @@ async function fetchOTRidFromWayback(slug: string): Promise<string | null> {
       return null;
     }
     const html = await archResp.text();
-    // Look for /restaurant/profile/NNN anywhere in the HTML (canonical, og:url, JSON-LD)
+    // Strategy 1: old-style /restaurant/profile/NNN URL (pre-Next.js OT pages)
     const ridM = html.match(/opentable\.com\/restaurant\/profile\/(\d+)/i);
     if (ridM) {
-      console.log(`[OT wayback] ${slug}: rid=${ridM[1]} ✓ (ts=${ts})`);
-      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `success|slug=${slug}|rid=${ridM[1]}|ts=${ts}`;
+      console.log(`[OT wayback] ${slug}: rid=${ridM[1]} ✓ via profile URL (ts=${ts})`);
+      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `success_profile|slug=${slug}|rid=${ridM[1]}|ts=${ts}`;
       return ridM[1];
     }
+    // Strategy 2: __NEXT_DATA__ JSON — modern OT pages embed restaurant RID in pageProps
+    // Patterns seen: restaurantData.rid, restaurant.rid, restaurantDetails.restaurantId, rid
+    const nextM = html.match(/"__NEXT_DATA__"[^>]*>|<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]{1,60000}?)<\/script>/i);
+    if (nextM) {
+      const json = nextM[1] ?? html.slice(html.indexOf(nextM[0]) + nextM[0].length, html.indexOf(nextM[0]) + 60000);
+      // Try common rid field names in __NEXT_DATA__ JSON
+      const ndRid = json.match(/"(?:rid|restaurantId|restaurant_id|restaurantRid)"\s*:\s*(\d{4,7})/i);
+      if (ndRid) {
+        console.log(`[OT wayback] ${slug}: rid=${ndRid[1]} ✓ via __NEXT_DATA__ (ts=${ts})`);
+        (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `success_nextdata|slug=${slug}|rid=${ndRid[1]}|ts=${ts}`;
+        return ndRid[1];
+      }
+    }
+    // Strategy 3: any standalone 5-7 digit number after "rid": in the full HTML
+    const anyRid = html.match(/"rid"\s*:\s*(\d{5,7})/);
+    if (anyRid) {
+      console.log(`[OT wayback] ${slug}: rid=${anyRid[1]} ✓ via "rid": pattern (ts=${ts})`);
+      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `success_rid_field|slug=${slug}|rid=${anyRid[1]}|ts=${ts}`;
+      return anyRid[1];
+    }
     console.log(`[OT wayback] ${slug}: no RID in archive html=${html.length} ts=${ts}`);
-    if (!(globalThis as any).__otSlugRidDebug)
-      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `no_rid|slug=${slug}|html=${html.length}|ts=${ts}|sample=${html.substring(0,200)}`;
+    (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `no_rid|slug=${slug}|html=${html.length}|ts=${ts}|sample=${html.substring(0,200)}`;
     return null;
   } catch (err: any) {
     console.log(`[OT wayback] ${slug}: ${err?.message}`);
-    if (!(globalThis as any).__otSlugRidDebug)
-      (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `error|${err?.message?.substring(0,60)}|slug=${slug}`;
+    (globalThis as any).__otSlugRidDebug = ((globalThis as any).__otSlugRidDebug ? (globalThis as any).__otSlugRidDebug + " // " : "") + `error|${err?.message?.substring(0,60)}|slug=${slug}`;
     return null;
   }
 }
