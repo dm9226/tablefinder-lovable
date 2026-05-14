@@ -136,9 +136,25 @@ serve(async (req) => {
         }
         return [];
       }, DISCOVER_MS),
-      // OT: Lambda is permanently blocked by Akamai on the search page (HTTP 500 every time).
-      // Go directly to Firecrawl-based discovery.
-      abortableDiscover(() => discoverOTviaWidgetCanvas(params, FIRECRAWL), DISCOVER_MS),
+      // OT: Two parallel approaches merged — Yahoo/FC search (for RIDs) + BB real browser
+      // (for comprehensive restaurant list). BB loads OT's own search page through residential
+      // proxy; Yahoo/FC search finds profile URLs with numeric RIDs. Results are merged.
+      abortableDiscover(async () => {
+        const [fcCands, bbCands] = await Promise.all([
+          discoverOTviaWidgetCanvas(params, FIRECRAWL),
+          BB_KEY && BB_PROJECT
+            ? discoverOTViaBB(params, BB_KEY, BB_PROJECT)
+            : Promise.resolve([] as Restaurant[]),
+        ]);
+        // Merge: BB first (may have real time slots from search page), then FC/Yahoo (has RIDs)
+        const otSeen = new Set<string>();
+        const merged: Restaurant[] = [];
+        for (const r of [...bbCands, ...fcCands]) {
+          if (!otSeen.has(r.id)) { otSeen.add(r.id); merged.push(r); }
+        }
+        console.log(`[OT merge] bb=${bbCands.length} fc=${fcCands.length} merged=${merged.length}`);
+        return merged;
+      }, DISCOVER_MS),
       abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS),
     ]);
     console.log(`[discovery] resy=${resyCands.length} ot=${otCands.length} yelp=${yelpCands.length} at ${Date.now()-start}ms`);
@@ -213,7 +229,7 @@ serve(async (req) => {
 
     // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
     // businesses (hair salons, towing, apartments). Exclude obvious non-food results.
-    const NON_FOOD_RE = /\b(towing|salon|clips|barber|apartments?|realty|real\s+estate|auto|repair|tires?|plumbing|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance)\b/i;
+    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|repair|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations)\b/i;
 
     const clientVerifyYelp = yelpCands
       .filter(r =>
@@ -240,7 +256,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v71",
+      _v:                  "v72",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1302,7 +1318,7 @@ async function discoverOTViaBB(
     (globalThis as any).__otVerifyDebug = "bbLoad_starting";
     const raw = await bbLoad(searchUrl, bbKey, bbProject, {
       waitMs: 6000,
-      useProxy: false,
+      useProxy: true,   // OT search page is Akamai-gated by datacenter IP — residential proxy required
       timeoutMs: 28_000,
       evalExpr: `JSON.stringify((() => {
         // Deduplicate /r/ links by base URL (slug only, no query params)
@@ -1813,15 +1829,16 @@ async function verifyOne(
     // Previous sequential approach (BB → Lambda → Firecrawl) was broken:
     // BB uses up to 18s of the 24s perScrapeMs budget, leaving Lambda only 0-6s
     // which causes timeouts on cold starts (8-15s).  Running in parallel means
-    // whichever succeeds first wins — restref (~0.5s) almost always returns first
-    // when it has a valid RID, otherwise Lambda and BB race with full time budgets.
+    // OT verify strategy:
+    // - RID restaurants: BB returns null (evalExpr="window.__tf_ot" stays empty since
+    //   widget canvas shows calendar first). Goes to clientVerifyOT → browser restref.
+    // - No-RID restaurants: BB loads full page with residential proxy (may succeed).
+    // - Lambda removed: gets ERR_EMPTY_RESPONSE 100% of the time on opentable.com.
+    // - Server-side restref: blocked from Supabase IPs.
     return raceNonNull([
       verifyOTviaRestref(r, params),
       bbKey && bbProject
         ? verifyOTViaBB(r, params, bbKey, bbProject)
-        : Promise.resolve(null),
-      scraperUrl && scraperSecret
-        ? verifyOTviaLambda(r, params, scraperUrl, scraperSecret)
         : Promise.resolve(null),
       verifyOT(r, params, fcKey),
     ]);
