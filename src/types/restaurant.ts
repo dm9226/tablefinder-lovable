@@ -20,7 +20,10 @@ export interface Restaurant {
   platformUrl: string;
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
-  softVerified?: boolean;   // Yelp: reservation widget found but no extractable times
+  softVerified?: boolean;   // reservation widget found but no extractable times
+  _rid?: string | number;   // OT restaurant ID — used for client-side restref verification
+  _lat?: number;
+  _lng?: number;
 }
 
 export interface SearchParams {

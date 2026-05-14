@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v68
+// TableFinder Search Edge Function — v69
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -188,14 +188,47 @@ serve(async (req) => {
       country:   params.country,
     };
 
+    // ── Client-side verification candidates ──────────────────────────────────
+    // The OT restref API and Yelp availability API are blocked from cloud IPs
+    // (Akamai + DataDome) but work fine from a real browser. Return unverified
+    // candidates so the frontend can call these APIs directly.
+    const verifiedOTIds   = new Set(otVer.map(r => r.id));
+    const verifiedYelpIds = new Set(yelpVer.map(r => r.id));
+
+    const clientVerifyOT = otCands
+      .filter(r => !verifiedOTIds.has(r.id) && !!(r._rid ?? extractRid(r.platformUrl)))
+      .slice(0, 10)
+      .map(r => ({
+        id: r.id, name: r.name, cuisine: r.cuisine ?? "",
+        neighborhood: r.neighborhood ?? "", rating: r.rating,
+        reviewCount: r.reviewCount, platform: r.platform,
+        platformUrl: r.platformUrl, timeSlots: [],
+        distanceMiles: (params.lat && r._lat) ? haversine(params.lat, params.lng!, r._lat!, r._lng!) : null,
+        _rid: r._rid ?? extractRid(r.platformUrl), _lat: r._lat, _lng: r._lng,
+      }));
+
+    const clientVerifyYelp = yelpCands
+      .filter(r => !verifiedYelpIds.has(r.id))
+      .slice(0, 15)
+      .map(r => ({
+        id: r.id, name: r.name, cuisine: r.cuisine ?? "",
+        neighborhood: r.neighborhood ?? "", rating: r.rating,
+        reviewCount: r.reviewCount, platform: r.platform,
+        platformUrl: r.platformUrl, timeSlots: [],
+        distanceMiles: (params.lat && r._lat) ? haversine(params.lat, params.lng!, r._lat!, r._lng!) : null,
+        _lat: r._lat, _lng: r._lng,
+      }));
+
     const elapsed = Date.now() - start;
-    console.log(`[done] ${verified.length} results in ${elapsed}ms`);
+    console.log(`[done] ${verified.length} results in ${elapsed}ms clientOT=${clientVerifyOT.length} clientYelp=${clientVerifyYelp.length}`);
     return json({
       results:             verified.slice(0, 24),
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v68",
+      clientVerifyOT,
+      clientVerifyYelp,
+      _v:                  "v69",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },

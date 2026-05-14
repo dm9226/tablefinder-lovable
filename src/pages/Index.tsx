@@ -6,6 +6,7 @@ import { ResultsGrid } from "@/components/ResultsGrid";
 import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { verifyOTRestref, verifyYelpAvailability } from "@/lib/clientVerify";
 
 const Index = () => {
   const [results, setResults] = useState<Restaurant[]>([]);
@@ -120,6 +121,46 @@ const Index = () => {
         }
         setHasMore(!!data?.hasMore);
         setRemainingCandidates(data?.remainingCandidates || []);
+
+        // ── Client-side verification ──────────────────────────────────────────
+        // OT restref + Yelp availability APIs are blocked from cloud IPs but work
+        // from a real browser. Fire these calls now in parallel; each one that
+        // succeeds streams its result into the displayed list immediately.
+        const cvParams = data?.params;
+        const cvOT:   Restaurant[] = data?.clientVerifyOT   || [];
+        const cvYelp: Restaurant[] = data?.clientVerifyYelp || [];
+        if ((cvOT.length || cvYelp.length) && cvParams?.dateRaw && cvParams?.time) {
+          const mergeVerified = (verified: Restaurant) => {
+            if (controller.signal.aborted) return;
+            if (searchId !== searchIdRef.current) return;
+            setResults(prev => {
+              if (prev.some(r => r.id === verified.id)) return prev;
+              const merged = [...prev, verified];
+              merged.sort((a, b) => {
+                const dA = a.distanceMiles ?? Number.POSITIVE_INFINITY;
+                const dB = b.distanceMiles ?? Number.POSITIVE_INFINITY;
+                if (Math.abs(dA - dB) > 0.5) return dA - dB;
+                return (b.rating ?? 0) - (a.rating ?? 0);
+              });
+              return merged;
+            });
+          };
+
+          const allPromises = [
+            ...cvOT.map(r =>
+              verifyOTRestref(r, cvParams.dateRaw!, cvParams.time, cvParams.partySize)
+                .then(v => { if (v) mergeVerified(v); })
+                .catch(() => {})
+            ),
+            ...cvYelp.map(r =>
+              verifyYelpAvailability(r, cvParams.dateRaw!, cvParams.time, cvParams.partySize)
+                .then(v => { if (v) mergeVerified(v); })
+                .catch(() => {})
+            ),
+          ];
+          // Don't await — let them stream in as they complete
+          Promise.allSettled(allPromises).catch(() => {});
+        }
       } catch (err: any) {
         if (controller.signal.aborted) return;
         console.error("Search error:", err);
