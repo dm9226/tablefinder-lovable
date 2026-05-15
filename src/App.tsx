@@ -1,36 +1,20 @@
-import { Toaster } from "@/components/ui/toaster";
-import { Toaster as Sonner } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { lazy, Suspense } from "react";
-import Index from "./pages/Index";
-import NotFound from "./pages/NotFound";
-
-const About = lazy(() => import("./pages/About"));
-const HowItWorks = lazy(() => import("./pages/HowItWorks"));
-
-const queryClient = new QueryClient();
+import { Helmet } from "react-helmet-async";
 
 const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <Sonner />
-      <BrowserRouter>
-        <Suspense fallback={<div className="h-screen bg-background" />}>
-          <Routes>
-            <Route path="/" element={<Index />} />
-            <Route path="/about" element={<About />} />
-            <Route path="/how-it-works" element={<HowItWorks />} />
-
-            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </Suspense>
-      </BrowserRouter>
-    </TooltipProvider>
-  </QueryClientProvider>
+  <div className="h-screen bg-background flex items-center justify-center px-6">
+    <Helmet>
+      <title>TableFinder — Offline</title>
+      <meta name="robots" content="noindex, nofollow" />
+    </Helmet>
+    <main className="max-w-md text-center space-y-4">
+      <h1 className="font-heading text-4xl md:text-5xl font-extrabold tracking-tight">
+        <span className="text-foreground">Table</span><span className="text-primary">Finder</span>
+      </h1>
+      <p className="text-muted-foreground font-body text-base md:text-lg">
+        This site is currently offline.
+      </p>
+    </main>
+  </div>
 );
 
 export default App;
