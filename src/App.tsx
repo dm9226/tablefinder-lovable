@@ -3,7 +3,7 @@ import { Helmet } from "react-helmet-async";
 const App = () => (
   <div className="h-screen bg-background flex items-center justify-center px-6">
     <Helmet>
-      <title>TableFinder — Offline</title>
+      <title>TableFinder — Coming Soon</title>
       <meta name="robots" content="noindex, nofollow" />
     </Helmet>
     <main className="max-w-md text-center space-y-4">
