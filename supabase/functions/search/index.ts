@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v97
+// TableFinder Search Edge Function — v98
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -305,18 +305,31 @@ serve(async (req) => {
 
     // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
     // businesses (hair salons, towing, auto glass, etc.). Exclude obvious non-food results.
-    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autoglass|auto\s*glass|safelite|windshield|repairs?|gutters?|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage|car\s+rental|auto\s+rental|car\s+wash|national\s+car|enterprise\s+rent|hertz|budget\s+car|bicycl|cyclery|bike\s+shop|cycling|yoga|pilates|fitness|gym\b|crossfit)\b/i;
+    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autoglass|auto\s*glass|safelite|windshield|repairs?|gutters?|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage|car\s+rental|auto\s+rental|car\s+wash|national\s+car|enterprise\s+rent|hertz|budget\s+car|bicycl|cyclery|bike\s+shop|cycling|yoga|pilates|fitness|gym\b|crossfit|imaging\b|transmission\b|cabinet\s+front|kitchen\s+front|countertop|flooring|window\s+treatment|interior\s+design\b|moving\s+compan|storage\s+unit|self\s+storage)\b/i;
 
-    // Out-of-market city filter — Yelp returns results from surrounding suburbs.
-    // Build a set of known non-local city names from the Yelp slug (e.g. "tenku-sushi-marietta"
-    // ends in "marietta" which is not Atlanta). We detect this by checking if the slug ends
-    // Distance-based out-of-market filter — works for all cities worldwide.
-    // If we have both user coordinates and venue coordinates, drop anything > 20 miles out.
-    // Falls back to allowing through if coordinates are missing (can't determine location).
+    // Out-of-market filter: two strategies.
+    // 1. Coordinate-based — most reliable but requires venue lat/lng.
+    // 2. Slug city-suffix — catches distant suburbs when coordinates are missing.
+    //    Yelp slugs end with the venue city name (e.g., "bistro-suwanee" or "bistro-marietta-2").
+    //    If the search metro has a known set of distant suburbs, drop slugs ending with those cities.
+    const DISTANT_SUBURB_SUFFIXES: Record<string, RegExp> = {
+      "atlanta-ga":  /-(marietta|suwanee|cumming|alpharetta|kennesaw|woodstock|canton|acworth|smyrna|sandy\s*springs|dunwoody|norcross|duluth|lawrenceville|buford|gainesville|braselton|dacula|grayson|snellville|stockbridge|mcdonough|peachtree\s*city|fayetteville|newnan|douglasville|carrollton|rome|dalton|gainesville|tucker|lithonia|conyers)(-\d+)?$/i,
+      "new-york-ny": /-(hoboken|jersey\s*city|newark|yonkers|white\s*plains|stamford|bridgeport|hartford)(-\d+)?$/i,
+      "chicago-il":  /-(naperville|aurora|rockford|joliet|waukegan|evanston|schaumburg|elgin|arlington\s*heights|bolingbrook)(-\d+)?$/i,
+    };
+    const searchSlug = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
+    const distantSuburbRe = DISTANT_SUBURB_SUFFIXES[searchSlug] ?? null;
     const isOutOfMarket = (r: Restaurant) => {
-      if (params.lat == null || params.lng == null) return false;
-      if (r._lat == null || r._lng == null) return false;
-      return haversine(params.lat, params.lng, r._lat, r._lng) > 20;
+      // Coordinate-based check (most accurate)
+      if (params.lat != null && params.lng != null && r._lat != null && r._lng != null) {
+        return haversine(params.lat, params.lng, r._lat, r._lng) > 20;
+      }
+      // Fallback: slug suffix check when coordinates are unavailable
+      if (distantSuburbRe) {
+        const slugM = r.platformUrl.match(/yelp\.com\/(?:reservations\/|biz\/)([^/?#\s]+)/i);
+        if (slugM && distantSuburbRe.test(slugM[1])) return true;
+      }
+      return false;
     };
 
     const clientVerifyYelp = yelpCands
@@ -366,7 +379,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v97",
+      _v:                  "v98",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1769,9 +1782,9 @@ const OT_SLUG_TO_RID: Record<string, number> = {
   "little-italia-decatur":             269151,
   "leon-full-service-decatur":         1231,
   "the-iberian-pig-decatur":           136716,
-  "white-bull-restaurant-decatur":     1321960,
+  "white-bull-decatur":                1321960,   // Yahoo slug: /r/white-bull-decatur
   "avize-atlanta":                     1344521,
-  "el-malo-decatur":                   1326567,
+  "el-malo-atlanta":                   1326567,   // Yahoo slug: /r/el-malo-atlanta
   "watershed-on-peachtree-atlanta":    4808,
   "st-cecilia-atlanta":                145530,
   "the-little-alley-steak-atlanta":    119869,
