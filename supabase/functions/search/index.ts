@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v87
+// TableFinder Search Edge Function — v88
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -230,6 +230,30 @@ serve(async (req) => {
         _lat: r._lat, _lng: r._lng,
       }));
 
+    // Slug-only OT candidates (no numeric RID found yet).
+    // The browser will try the restref endpoint with just the slug — OT may accept
+    // a `slug` parameter in addition to `rid`. If not, the 400/404 response tells us
+    // definitively and we fall back. This costs nothing if OT rejects the request.
+    const clientVerifyOTSlugs = otCands
+      .filter(r => {
+        const rid = r._rid ?? extractRid(r.platformUrl) ?? ridMap.get(r.id);
+        if (rid) return false; // already in clientVerifyOT
+        const slugM = r.platformUrl.match(/opentable\.com\/r\/([^/?#]+)/i);
+        return !!slugM;
+      })
+      .slice(0, 8)
+      .map(r => {
+        const slugM = r.platformUrl.match(/opentable\.com\/r\/([^/?#]+)/i);
+        return {
+          id: r.id, name: r.name, cuisine: r.cuisine ?? "",
+          neighborhood: r.neighborhood ?? "", rating: r.rating,
+          reviewCount: r.reviewCount, platform: r.platform as "opentable",
+          platformUrl: r.platformUrl, timeSlots: [],
+          distanceMiles: (params.lat && r._lat) ? haversine(params.lat, params.lng!, r._lat!, r._lng!) : null,
+          _slug: slugM![1],
+        };
+      });
+
     // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
     // businesses (hair salons, towing, auto glass, etc.). Exclude obvious non-food results.
     const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autoglass|auto\s*glass|safelite|windshield|repairs?|gutters?|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage|car\s+rental|auto\s+rental|car\s+wash|national\s+car|enterprise\s+rent|hertz|budget\s+car|bicycl|cyclery|bike\s+shop|cycling|yoga|pilates|fitness|gym\b|crossfit)\b/i;
@@ -274,8 +298,9 @@ serve(async (req) => {
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
       clientVerifyOT,
+      clientVerifyOTSlugs,
       clientVerifyYelp,
-      _v:                  "v87",
+      _v:                  "v88",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },

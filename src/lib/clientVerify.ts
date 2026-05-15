@@ -145,6 +145,69 @@ export async function verifyOTRestref(
   }
 }
 
+// ── OT slug-based restref (no RID required) ──────────────────────────────────
+// OT's restref endpoint is CORS-enabled (designed for cross-origin widget embedding).
+// We normally need a numeric RID, but OT might also accept a `slug` parameter.
+// This is undocumented but worth testing: if it works, we can verify any OT restaurant
+// discovered via Yahoo search (which returns slug URLs, never profile/RID URLs).
+// Worst case: 400/404 response — we log it and return null. Zero risk.
+
+export async function verifyOTBySlug(
+  r: Restaurant & { _slug?: string },
+  date: string,        // YYYY-MM-DD
+  displayTime: string, // "7:00 PM"
+  partySize: number,
+): Promise<Restaurant | null> {
+  const slug = r._slug ?? r.platformUrl.match(/opentable\.com\/r\/([^/?#]+)/i)?.[1];
+  if (!slug) return null;
+
+  const time24 = parseDisplayTime(displayTime);
+
+  try {
+    // Attempt 1: restref with slug= parameter
+    const url = `https://www.opentable.com/restref/api/availability?slug=${encodeURIComponent(slug)}&covers=${partySize}&day=${date}&lang=en-US&ref=5`;
+    console.log(`[clientVerifyOTSlug] ${r.name} (slug=${slug}): fetching`);
+    const resp = await fetch(url, {
+      headers: {
+        "Accept":           "application/json, text/javascript, */*; q=0.01",
+        "Referer":          "https://www.opentable.com/",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = await resp.text();
+    console.log(`[clientVerifyOTSlug] ${r.name}: HTTP ${resp.status} len=${body.length} body=${body.slice(0, 200)}`);
+    if (!resp.ok) return null;
+
+    let json: any;
+    try { json = JSON.parse(body); } catch { return null; }
+
+    // Check if OT returned a rid in the response — extract and use it for future calls
+    const ridFromResp = String(json?.rid ?? json?.restaurantId ?? "").match(/\d+/)?.[0];
+    if (ridFromResp) {
+      console.log(`[clientVerifyOTSlug] ${r.name}: got rid=${ridFromResp} from slug response!`);
+    }
+
+    const text  = JSON.stringify(json);
+    const slots = filterWindow(extractTimes(text), time24);
+    console.log(`[clientVerifyOTSlug] ${r.name}: ${slots.length} slots in window (keys=${Object.keys(json).join(",")})`);
+    if (slots.length === 0) return null;
+
+    const base = r.platformUrl.split("?")[0];
+    return {
+      ...r,
+      timeSlots: slots.map(s => ({
+        ...s,
+        url: buildOTSlotUrl(base, date, s.time, partySize),
+      })),
+      softVerified: false,
+    };
+  } catch (err) {
+    console.error(`[clientVerifyOTSlug] ${r.name}: fetch error —`, err);
+    return null;
+  }
+}
+
 // ── Yelp SeatMe availability ──────────────────────────────────────────────────
 // https://www.yelp.com/reservations/SLUG/availability?covers=P&date=D&time=T
 // SeatMe widget endpoint — same cross-origin embedding use-case as OT restref.

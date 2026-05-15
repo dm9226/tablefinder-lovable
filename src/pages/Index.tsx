@@ -6,7 +6,7 @@ import { ResultsGrid } from "@/components/ResultsGrid";
 import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { verifyOTRestref, verifyYelpAvailability } from "@/lib/clientVerify";
+import { verifyOTRestref, verifyOTBySlug, verifyYelpAvailability } from "@/lib/clientVerify";
 
 const Index = () => {
   const [results, setResults] = useState<Restaurant[]>([]);
@@ -126,11 +126,12 @@ const Index = () => {
         // OT restref + Yelp availability APIs are blocked from cloud IPs but work
         // from a real browser. Fire these calls now in parallel; each one that
         // succeeds streams its result into the displayed list immediately.
-        const cvParams = data?.params;
-        const cvOT:   Restaurant[] = data?.clientVerifyOT   || [];
-        const cvYelp: Restaurant[] = data?.clientVerifyYelp || [];
-        console.log(`[clientVerify] OT candidates=${cvOT.length} Yelp candidates=${cvYelp.length}`);
-        if ((cvOT.length || cvYelp.length) && cvParams?.dateRaw && cvParams?.time) {
+        const cvParams     = data?.params;
+        const cvOT:        Restaurant[] = data?.clientVerifyOT      || [];
+        const cvOTSlugs:   Restaurant[] = data?.clientVerifyOTSlugs || [];
+        const cvYelp:      Restaurant[] = data?.clientVerifyYelp    || [];
+        console.log(`[clientVerify] OT RID=${cvOT.length} OT slug=${cvOTSlugs.length} Yelp=${cvYelp.length}`);
+        if ((cvOT.length || cvOTSlugs.length || cvYelp.length) && cvParams?.dateRaw && cvParams?.time) {
           const mergeVerified = (verified: Restaurant) => {
             if (controller.signal.aborted) return;
             if (searchId !== searchIdRef.current) return;
@@ -158,6 +159,11 @@ const Index = () => {
           const allPromises = [
             ...cvOT.map(r =>
               verifyOTRestref(r, cvParams.dateRaw!, cvParams.time, cvParams.partySize)
+                .then(v => { if (v) mergeVerified(v); })
+                .catch(() => {})
+            ),
+            ...cvOTSlugs.map(r =>
+              verifyOTBySlug(r as any, cvParams.dateRaw!, cvParams.time, cvParams.partySize)
                 .then(v => { if (v) mergeVerified(v); })
                 .catch(() => {})
             ),
