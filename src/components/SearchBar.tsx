@@ -25,13 +25,14 @@ export function SearchBar({ onSearch, isLoading, location, locationLoading, loca
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (query || isLoading) return;
     let i = 0;
     const interval = setInterval(() => {
       i = (i + 1) % SUGGESTIONS.length;
       setPlaceholder(SUGGESTIONS[i]);
     }, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [query, isLoading]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
