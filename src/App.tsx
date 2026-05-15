@@ -11,7 +11,7 @@ const App = () => (
         <span className="text-foreground">Table</span><span className="text-primary">Finder</span>
       </h1>
       <p className="text-muted-foreground font-body text-base md:text-lg">
-        This site is currently offline.
+        A better way to find restaurant reservations is coming soon.
       </p>
     </main>
   </div>
