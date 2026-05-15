@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v91
+// TableFinder Search Edge Function — v92
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -189,7 +189,7 @@ serve(async (req) => {
     // (which time out and return 0). Warm Lambda only helps if already hot from another call.
     const resySlice = resyCands.slice(0, 20);  // API pre-verifies — no scraping cost per restaurant
     const otSlice   = otCands.slice(0, 12);   // restref API is fast (~1s each)
-    const yelpSlice = yelpCands.slice(0, 6);
+    const yelpSlice = yelpCands.slice(0, 10); // increased from 6; server soft-verify feeds clientVerifyYelp
 
     // ── Verification ──────────────────────────────────────────────────────────
     const verifyStart = Date.now();
@@ -233,8 +233,14 @@ serve(async (req) => {
     // The OT restref API and Yelp availability API are blocked from cloud IPs
     // (Akamai + DataDome) but work fine from a real browser. Return unverified
     // candidates so the frontend can call these APIs directly.
-    const verifiedOTIds   = new Set(otVer.map(r => r.id));
-    const verifiedYelpIds = new Set(yelpVer.map(r => r.id));
+    const verifiedOTIds = new Set(otVer.map(r => r.id));
+    // Only exclude HARD-verified Yelp restaurants from clientVerifyYelp.
+    // Soft-verified = restaurant appears in Yelp search but server couldn't extract slots
+    // (DataDome blocks Firecrawl on individual pages). The browser should still try these
+    // via the real availability API — don't block them from clientVerifyYelp.
+    const verifiedYelpIds = new Set(
+      yelpVer.filter(r => !r.softVerified && (r.timeSlots?.length ?? 0) > 0).map(r => r.id)
+    );
 
     // Always include ALL RID-bearing OT candidates in clientVerifyOT — even ones that were
     // "verified" server-side by BB. The BB widget canvas fix above means those results now
@@ -305,6 +311,9 @@ serve(async (req) => {
         !NON_FOOD_RE.test(r.name) &&      // drop obvious non-restaurant businesses
         !isOutOfMarket(r)                 // drop out-of-market suburb results
       )
+      // Prioritize reservation-filtered candidates (not _topRated) — they came from
+      // Yelp's own reservation search so are more likely to be native Yelp restaurants.
+      .sort((a, b) => ((a as any)._topRated ? 1 : 0) - ((b as any)._topRated ? 1 : 0))
       .slice(0, 15)
       .map(r => ({
         id: r.id, name: r.name, cuisine: r.cuisine ?? "",
@@ -338,7 +347,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v91",
+      _v:                  "v92",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
