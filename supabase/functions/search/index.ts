@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v93
+// TableFinder Search Edge Function — v94
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -248,6 +248,22 @@ serve(async (req) => {
     // restref and replace them with real availability. The browser's mergeVerified will replace.
     // Include RIDs discovered server-side via __NEXT_DATA__ extraction in verifyOTViaBB.
     const ridMap: Map<string, string> = (globalThis as any).__tfRidMap ?? new Map();
+
+    // Also include OT restaurants discovered via Yelp bridge that were soft-verified
+    // (server-side restref blocked from datacenter IPs). The browser can call restref
+    // successfully for these — don't let them languish as dead "Check on OT" links.
+    const bridgeOTForClient = yelpVer
+      .filter(r => r.platform === "opentable" && r.softVerified && r._rid)
+      .map(r => ({
+        id: r.id, name: r.name, cuisine: r.cuisine ?? "",
+        neighborhood: r.neighborhood ?? "", rating: r.rating,
+        reviewCount: r.reviewCount, platform: r.platform as "opentable",
+        platformUrl: r.platformUrl, timeSlots: [],
+        distanceMiles: r.distanceMiles,
+        _rid: r._rid,
+      }));
+    console.log(`[clientVerifyOT] bridge candidates: ${bridgeOTForClient.length}`);
+
     const clientVerifyOT = otCands
       .filter(r => !!(r._rid ?? extractRid(r.platformUrl) ?? ridMap.get(r.id)))
       .slice(0, 10)
@@ -260,6 +276,15 @@ serve(async (req) => {
         _rid: r._rid ?? extractRid(r.platformUrl) ?? ridMap.get(r.id),
         _lat: r._lat, _lng: r._lng,
       }));
+
+    // Merge bridge-found OT restaurants (dedup by id, prefer discovery candidates).
+    const clientVerifyOTMerged = (() => {
+      const seen = new Set(clientVerifyOT.map(r => r.id));
+      const bridgeExtra = bridgeOTForClient.filter(r => !seen.has(r.id));
+      return [...clientVerifyOT, ...bridgeExtra].slice(0, 14);
+    })();
+    // Re-export with the merged list (clientVerifyOT reference now points to merged)
+    // Use clientVerifyOTMerged below instead of clientVerifyOT.
 
     // Slug-only OT candidates (no numeric RID found yet).
     // The browser will try the restref endpoint with just the slug — OT may accept
@@ -331,12 +356,12 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      clientVerifyOT,
+      clientVerifyOT:   clientVerifyOTMerged,
       clientVerifyOTSlugs,
       // Browser-side OT metro discovery — only populated when server found 0 RIDs.
       // Browser tries OT's widget search endpoints (CORS-enabled by design for aggregators).
       // If metroId is null (city not in OT_METRO_IDS), clientDiscoverOT is omitted.
-      clientDiscoverOT: clientVerifyOT.length === 0 ? (() => {
+      clientDiscoverOT: clientVerifyOTMerged.length === 0 ? (() => {
         const metroId = getOTMetroId(params);
         return metroId ? {
           date:      params.date,
@@ -347,7 +372,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v93",
+      _v:                  "v94",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2739,6 +2764,9 @@ async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): P
     if (otRidM) {
       const rid        = otRidM[1];
       const profileUrl = `https://www.opentable.com/restaurant/profile/${rid}`;
+      // Cache this RID — if the same restaurant appears in OT discovery on future warm
+      // requests, normToOT will find the RID immediately without scraping.
+      cacheOTRid(`yelp-bridge-${rid}`, rid);
       const mockR: Restaurant = {
         id: `opentable-${rid}`, name: rr.name, cuisine: rr.cuisine,
         neighborhood: rr.neighborhood, platform: "opentable",
