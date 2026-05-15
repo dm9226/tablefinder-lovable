@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v86
+// TableFinder Search Edge Function — v87
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -275,7 +275,7 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyYelp,
-      _v:                  "v86",
+      _v:                  "v87",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1037,6 +1037,10 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
       // Third-party pages (restaurant sites, aggregators) often link to OT with the canonical
       // profile URL format, which includes the numeric RID we need for verifyOTviaRestref.
       `https://search.yahoo.com/search?p=%22opentable.com%2Frestaurant%2Fprofile%22+${cityEnc}+restaurant&n=20`,
+      // Fourth Yahoo query: restaurant websites with embedded OT booking widgets.
+      // The OT widget script tag src contains "opentable.com/widget" and appears in static HTML.
+      // Yahoo sometimes surfaces these pages when the widget URL appears in page text/metadata.
+      `https://search.yahoo.com/search?p=%22opentable.com%2Fwidget%22+${cityEnc}+restaurant&n=20`,
     ];
     const directSeen  = new Set<string>();
     const directItems: Restaurant[] = [];
@@ -1121,9 +1125,15 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
     // The widget HTML contains ?rid=NNNNN which gives us the numeric RID we need.
     // "make a reservation" + opentable is more likely to appear on restaurant pages
     // than the generic "powered by OpenTable" branding which OT removed from newer widgets.
+    const state2 = params.state ? ` "${params.state}"` : "";
+    const cuiQ2  = params.cuisine ? ` ${params.cuisine}` : "";
     const scrapeQueries = [
-      `${city}${state}${cuisine} restaurant "opentable.com" reservations -site:opentable.com -site:yelp.com`,
-      `${city}${state} restaurant "make a reservation" "opentable" -site:opentable.com`,
+      // "powered by OpenTable" appears in the static widget HTML on restaurant websites
+      // that embed the OT booking widget. Google indexes this phrase from the page source.
+      `"powered by OpenTable" "${city}"${state2}${cuiQ2} restaurant`,
+      // "restaurant.opentable.com" is the OT widget script domain, present in static
+      // <script src="..."> tags on restaurant websites — highly specific to OT embeds.
+      `"restaurant.opentable.com" "${city}"${state2}${cuiQ2} restaurant reservation`,
     ];
     const scrapeOTSeen  = new Set<string>();
     const scrapeOTItems: Array<{ url: string; title?: string }> = [];
@@ -1145,7 +1155,8 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
           : (Array.isArray(data.data) ? data.data
           : (Array.isArray(data.results) ? data.results
           : (Array.isArray(data.data?.results) ? data.data.results : [])));
-        console.log(`[OT scrape] "${query.slice(0, 55)}": ${items.length} pages`);
+        const itemUrls = items.slice(0, 4).map((i: any) => i.url ?? "?").join("|");
+        console.log(`[OT scrape] "${query.slice(0, 55)}": ${items.length} pages urls=${itemUrls}`);
         for (const item of items) {
           // rawHtml contains the full rendered DOM — iframe src and script src are present
           const html = item.rawHtml ?? item.html ?? item.markdown ?? item.content ?? "";
@@ -1246,12 +1257,71 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
     return fcItems;
   })();
 
-  // Merge results from all three parallel approaches.
+  // ── Approach 4: OT city/metro SEO landing pages ─────────────────────────────
+  // OT publishes curated city pages they WANT Google to index — e.g.
+  // /best-restaurants-in-atlanta-ga and /restaurants/atlanta-ga/ — which means they
+  // may have lighter Akamai protection than the JS-rendered search page. These pages
+  // list restaurants with /restaurant/profile/NNN links that contain numeric RIDs.
+  const cityPageP = (async () => {
+    const s = (params.state ?? "").toLowerCase().replace(/[^a-z]/g, "");
+    const citySlug = `${city}-${s}`.toLowerCase()
+      .replace(/[,\s]+/g, "-").replace(/[^a-z0-9-]/g, "")
+      .replace(/-+/g, "-").replace(/^-|-$/g, "");
+    const cityPageUrls = [
+      `https://www.opentable.com/best-restaurants-in-${citySlug}`,
+      `https://www.opentable.com/restaurants/${citySlug}/`,
+    ];
+    const seen  = new Set<string>();
+    const items: Restaurant[] = [];
+    await Promise.all(cityPageUrls.map(async (pageUrl) => {
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 14_000);
+      try {
+        const resp = await fetch(`${FC_API}/scrape`, {
+          method:  "POST",
+          headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+          signal:  ctrl.signal,
+          body:    JSON.stringify({
+            url: pageUrl, formats: ["rawHtml", "markdown"],
+            onlyMainContent: false, waitFor: 0, timeout: 12000,
+          }),
+        });
+        clearTimeout(timer);
+        if (!resp.ok) { console.log(`[OT city] HTTP ${resp.status} for ${pageUrl}`); return; }
+        const d    = await resp.json();
+        const html: string = d.data?.rawHtml ?? "";
+        const md:   string = d.data?.markdown ?? "";
+        console.log(`[OT city] ${pageUrl.slice(-40)}: html=${html.length} md=${md.length}`);
+        // Extract profile URLs — these have numeric RIDs baked in
+        const profRe = /opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/gi;
+        let m: RegExpExecArray | null;
+        const combined = html + " " + md;
+        while ((m = profRe.exec(combined)) !== null) {
+          const u = `https://www.opentable.com/restaurant/profile/${m[1]}`;
+          if (!seen.has(u)) { seen.add(u); const r = normToOT({ url: u, title: "", description: "" }, params); if (r) items.push(r); }
+        }
+        // Extract slug URLs from markdown as fallback
+        const slugRe = /opentable\.(?:com|co\.uk)\/r\/([^/?#\s"'<>\]]+)/gi;
+        while ((m = slugRe.exec(md)) !== null) {
+          const slug = m[1].replace(/[.,;:)>\]›]+$/, "");
+          const u    = `https://www.opentable.com/r/${slug}`;
+          if (!seen.has(u)) { seen.add(u); const r = normToOT({ url: u, title: "", description: "" }, params); if (r) items.push(r); }
+        }
+      } catch (err: any) {
+        clearTimeout(timer);
+        console.log(`[OT city] ${err?.message}`);
+      }
+    }));
+    console.log(`[OT city] ${items.length} candidates (rids=${items.filter(r => r._rid).length})`);
+    return items;
+  })();
+
+  // Merge results from all four parallel approaches.
   // When the same restaurant appears in multiple results, prefer the version that has
   // a numeric RID (needed for verifyOTviaRestref).
-  const [directItems, scrapeItems, fcProfileItems] = await Promise.all([directP, scrapeP, fcProfileP]);
+  const [directItems, scrapeItems, fcProfileItems, cityPageItems] = await Promise.all([directP, scrapeP, fcProfileP, cityPageP]);
   const merged   = new Map<string, Restaurant>();
-  for (const r of [...directItems, ...scrapeItems, ...fcProfileItems]) {
+  for (const r of [...directItems, ...scrapeItems, ...fcProfileItems, ...cityPageItems]) {
     if (!r.id) continue;
     const existing = merged.get(r.id);
     // Prefer whichever version has a RID
@@ -1263,7 +1333,7 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
     if (c._rid) c._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${c._rid}&covers=${params.partySize}&datetime=${dt}&styleid=5&disablegt=true`;
   }
 
-  const dbg = `direct=${directItems.length} scrape=${scrapeItems.length} fc=${fcProfileItems.length} total=${candidates.length} rids=${candidates.filter(c=>c._rid).length}`;
+  const dbg = `direct=${directItems.length} scrape=${scrapeItems.length} fc=${fcProfileItems.length} city=${cityPageItems.length} total=${candidates.length} rids=${candidates.filter(c=>c._rid).length}`;
   console.log(`[OT discovery] ${dbg}`);
   (globalThis as any).__otDiscoveryDebug = dbg;
   return candidates;
