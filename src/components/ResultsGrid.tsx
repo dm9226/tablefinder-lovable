@@ -66,9 +66,18 @@ export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearch
   return (
     <div className="w-full max-w-2xl mx-auto px-4">
       {metaSummary}
+
+      {/* OpenTable integration banner — top of results */}
+      <div className="mb-3 px-4 py-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 flex items-center gap-3">
+        <span className="shrink-0 px-1.5 py-0.5 rounded text-xs font-body font-semibold uppercase tracking-wider bg-emerald-500/15 text-emerald-400">OpenTable</span>
+        <p className="text-xs text-muted-foreground font-body">
+          OpenTable results coming soon — <span className="text-emerald-400 font-medium">Powered by OpenTable</span>
+        </p>
+      </div>
+
       <div className="flex items-center justify-between mb-2 px-4">
         <p className="text-xs text-muted-foreground font-body">
-          {results.length} result{results.length !== 1 ? "s" : ""}
+          {results.length} Resy result{results.length !== 1 ? "s" : ""} · <span className="text-emerald-400">OpenTable coming soon</span>
         </p>
         {isRefreshing && (
           <div className="flex items-center gap-1.5 text-xs text-primary font-body animate-pulse">
@@ -81,14 +90,6 @@ export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearch
         {results.map((r) => (
           <RestaurantCard key={r.id} restaurant={r} searchMeta={searchMeta} />
         ))}
-      </div>
-
-      {/* OpenTable integration banner */}
-      <div className="mt-3 px-4 py-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 flex items-center gap-3">
-        <span className="shrink-0 px-1.5 py-0.5 rounded text-xs font-body font-semibold uppercase tracking-wider bg-emerald-500/15 text-emerald-400">OpenTable</span>
-        <p className="text-xs text-muted-foreground font-body">
-          OpenTable results coming soon — <span className="text-emerald-400 font-medium">Powered by OpenTable</span>
-        </p>
       </div>
 
       {isExtending && (

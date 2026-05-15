@@ -263,6 +263,28 @@ const Index = () => {
           locationDenied={locationDenied}
           onRequestLocation={requestLocation}
         />
+        {!hasSearched && !isLoading && (
+          <div className="max-w-2xl mx-auto mt-3">
+            <p className="text-xs text-muted-foreground font-body text-center mb-2">Try searching</p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {[
+                "romantic dinner for 2 tonight at 7",
+                "outdoor patio lunch tomorrow",
+                "sushi Friday night party of 4",
+                "special occasion Italian this Saturday",
+                "trendy new spot Saturday at 8pm",
+              ].map((prompt) => (
+                <button
+                  key={prompt}
+                  onClick={() => handleSearch(prompt)}
+                  className="px-3 py-1.5 rounded-full text-xs font-body bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground transition-colors border border-border"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="flex-1 overflow-y-auto pb-4">
