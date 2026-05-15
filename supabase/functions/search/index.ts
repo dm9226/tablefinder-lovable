@@ -193,9 +193,10 @@ serve(async (req) => {
     ]);
     console.log(`[verify] resy=${resyVer.length} ot=${otVer.length} yelp=${yelpVer.length} in ${Date.now()-verifyStart}ms`);
 
-    // Hard-verified only — confirmed available time slots. No soft-verify.
+    // Keep hard-verified results plus OT soft-verified (no server-side slot extraction
+    // works for OT; BB discovers restaurants but can't scrape times — show as "Check on OT").
     let verified = dedup([...resyVer, ...otVer, ...yelpVer])
-      .filter(r => !r.softVerified);
+      .filter(r => !r.softVerified || r.platform === "opentable");
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
     const [ranked] = await Promise.all([
@@ -305,7 +306,7 @@ serve(async (req) => {
 
     // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
     // businesses (hair salons, towing, auto glass, etc.). Exclude obvious non-food results.
-    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autos\b|autosports?|auto\s+sports?|auto\s*glass|safelite|windshield|repairs?|gutters?|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage|storage\b|car\s+rental|auto\s+rental|car\s+wash|national\s+car|enterprise\s+rent|hertz|budget\s+car|bicycl|cyclery|bike\s+shop|cycling|yoga|pilates|fitness|gym\b|crossfit|imaging\b|transmission\b|cabinet\s+front|kitchen\s+front|countertop|flooring|window\s+treatment|interior\s+design\b|moving\s+compan|storage\s+unit|self\s+storage|flood\s+pros?|flood\s+restor|water\s+damage|fire\s+damage|mold\s+restor|restoration\s+company|hyundai\b|chevrolet\b|toyota\b|ford\b|honda\b|nissan\b|subaru\b|volkswagen\b|mazda\b|mercedes|bmw\b|audi\b|lexus\b|acura\b|infiniti\b|cadillac\b|buick\b|gmc\b|ram\s+truck|jeep\b|dodge\b|chrysler\b|dealership)\b/i;
+    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autos\b|autosports?|auto\s+sports?|auto\s*glass|safelite|windshield|repairs?|gutters?|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage|storage\b|car\s+rental|auto\s+rental|car\s+wash|national\s+car|enterprise\s+rent|hertz|budget\s+car|bicycl|cyclery|bike\s+shop|cycling|yoga|pilates|fitness|gym\b|crossfit|imaging\b|transmission\b|cabinet\s+front|kitchen\s+front|countertop|flooring|window\s+treatment|interior\s+design\b|moving\s+compan|storage\s+unit|self\s+storage|flood\s+pros?|flood\s+restor|water\s+damage|fire\s+damage|mold\s+restor|restoration\s+company|nature\s+preserve|nature\s+park|state\s+park|national\s+park|county\s+park|mountain\s+preserve|greenway|recreation\s+area|hyundai\b|chevrolet\b|toyota\b|ford\b|honda\b|nissan\b|subaru\b|volkswagen\b|mazda\b|mercedes|bmw\b|audi\b|lexus\b|acura\b|infiniti\b|cadillac\b|buick\b|gmc\b|ram\s+truck|jeep\b|dodge\b|chrysler\b|dealership)\b/i;
 
     // Out-of-market filter: two strategies.
     // 1. Coordinate-based — most reliable but requires venue lat/lng.
@@ -313,8 +314,8 @@ serve(async (req) => {
     //    Yelp slugs end with the venue city name (e.g., "bistro-suwanee" or "bistro-marietta-2").
     //    If the search metro has a known set of distant suburbs, drop slugs ending with those cities.
     const DISTANT_SUBURB_SUFFIXES: Record<string, RegExp> = {
-      "atlanta-ga":  /-(marietta|suwanee|cumming|alpharetta|kennesaw|woodstock|canton|acworth|smyrna|sandy\s*springs|dunwoody|norcross|duluth|lawrenceville|buford|gainesville|braselton|dacula|grayson|snellville|stockbridge|mcdonough|peachtree\s*city|fayetteville|newnan|douglasville|carrollton|rome|dalton|gainesville|tucker|lithonia|conyers)(-\d+)?$/i,
-      "decatur-ga":  /-(marietta|suwanee|cumming|alpharetta|kennesaw|woodstock|canton|acworth|smyrna|sandy\s*springs|dunwoody|norcross|duluth|lawrenceville|buford|gainesville|braselton|dacula|grayson|snellville|stockbridge|mcdonough|peachtree\s*city|fayetteville|newnan|douglasville|carrollton|rome|dalton|tucker|lithonia|conyers)(-\d+)?$/i,
+      "atlanta-ga":  /-(marietta|suwanee|cumming|alpharetta|kennesaw|woodstock|canton|acworth|smyrna|sandy\s*springs|dunwoody|norcross|duluth|lawrenceville|buford|gainesville|braselton|dacula|grayson|snellville|stockbridge|mcdonough|peachtree\s*city|fayetteville|newnan|douglasville|carrollton|rome|dalton|gainesville|tucker|lithonia|conyers|roswell)(-\d+)?$/i,
+      "decatur-ga":  /-(marietta|suwanee|cumming|alpharetta|kennesaw|woodstock|canton|acworth|smyrna|sandy\s*springs|dunwoody|norcross|duluth|lawrenceville|buford|gainesville|braselton|dacula|grayson|snellville|stockbridge|mcdonough|peachtree\s*city|fayetteville|newnan|douglasville|carrollton|rome|dalton|tucker|lithonia|conyers|roswell)(-\d+)?$/i,
       "new-york-ny": /-(hoboken|jersey\s*city|newark|yonkers|white\s*plains|stamford|bridgeport|hartford)(-\d+)?$/i,
       "chicago-il":  /-(naperville|aurora|rockford|joliet|waukegan|evanston|schaumburg|elgin|arlington\s*heights|bolingbrook)(-\d+)?$/i,
     };
