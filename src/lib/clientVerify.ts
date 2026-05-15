@@ -208,6 +208,97 @@ export async function verifyOTBySlug(
   }
 }
 
+// ── OT metro-based browser discovery ─────────────────────────────────────────
+// OT's widget/reservation/search endpoint is CORS-enabled by design — it powers
+// multi-restaurant booking widgets on hotel/aggregator sites that can't be same-origin.
+// We try several plausible endpoint variants. The first one that returns restaurant data
+// with RIDs feeds directly into verifyOTRestref.
+
+export async function discoverAndVerifyOT(
+  params: { date: string; time: string; partySize: number; metroId: number; cuisine: string },
+  onVerified: (r: import("@/types/restaurant").Restaurant) => void,
+): Promise<void> {
+  const { date, time, partySize, metroId, cuisine } = params;
+  const dateTime = `${date}T${time}`;
+  const termQ    = cuisine ? `&term=${encodeURIComponent(cuisine)}` : "";
+
+  // Endpoints to probe — most specific (most likely to work) first
+  const candidates = [
+    // Multi-restaurant widget search — used by hotel/aggregator aggregator widgets
+    `https://www.opentable.com/widget/reservation/search?covers=${partySize}&dateTime=${dateTime}&metroId=${metroId}${termQ}&type=standard&lang=en-US`,
+    // restref with metroId instead of rid — might work as a search query
+    `https://www.opentable.com/restref/api/availability?metroId=${metroId}&covers=${partySize}&day=${date}&lang=en-US&ref=5`,
+    // dapi search — less likely to have CORS but worth one try
+    `https://www.opentable.com/dapi/booking/restaurant-availability?metroId=${metroId}&covers=${partySize}&dateTime=${dateTime}`,
+  ];
+
+  for (const url of candidates) {
+    try {
+      console.log(`[discoverOT] probing: ${url.slice(0, 100)}`);
+      const resp = await fetch(url, {
+        headers: {
+          "Accept":           "application/json, */*",
+          "Referer":          "https://www.opentable.com/",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+      const body = await resp.text();
+      console.log(`[discoverOT] ${resp.status} len=${body.length} body=${body.slice(0, 300)}`);
+      if (!resp.ok || body.length < 10) continue;
+
+      let json: any;
+      try { json = JSON.parse(body); } catch { continue; }
+
+      // Extract restaurants from various possible shapes
+      const restaurants: any[] = Array.isArray(json) ? json
+        : Array.isArray(json.restaurants)   ? json.restaurants
+        : Array.isArray(json.results)        ? json.results
+        : Array.isArray(json.data)           ? json.data
+        : Array.isArray(json.items)          ? json.items
+        : [];
+
+      console.log(`[discoverOT] found ${restaurants.length} restaurants from ${url.slice(0, 60)}`);
+      if (restaurants.length === 0) continue;
+
+      // Process each restaurant — look for RID and availability slots
+      await Promise.all(restaurants.slice(0, 12).map(async (item: any) => {
+        const rid = String(item.rid ?? item.restaurantId ?? item.id ?? "").match(/\d+/)?.[0];
+        if (!rid) return;
+
+        const name      = item.name ?? item.restaurantName ?? "Restaurant";
+        const slug      = item.urlSlug ?? item.slug ?? rid;
+        const baseUrl   = `https://www.opentable.com/r/${slug}`;
+        const platformUrl = `${baseUrl}?covers=${partySize}&dateTime=${dateTime}`;
+
+        // Build a minimal Restaurant object and verify availability via restref
+        const candidate: import("@/types/restaurant").Restaurant & { _rid: string } = {
+          id:          `opentable-${slug}`,
+          name,
+          cuisine:     item.cuisine ?? cuisine ?? "Restaurant",
+          neighborhood: item.neighborhood ?? item.city ?? "",
+          rating:      item.stars ?? item.rating,
+          reviewCount: item.reviewCount ?? item.reviews,
+          platform:    "opentable",
+          platformUrl,
+          timeSlots:   [],
+          distanceMiles: null,
+          _rid:        rid,
+        };
+
+        const verified = await verifyOTRestref(candidate, date, time, partySize);
+        if (verified) onVerified(verified);
+      }));
+
+      // Found and processed a working endpoint — stop trying others
+      return;
+    } catch (err) {
+      console.log(`[discoverOT] error: ${err instanceof Error ? err.message : err}`);
+      continue;
+    }
+  }
+}
+
 // ── Yelp SeatMe availability ──────────────────────────────────────────────────
 // https://www.yelp.com/reservations/SLUG/availability?covers=P&date=D&time=T
 // SeatMe widget endpoint — same cross-origin embedding use-case as OT restref.

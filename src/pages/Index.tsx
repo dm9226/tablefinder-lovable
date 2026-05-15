@@ -6,7 +6,7 @@ import { ResultsGrid } from "@/components/ResultsGrid";
 import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { verifyOTRestref, verifyOTBySlug, verifyYelpAvailability } from "@/lib/clientVerify";
+import { verifyOTRestref, verifyOTBySlug, discoverAndVerifyOT, verifyYelpAvailability } from "@/lib/clientVerify";
 
 const Index = () => {
   const [results, setResults] = useState<Restaurant[]>([]);
@@ -129,9 +129,10 @@ const Index = () => {
         const cvParams     = data?.params;
         const cvOT:        Restaurant[] = data?.clientVerifyOT      || [];
         const cvOTSlugs:   Restaurant[] = data?.clientVerifyOTSlugs || [];
+        const cvDiscoverOT = data?.clientDiscoverOT ?? null;
         const cvYelp:      Restaurant[] = data?.clientVerifyYelp    || [];
-        console.log(`[clientVerify] OT RID=${cvOT.length} OT slug=${cvOTSlugs.length} Yelp=${cvYelp.length}`);
-        if ((cvOT.length || cvOTSlugs.length || cvYelp.length) && cvParams?.dateRaw && cvParams?.time) {
+        console.log(`[clientVerify] OT RID=${cvOT.length} OT slug=${cvOTSlugs.length} OT discover=${cvDiscoverOT ? `metroId=${cvDiscoverOT.metroId}` : "none"} Yelp=${cvYelp.length}`);
+        if ((cvOT.length || cvOTSlugs.length || cvDiscoverOT || cvYelp.length) && cvParams?.dateRaw && cvParams?.time) {
           const mergeVerified = (verified: Restaurant) => {
             if (controller.signal.aborted) return;
             if (searchId !== searchIdRef.current) return;
@@ -167,6 +168,15 @@ const Index = () => {
                 .then(v => { if (v) mergeVerified(v); })
                 .catch(() => {})
             ),
+            // Metro-based OT discovery — tries OT widget search endpoints for the city.
+            // Runs only when server found 0 RIDs. Probes multiple endpoints in sequence
+            // and verifies any restaurants found via restref.
+            ...(cvDiscoverOT ? [
+              discoverAndVerifyOT(
+                { ...cvDiscoverOT, time: cvParams.time, partySize: cvParams.partySize },
+                mergeVerified,
+              ).catch(() => {})
+            ] : []),
             ...cvYelp.map(r =>
               verifyYelpAvailability(r, cvParams.dateRaw!, cvParams.time, cvParams.partySize)
                 .then(v => { if (v) mergeVerified(v); })

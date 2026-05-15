@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v88
+// TableFinder Search Edge Function — v89
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -299,8 +299,21 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT,
       clientVerifyOTSlugs,
+      // Browser-side OT metro discovery — only populated when server found 0 RIDs.
+      // Browser tries OT's widget search endpoints (CORS-enabled by design for aggregators).
+      // If metroId is null (city not in OT_METRO_IDS), clientDiscoverOT is omitted.
+      clientDiscoverOT: clientVerifyOT.length === 0 ? (() => {
+        const metroId = getOTMetroId(params);
+        return metroId ? {
+          date:      params.date,
+          time:      params.time,      // HH:MM 24h
+          partySize: params.partySize,
+          metroId,
+          cuisine:   params.cuisine ?? "",
+        } : null;
+      })() : null,
       clientVerifyYelp,
-      _v:                  "v88",
+      _v:                  "v89",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1547,6 +1560,30 @@ const OT_SLUG_TO_RID: Record<string, number> = {
   "by-george-atlanta":               1044556,
   "hartley-atlanta":                 1244200,
 };
+
+// OT metro IDs — used for browser-side widget search endpoint calls.
+// Source: OT's public /restref/ widget and partner documentation.
+const OT_METRO_IDS: Record<string, number> = {
+  "atlanta-ga":        4,  "new-york-ny":      13, "chicago-il":        2,
+  "los-angeles-ca":    5,  "san-francisco-ca":  3, "boston-ma":         1,
+  "washington-dc":     9,  "philadelphia-pa":   8, "seattle-wa":       12,
+  "dfw":               7,  "miami-fl":         27, "houston-tx":       74,
+  "austin-tx":        62,  "denver-co":        10, "minneapolis-mn":   15,
+  "phoenix-az":       14,  "portland-or":      20, "nashville-tn":     58,
+  "new-orleans-la":   45,  "las-vegas-nv":     44, "san-diego-ca":     41,
+  "charlotte-nc":     53,  "raleigh-nc":       76, "baltimore-md":     21,
+  "pittsburgh-pa":    18,  "cleveland-oh":     19, "detroit-mi":       16,
+  "milwaukee-wi":     33,  "kansas-city-mo":   55, "st-louis-mo":      17,
+  "indianapolis-in":  24,  "louisville-ky":    79, "memphis-tn-ar":    35,
+  "tampa-bay-fl":     29,  "orlando-fl":       73, "salt-lake-city-ut":34,
+  "sacramento-ca":    40,  "richmond-va":      69, "decatur-ga":        4,
+  "san-antonio-tx":   93,  "london-england":  158,
+};
+
+function getOTMetroId(params: SearchParams): number | null {
+  const slug = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
+  return OT_METRO_IDS[slug] ?? null;
+}
 
 function normToOT(fc: any, params: SearchParams): Restaurant | null {
   const url    = fc.url ?? "";
