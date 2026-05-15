@@ -222,10 +222,14 @@ export async function discoverAndVerifyOT(
   const dateTime = `${date}T${time}`;
   const termQ    = cuisine ? `&term=${encodeURIComponent(cuisine)}` : "";
 
-  // Endpoints to probe — most specific (most likely to work) first
+  // Endpoints to probe — most specific (most likely to work) first.
+  // The widget/reservation/search endpoint is the authoritative one: it's what hotel
+  // and aggregator sites embed to show "book a table nearby" widgets. CORS-enabled by design.
   const candidates = [
-    // Multi-restaurant widget search — used by hotel/aggregator aggregator widgets
+    // Multi-restaurant widget search — canonical cross-origin endpoint for hotel/aggregator widgets
     `https://www.opentable.com/widget/reservation/search?covers=${partySize}&dateTime=${dateTime}&metroId=${metroId}${termQ}&type=standard&lang=en-US`,
+    // Same endpoint with different type param — some integrators use "widget" type
+    `https://www.opentable.com/widget/reservation/search?covers=${partySize}&dateTime=${dateTime}&metroId=${metroId}${termQ}&type=widget&lang=en-US`,
     // restref with metroId instead of rid — might work as a search query
     `https://www.opentable.com/restref/api/availability?metroId=${metroId}&covers=${partySize}&day=${date}&lang=en-US&ref=5`,
     // dapi search — less likely to have CORS but worth one try

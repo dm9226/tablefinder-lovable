@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v96
+// TableFinder Search Edge Function — v97
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -351,10 +351,11 @@ serve(async (req) => {
       remainingCandidates: remaining,
       clientVerifyOT:   clientVerifyOTMerged,
       clientVerifyOTSlugs,
-      // Browser-side OT metro discovery — only populated when server found 0 RIDs.
+      // Browser-side OT metro discovery — runs when server found fewer than 5 RIDs.
+      // Even with some hardcoded RIDs, metro discovery can find additional restaurants.
       // Browser tries OT's widget search endpoints (CORS-enabled by design for aggregators).
       // If metroId is null (city not in OT_METRO_IDS), clientDiscoverOT is omitted.
-      clientDiscoverOT: clientVerifyOTMerged.length === 0 ? (() => {
+      clientDiscoverOT: clientVerifyOTMerged.length < 5 ? (() => {
         const metroId = getOTMetroId(params);
         return metroId ? {
           date:      params.date,
@@ -365,7 +366,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v96",
+      _v:                  "v97",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -383,6 +384,13 @@ serve(async (req) => {
         ot_bridge_count:   bridgeOTForClient.length,
         client_ot_merged:  clientVerifyOTMerged.length,
         client_ot_slugs:   clientVerifyOTSlugs.length,
+        // Sample of what's being sent to the browser for OT verification.
+        // Shows name + rid so we can confirm the right restaurants are flowing through.
+        client_ot_sample:  clientVerifyOTMerged.slice(0, 5).map(r => ({
+          name: r.name,
+          rid:  (r as any)._rid ?? null,
+          url:  r.platformUrl?.slice(0, 60),
+        })),
         yelp_api:        (globalThis as any).__yelpApiDebug           ?? null,
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug       ?? null,
         yelp_lambda_fetch: (globalThis as any).__yelpLambdaFetchDebug ?? null,
@@ -733,16 +741,16 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
     const cuiQ = params.cuisine
       ? `&cuisine=${encodeURIComponent(params.cuisine.toLowerCase().replace(/\s+/g, "-"))}`
       : "";
-    // Include seat_filter with time for tighter slot relevance (fewer off-time results).
-    // Resy accepts time_slot in HH:MM 24h format as a rough filter.
-    const timeQ = `&seat_filter=dining_room&start_time=${params.time}&end_time=${params.time}`;
-    const url = `https://api.resy.com/4/find?lat=${lat}&long=${lng}&day=${params.date}&party_size=${params.partySize}&per_page=30&sort_by=available${cuiQ}${timeQ}`;
+    // seat_filter / start_time / end_time are undocumented and caused 400 errors in testing.
+    // Rely on filterWindow() to narrow the returned slots to ±2h of the requested time.
+    const url = `https://api.resy.com/4/find?lat=${lat}&long=${lng}&day=${params.date}&party_size=${params.partySize}&per_page=30&sort_by=available${cuiQ}`;
     // Two known Resy API keys — current and fallback in case of rotation.
     // These are embedded in Resy's web bundle and are not secrets.
+    // Keys are used in headers only; the URL is the same for both.
     const RESY_KEYS = ["VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5", "pafjMmAX4zbXDkTWAqFiVA"];
     let resp: Response | undefined;
     for (const key of RESY_KEYS) {
-      resp = await fetch(url.replace("VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5", key), {
+      resp = await fetch(url, {
         signal: ctrl.signal,
         headers: {
           "Authorization":   `ResyAPI api_key="${key}"`,
