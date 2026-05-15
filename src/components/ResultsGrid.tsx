@@ -83,6 +83,14 @@ export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearch
         ))}
       </div>
 
+      {/* OpenTable integration banner */}
+      <div className="mt-3 px-4 py-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 flex items-center gap-3">
+        <span className="shrink-0 px-1.5 py-0.5 rounded text-xs font-body font-semibold uppercase tracking-wider bg-emerald-500/15 text-emerald-400">OpenTable</span>
+        <p className="text-xs text-muted-foreground font-body">
+          OpenTable results coming soon — <span className="text-emerald-400 font-medium">Powered by OpenTable</span>
+        </p>
+      </div>
+
       {isExtending && (
         <div className="flex items-center justify-center gap-2 mt-4 py-3">
           <RefreshCw className="h-3.5 w-3.5 animate-spin text-primary" />
