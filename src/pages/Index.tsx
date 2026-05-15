@@ -6,7 +6,6 @@ import { ResultsGrid } from "@/components/ResultsGrid";
 import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { verifyOTRestref, verifyOTBySlug, discoverAndVerifyOT, verifyYelpAvailability } from "@/lib/clientVerify";
 
 const Index = () => {
   const [results, setResults] = useState<Restaurant[]>([]);
@@ -122,88 +121,6 @@ const Index = () => {
         setHasMore(!!data?.hasMore);
         setRemainingCandidates(data?.remainingCandidates || []);
 
-        // ── Client-side verification ──────────────────────────────────────────
-        // OT restref + Yelp availability APIs are blocked from cloud IPs but work
-        // from a real browser. Fire these calls now in parallel; each one that
-        // succeeds streams its result into the displayed list immediately.
-        const cvParams     = data?.params;
-        const cvOT:        Restaurant[] = data?.clientVerifyOT      || [];
-        const cvOTSlugs:   Restaurant[] = data?.clientVerifyOTSlugs || [];
-        const cvDiscoverOT = data?.clientDiscoverOT ?? null;
-        const cvYelp:      Restaurant[] = data?.clientVerifyYelp    || [];
-        console.log(`[clientVerify] OT RID=${cvOT.length} OT slug=${cvOTSlugs.length} OT discover=${cvDiscoverOT ? `metroId=${cvDiscoverOT.metroId}` : "none"} Yelp=${cvYelp.length}`);
-        if ((cvOT.length || cvOTSlugs.length || cvDiscoverOT || cvYelp.length) && cvParams?.dateRaw && cvParams?.time) {
-          const mergeVerified = (verified: Restaurant) => {
-            if (controller.signal.aborted) return;
-            if (searchId !== searchIdRef.current) return;
-            console.log(`[mergeVerified] ${verified.platform} ${verified.name}: ${verified.timeSlots.length} slots — streaming into results`);
-            setResults(prev => {
-              // 1. ID-based match: replace same platform entry (e.g. BB placeholder → real restref)
-              const idMatch = prev.some(r => r.id === verified.id);
-              if (idMatch) {
-                if (verified.timeSlots.length === 0) return prev;
-                return prev.map(r => r.id === verified.id ? verified : r);
-              }
-
-              // 2. Name-based dedup: same restaurant appearing on multiple platforms.
-              //    e.g. White Bull verified by OT restref AND Yelp SeatMe — keep only the
-              //    entry with more slots; if tied, prefer OT > Yelp > Resy for link quality.
-              const normName = (n: string) => n.toLowerCase().replace(/[^a-z0-9]/g, "");
-              const PLATFORM_PREF: Record<string, number> = { opentable: 3, resy: 2, yelp: 1 };
-              const nameMatch = prev.findIndex(r => normName(r.name) === normName(verified.name));
-              if (nameMatch !== -1) {
-                const existing = prev[nameMatch];
-                // Keep the new one if it has more slots, or equal slots but higher-pref platform
-                const keepNew =
-                  verified.timeSlots.length > existing.timeSlots.length ||
-                  (verified.timeSlots.length === existing.timeSlots.length &&
-                   (PLATFORM_PREF[verified.platform] ?? 0) > (PLATFORM_PREF[existing.platform] ?? 0));
-                if (!keepNew) return prev; // existing is better — discard incoming
-                console.log(`[mergeVerified] name-dedup: replacing ${existing.platform}/${existing.name} with ${verified.platform} (${verified.timeSlots.length} vs ${existing.timeSlots.length} slots)`);
-                return prev.map((r, i) => i === nameMatch ? verified : r);
-              }
-
-              // 3. New restaurant — insert and re-sort by distance then rating
-              const merged = [...prev, verified];
-              merged.sort((a, b) => {
-                const dA = a.distanceMiles ?? Number.POSITIVE_INFINITY;
-                const dB = b.distanceMiles ?? Number.POSITIVE_INFINITY;
-                if (Math.abs(dA - dB) > 0.5) return dA - dB;
-                return (b.rating ?? 0) - (a.rating ?? 0);
-              });
-              return merged;
-            });
-          };
-
-          const allPromises = [
-            ...cvOT.map(r =>
-              verifyOTRestref(r, cvParams.dateRaw!, cvParams.time, cvParams.partySize)
-                .then(v => { if (v) mergeVerified(v); })
-                .catch(() => {})
-            ),
-            ...cvOTSlugs.map(r =>
-              verifyOTBySlug(r as any, cvParams.dateRaw!, cvParams.time, cvParams.partySize)
-                .then(v => { if (v) mergeVerified(v); })
-                .catch(() => {})
-            ),
-            // Metro-based OT discovery — tries OT widget search endpoints for the city.
-            // Runs only when server found 0 RIDs. Probes multiple endpoints in sequence
-            // and verifies any restaurants found via restref.
-            ...(cvDiscoverOT ? [
-              discoverAndVerifyOT(
-                { ...cvDiscoverOT, time: cvParams.time, partySize: cvParams.partySize },
-                mergeVerified,
-              ).catch(() => {})
-            ] : []),
-            ...cvYelp.map(r =>
-              verifyYelpAvailability(r, cvParams.dateRaw!, cvParams.time, cvParams.partySize)
-                .then(v => { if (v) mergeVerified(v); })
-                .catch(() => {})
-            ),
-          ];
-          // Don't await — let them stream in as they complete
-          Promise.allSettled(allPromises).catch(() => {});
-        }
       } catch (err: any) {
         if (controller.signal.aborted) return;
         console.error("Search error:", err);
@@ -288,8 +205,8 @@ const Index = () => {
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
       <Helmet>
-        <title>TableFinder — Find Restaurant Reservations Across Multiple Platforms</title>
-        <meta name="description" content="Search Resy, OpenTable, and Yelp reservations in one place. Find available tables near you with natural language search." />
+        <title>TableFinder — Find Resy Restaurant Reservations Near You</title>
+        <meta name="description" content="Search Resy reservations with natural language. Find available tables near you instantly." />
         <link rel="canonical" href="https://tablefinder.ai/" />
         <script type="application/ld+json">{JSON.stringify({
           "@context": "https://schema.org",
@@ -299,7 +216,7 @@ const Index = () => {
               "@id": "https://tablefinder.ai/#website",
               "url": "https://tablefinder.ai/",
               "name": "TableFinder",
-              "description": "Search Resy, OpenTable, and Yelp reservations simultaneously with natural language.",
+              "description": "Search Resy reservations with natural language. Find available tables near you instantly.",
               "potentialAction": {
                 "@type": "SearchAction",
                 "target": {
@@ -329,7 +246,7 @@ const Index = () => {
           </h1>
         </Link>
         <p className="text-muted-foreground font-body text-base md:text-lg max-w-md mx-auto mt-2">
-          Multiple Reservation Platforms, One Search
+          Find Available Resy Reservations Near You
         </p>
       </header>
 
@@ -359,7 +276,7 @@ const Index = () => {
 
       <footer className="py-6 text-center border-t border-border space-y-2">
         <p className="text-xs text-muted-foreground font-body">
-          TableFinder aggregates availability from Resy, OpenTable & Yelp
+          TableFinder searches Resy for available reservations near you
         </p>
         <nav className="flex justify-center gap-4">
           <Link to="/about" className="text-xs text-muted-foreground hover:text-primary transition-colors font-body">About</Link>

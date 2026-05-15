@@ -16,12 +16,11 @@ export interface Restaurant {
   imageUrl?: string;
   description?: string;
   vibeTags?: string[];
-  platform: "resy" | "opentable" | "yelp";
+  platform: "resy";
   platformUrl: string;
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
-  softVerified?: boolean;   // reservation widget found but no extractable times
-  _rid?: string | number;   // OT restaurant ID — used for client-side restref verification
+  softVerified?: boolean;
   _lat?: number;
   _lng?: number;
 }

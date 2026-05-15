@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 const About = () => (
   <div className="min-h-screen bg-background flex flex-col">
     <Helmet>
-      <title>About TableFinder — Search Resy, OpenTable & Yelp Together</title>
-      <meta name="description" content="TableFinder searches Resy, OpenTable, and Yelp simultaneously so you can find restaurant reservations across all major platforms in one search." />
+      <title>About TableFinder — Find Resy Reservations Near You</title>
+      <meta name="description" content="TableFinder searches Resy so you can find restaurant reservations near you with a simple natural language search." />
       <link rel="canonical" href="https://tablefinder.ai/about" />
     </Helmet>
 
@@ -21,13 +21,12 @@ const About = () => (
 
     <main className="flex-1 max-w-2xl mx-auto px-4 py-10">
       <h2 className="font-heading text-3xl md:text-4xl font-bold text-foreground mb-6">
-        One Search. Every Platform.
+        Resy Reservations, Instantly.
       </h2>
 
       <p className="text-muted-foreground font-body text-lg leading-relaxed mb-8">
-        Finding a restaurant reservation shouldn't mean checking three different apps. 
-        TableFinder searches <strong className="text-foreground">Resy</strong>, <strong className="text-foreground">OpenTable</strong>, 
-        and <strong className="text-foreground">Yelp</strong> simultaneously so you see every available table in one place.
+        Finding a restaurant reservation shouldn't be complicated.
+        TableFinder searches <strong className="text-foreground">Resy</strong> with natural language so you can find available tables near you in seconds.
       </p>
 
       <div className="grid gap-6 mb-10">
@@ -73,7 +72,7 @@ const About = () => (
         <Link to="/how-it-works" className="text-xs text-muted-foreground hover:text-foreground font-body transition-colors">How It Works</Link>
       </nav>
       <p className="text-xs text-muted-foreground font-body">
-        TableFinder aggregates availability from Resy, OpenTable & Yelp
+        TableFinder searches Resy for available reservations near you
       </p>
     </footer>
   </div>

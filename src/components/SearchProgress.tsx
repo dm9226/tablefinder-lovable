@@ -3,7 +3,7 @@ import { X } from "lucide-react";
 
 const REAL_STAGES = [
   "Understanding your request…",
-  "Searching Resy, OpenTable & Yelp…",
+  "Searching Resy for available tables…",
   "Verifying real-time availability…",
   "Confirming available tables…",
   "Finalizing results…",

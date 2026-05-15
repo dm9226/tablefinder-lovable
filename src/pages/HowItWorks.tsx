@@ -12,9 +12,9 @@ const steps = [
   },
   {
     icon: Radar,
-    title: "We Search Every Platform",
+    title: "We Search Resy for You",
     description:
-      "TableFinder checks Resy, OpenTable, and Yelp in parallel, verifying real-time availability for your exact date, time, and party size.",
+      "TableFinder searches Resy and verifies real-time availability for your exact date, time, and party size.",
   },
   {
     icon: CalendarCheck,
@@ -28,7 +28,7 @@ const HowItWorks = () => (
   <div className="min-h-screen bg-background flex flex-col">
     <Helmet>
       <title>How TableFinder Works — Find Reservations in Seconds</title>
-      <meta name="description" content="Search for restaurant reservations in 3 simple steps. Describe what you want, we check Resy, OpenTable, and Yelp, and you book in one click." />
+      <meta name="description" content="Search for Resy restaurant reservations in 3 simple steps. Describe what you want, we find available tables, and you book in one click." />
       <link rel="canonical" href="https://tablefinder.ai/how-it-works" />
     </Helmet>
 
@@ -44,6 +44,7 @@ const HowItWorks = () => (
       <h2 className="font-heading text-3xl md:text-4xl font-bold text-foreground mb-3 text-center">
         How It Works
       </h2>
+
       <p className="text-muted-foreground font-body text-lg text-center mb-10">
         Three steps from hungry to booked.
       </p>
@@ -76,7 +77,7 @@ const HowItWorks = () => (
         <Link to="/about" className="text-xs text-muted-foreground hover:text-foreground font-body transition-colors">About</Link>
       </nav>
       <p className="text-xs text-muted-foreground font-body">
-        TableFinder aggregates availability from Resy, OpenTable & Yelp
+        TableFinder searches Resy for available reservations near you
       </p>
     </footer>
   </div>

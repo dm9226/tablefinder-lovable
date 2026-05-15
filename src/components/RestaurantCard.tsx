@@ -1,16 +1,12 @@
 import { Restaurant, TimeSlot, SearchMeta } from "@/types/restaurant";
-import { Star, MapPin, Clock, AlertTriangle } from "lucide-react";
+import { Star, MapPin, Clock } from "lucide-react";
 
 const PLATFORM_STYLES: Record<string, string> = {
-  resy:      "bg-red-500/15 text-red-400",
-  opentable: "bg-emerald-500/15 text-emerald-400",
-  yelp:      "bg-orange-500/15 text-orange-400",
+  resy: "bg-red-500/15 text-red-400",
 };
 
 const PLATFORM_LABELS: Record<string, string> = {
-  resy:      "Resy",
-  opentable: "OT",
-  yelp:      "Yelp",
+  resy: "Resy",
 };
 
 interface RestaurantCardProps {
@@ -35,7 +31,6 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
   const distLabel = dist != null ? (dist < 0.1 ? "< 0.1 mi" : `${dist.toFixed(1)} mi`) : null;
   const slots = restaurant.timeSlots || [];
   const vibeTags = restaurant.vibeTags || [];
-  const isSoftVerified = !!restaurant.softVerified;
 
   return (
     <div
@@ -130,22 +125,6 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
           </div>
         )}
 
-        {/* Soft-verified notice (Yelp: widget detected but no extractable times) */}
-        {isSoftVerified && (
-          <div className="flex items-center gap-1.5 mt-0.5">
-            <AlertTriangle className="h-3.5 w-3.5 text-yellow-500 shrink-0" aria-hidden="true" />
-            <a
-              href={restaurant.platformUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-yellow-500 hover:text-yellow-400 transition-colors font-body focus:outline-none focus-visible:underline"
-              onClick={(e) => e.stopPropagation()}
-            >
-              Check availability on {PLATFORM_LABELS[restaurant.platform] ?? restaurant.platform} →
-            </a>
-            <span className="text-xs text-muted-foreground font-body">(times not confirmed)</span>
-          </div>
-        )}
       </div>
     </div>
   );
