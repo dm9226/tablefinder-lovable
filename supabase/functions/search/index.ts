@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v90
+// TableFinder Search Edge Function — v91
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -77,6 +77,26 @@ interface SearchParams {
 interface SearchMeta {
   date: string; dateRaw: string; time: string;
   partySize: number; city: string; state?: string; country?: string;
+}
+
+// ─── MODULE-LEVEL OT RID CACHE ────────────────────────────────────────────────
+// Deno Deploy reuses isolates for warm requests within the same region.
+// This map persists between requests, accumulating discovered RIDs over time.
+// Cold starts begin empty; warm requests benefit from prior discoveries.
+// Key: OT slug (e.g. "white-bull-restaurant-decatur"), value: numeric RID string.
+const OT_RID_CACHE = new Map<string, string>(
+  // Seed with known Atlanta/Decatur restaurant RIDs (manually verified)
+  Object.entries({
+    "aria-atlanta":                       "597",
+    "the-sun-dial-restaurant-atlanta":    "70636",
+    "ag-modern-steakhouse-atlanta":       "2392",
+    "by-george-atlanta":                  "1044556",
+    "hartley-atlanta":                    "1244200",
+  })
+);
+
+function cacheOTRid(slug: string, rid: string): void {
+  if (slug && rid && /^\d+$/.test(rid)) OT_RID_CACHE.set(slug, rid);
 }
 
 // ─── ENTRY POINT ──────────────────────────────────────────────────────────────
@@ -318,7 +338,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v90",
+      _v:                  "v91",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1252,6 +1272,10 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
     const queries = [
       `"opentable.com/restaurant/profile" "${city}"${state2}${cuiQ} restaurant`,
       `opentable.com "${city}"${state2}${cuiQ} restaurant reservation`,
+      // Food editorial sites (Eater, Thrillist, Zagat) write full OT profile URLs in
+      // their restaurant guides. These are indexed by Google and contain numeric RIDs.
+      `site:eater.com "${city}" opentable restaurant reservation`,
+      `site:thrillist.com "${city}" opentable restaurant reservation`,
     ];
     const fcItems: Restaurant[] = [];
     const fcSeen  = new Set<string>();
@@ -1421,6 +1445,7 @@ async function enrichOTSlugsWithRids(
         if (profM) {
           console.log(`[OT enrich] ${r.name} (${slug}) → rid=${profM[1]}`);
           ridMap.set(r.id, profM[1]);
+          cacheOTRid(slug, profM[1]); // persist in module-level cache for warm reuse
           return;
         }
       }
@@ -1723,7 +1748,9 @@ function normToOT(fc: any, params: SearchParams): Restaurant | null {
   const baseUrl = `https://www.${domain}/r/${slug}`;
   const rid     = mNum ? mNum[1]
     : extractRid(url)
-    ?? (OT_SLUG_TO_RID[slug] != null ? String(OT_SLUG_TO_RID[slug]) : null);
+    ?? (OT_SLUG_TO_RID[slug] != null ? String(OT_SLUG_TO_RID[slug]) : null)
+    ?? OT_RID_CACHE.get(slug)
+    ?? null;
   return {
     id: `opentable-${slug}`,
     name: cleanTitle(fc.title, url, "opentable"),
@@ -2536,9 +2563,11 @@ async function verifyOTViaBB(
       const discoveredRid = finalText.slice(4).trim();
       console.log(`[OT BB] ${r.name}: discovered RID=${discoveredRid} via __NEXT_DATA__ → clientVerifyOT`);
       (globalThis as any).__otVerifyDebug += `|RID_FOUND:${discoveredRid}`;
-      // Store in global map — clientVerifyOT builder reads this to promote no-RID candidates.
+      // Store in global request map + module-level persistent cache for warm reuse.
       const ridMap: Map<string, string> = ((globalThis as any).__tfRidMap ??= new Map());
       ridMap.set(r.id, discoveredRid);
+      const slugM2 = r.platformUrl.match(/opentable\.com\/r\/([^/?#]+)/i);
+      if (slugM2) cacheOTRid(slugM2[1], discoveredRid);
       return null; // client will verify with real RID
     }
 
