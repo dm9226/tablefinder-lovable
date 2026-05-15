@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v92
+// TableFinder Search Edge Function — v93
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -347,7 +347,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v92",
+      _v:                  "v93",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -712,27 +712,39 @@ async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
     const cuiQ = params.cuisine
       ? `&cuisine=${encodeURIComponent(params.cuisine.toLowerCase().replace(/\s+/g, "-"))}`
       : "";
-    const url = `https://api.resy.com/4/find?lat=${lat}&long=${lng}&day=${params.date}&party_size=${params.partySize}&per_page=20&sort_by=available${cuiQ}`;
-    const resp = await fetch(url, {
-      signal: ctrl.signal,
-      headers: {
-        "Authorization":   'ResyAPI api_key="VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"',
-        "x-resy-api-key":  "VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5",
-        "X-Origin":        "https://resy.com",
-        "Origin":          "https://resy.com",
-        "Referer":         "https://resy.com/",
-        "Accept":          "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
-    });
+    // Include seat_filter with time for tighter slot relevance (fewer off-time results).
+    // Resy accepts time_slot in HH:MM 24h format as a rough filter.
+    const timeQ = `&seat_filter=dining_room&start_time=${params.time}&end_time=${params.time}`;
+    const url = `https://api.resy.com/4/find?lat=${lat}&long=${lng}&day=${params.date}&party_size=${params.partySize}&per_page=30&sort_by=available${cuiQ}${timeQ}`;
+    // Two known Resy API keys — current and fallback in case of rotation.
+    // These are embedded in Resy's web bundle and are not secrets.
+    const RESY_KEYS = ["VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5", "pafjMmAX4zbXDkTWAqFiVA"];
+    let resp: Response | undefined;
+    for (const key of RESY_KEYS) {
+      resp = await fetch(url.replace("VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5", key), {
+        signal: ctrl.signal,
+        headers: {
+          "Authorization":   `ResyAPI api_key="${key}"`,
+          "x-resy-api-key":  key,
+          "X-Origin":        "https://resy.com",
+          "Origin":          "https://resy.com",
+          "Referer":         "https://resy.com/",
+          "Accept":          "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+      });
+      if (resp.ok) break; // first key that works, use it
+      console.log(`[Resy API] key ${key.slice(0, 8)}... → HTTP ${resp.status}`);
+    }
     clearTimeout(timer);
+    if (!resp) return [];
 
-    const rawBody = await resp.text();
-    (globalThis as any).__resyApiDebug = `status=${resp.status} len=${rawBody.length} sample=${rawBody.substring(0, 200)}`;
+    const rawBody = await resp!.text();
+    (globalThis as any).__resyApiDebug = `status=${resp!.status} len=${rawBody.length} sample=${rawBody.substring(0, 200)}`;
 
-    if (!resp.ok) {
-      console.log(`[Resy API] HTTP ${resp.status}: ${rawBody.substring(0, 200)}`);
+    if (!resp!.ok) {
+      console.log(`[Resy API] all keys failed. Last HTTP ${resp!.status}: ${rawBody.substring(0, 200)}`);
       return [];
     }
     const data = JSON.parse(rawBody);
