@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v100
+// TableFinder Search Edge Function — v101
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -305,7 +305,7 @@ serve(async (req) => {
 
     // Non-restaurant keyword filter — Yelp's /reservations/ path covers all service
     // businesses (hair salons, towing, auto glass, etc.). Exclude obvious non-food results.
-    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autoglass|auto\s*glass|safelite|windshield|repairs?|gutters?|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage|car\s+rental|auto\s+rental|car\s+wash|national\s+car|enterprise\s+rent|hertz|budget\s+car|bicycl|cyclery|bike\s+shop|cycling|yoga|pilates|fitness|gym\b|crossfit|imaging\b|transmission\b|cabinet\s+front|kitchen\s+front|countertop|flooring|window\s+treatment|interior\s+design\b|moving\s+compan|storage\s+unit|self\s+storage)\b/i;
+    const NON_FOOD_RE = /\b(towing|tow\b|rooter|proxpress|plumbing|salon|clips|barber|apartments?|realty|real\s+estate|auto\b|autos\b|autosports?|auto\s+sports?|auto\s*glass|safelite|windshield|repairs?|gutters?|tires?|electric|dental|clinic|spa\b|massage|nails?|wax|lash|brow|pediatric|veterinary|vet\b|law\s+firm|attorney|insurance|detailing|appearance|apparel|boutique|grooming|carpet|roofing|landscaping|hvac|heating|cooling|pest|exterminator|dry\s*clean|alterations|planned\s+parenthood|health\s+center|medical\s+center|healthcare|urgent\s+care|pharmacy|optometry|eyecare|eye\s+care|at\s+and\s+t|at&t|verizon|t-mobile|sprint|comcast|xfinity|wireless\s+store|phone\s+store|dispensary|liquor\s+store|self.?storage|storage\b|car\s+rental|auto\s+rental|car\s+wash|national\s+car|enterprise\s+rent|hertz|budget\s+car|bicycl|cyclery|bike\s+shop|cycling|yoga|pilates|fitness|gym\b|crossfit|imaging\b|transmission\b|cabinet\s+front|kitchen\s+front|countertop|flooring|window\s+treatment|interior\s+design\b|moving\s+compan|storage\s+unit|self\s+storage|flood\s+pros?|flood\s+restor|water\s+damage|fire\s+damage|mold\s+restor|restoration\s+company|hyundai\b|chevrolet\b|toyota\b|ford\b|honda\b|nissan\b|subaru\b|volkswagen\b|mazda\b|mercedes|bmw\b|audi\b|lexus\b|acura\b|infiniti\b|cadillac\b|buick\b|gmc\b|ram\s+truck|jeep\b|dodge\b|chrysler\b|dealership)\b/i;
 
     // Out-of-market filter: two strategies.
     // 1. Coordinate-based — most reliable but requires venue lat/lng.
@@ -314,6 +314,7 @@ serve(async (req) => {
     //    If the search metro has a known set of distant suburbs, drop slugs ending with those cities.
     const DISTANT_SUBURB_SUFFIXES: Record<string, RegExp> = {
       "atlanta-ga":  /-(marietta|suwanee|cumming|alpharetta|kennesaw|woodstock|canton|acworth|smyrna|sandy\s*springs|dunwoody|norcross|duluth|lawrenceville|buford|gainesville|braselton|dacula|grayson|snellville|stockbridge|mcdonough|peachtree\s*city|fayetteville|newnan|douglasville|carrollton|rome|dalton|gainesville|tucker|lithonia|conyers)(-\d+)?$/i,
+      "decatur-ga":  /-(marietta|suwanee|cumming|alpharetta|kennesaw|woodstock|canton|acworth|smyrna|sandy\s*springs|dunwoody|norcross|duluth|lawrenceville|buford|gainesville|braselton|dacula|grayson|snellville|stockbridge|mcdonough|peachtree\s*city|fayetteville|newnan|douglasville|carrollton|rome|dalton|tucker|lithonia|conyers)(-\d+)?$/i,
       "new-york-ny": /-(hoboken|jersey\s*city|newark|yonkers|white\s*plains|stamford|bridgeport|hartford)(-\d+)?$/i,
       "chicago-il":  /-(naperville|aurora|rockford|joliet|waukegan|evanston|schaumburg|elgin|arlington\s*heights|bolingbrook)(-\d+)?$/i,
     };
@@ -379,7 +380,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v100",
+      _v:                  "v101",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1674,7 +1675,14 @@ async function discoverOTViaBB(
       useProxy: true,   // OT search page is Akamai-gated by datacenter IP — residential proxy required
       timeoutMs: 28_000,
       evalExpr: `JSON.stringify((() => {
-        // Deduplicate /r/ links by base URL (slug only, no query params)
+        // 1. Try __NEXT_DATA__ first — most reliable, bypasses DOM selector fragility.
+        try {
+          const nd = document.getElementById('__NEXT_DATA__');
+          if (nd && nd.textContent && nd.textContent.length > 100) {
+            return {type:'nextdata', data: nd.textContent.substring(0, 300000)};
+          }
+        } catch(e) {}
+        // 2. DOM fallback — deduplicate /r/ links.
         const seen = new Set();
         const links = Array.from(document.querySelectorAll('a[href*="/r/"]'))
           .map(a => ({el:a, url:a.href.split('?')[0].split('#')[0]}))
@@ -1682,8 +1690,6 @@ async function discoverOTViaBB(
           .filter(({url}) => { if(seen.has(url)) return false; seen.add(url); return true; })
           .slice(0,20);
         const cards = links.map(({el, url}) => {
-          // Use closest() with OT's known data-test attributes first,
-          // then fall back to semantic elements, then height-based heuristic.
           const card = el.closest('[data-test*="restaurant"]') ||
                        el.closest('[data-test*="result"]') ||
                        el.closest('article') || el.closest('li') ||
@@ -1697,11 +1703,19 @@ async function discoverOTViaBB(
                          }
                          return el.parentElement;
                        })();
+          // Time slots: try button/pill elements first (OT renders times as clickable buttons).
+          const btnTimes = [...new Set(
+            Array.from(card?.querySelectorAll('button,[role="button"],[class*="time"],[class*="Time"],[class*="slot"],[class*="Slot"]') || [])
+              .map(b => (b.textContent||'').trim())
+              .filter(t => /^\\d{1,2}:\\d{2}\\s*(AM|PM|am|pm)$/i.test(t))
+          )].slice(0,8);
+          // Fallback: regex on full innerText
           const text = card ? (card.innerText || '') : '';
-          const times = [...new Set(
+          const txtTimes = btnTimes.length ? [] : [...new Set(
             [...text.matchAll(/\\b(\\d{1,2}:\\d{2}\\s*(?:AM|PM))\\b/gi)].map(m=>m[1].trim())
           )].slice(0,8);
-          const h = card?.querySelector('h1,h2,h3,[data-test*="name"]');
+          const times = btnTimes.length ? btnTimes : txtTimes;
+          const h = card?.querySelector('h1,h2,h3,[data-test*="name"],[class*="name"],[class*="Name"]');
           const name = (h?.textContent || el.textContent || '').trim().replace(/\\s+/g,' ').substring(0,80);
           return {url, name, times, _cc: card?.className?.substring(0,40)||''};
         });
@@ -1715,16 +1729,53 @@ async function discoverOTViaBB(
     let restaurants: Restaurant[] = [];
 
     if (parsed.type === "nextdata") {
-      // Parse Next.js data for restaurants + slots
+      // Parse Next.js __NEXT_DATA__ for restaurants + slots.
+      // OT's JSON structure varies between deployments; probe known paths.
       try {
         const nd = JSON.parse(parsed.data);
-        const searchResults = nd?.props?.pageProps?.searchResults
-          ?? nd?.props?.pageProps?.restaurants
-          ?? nd?.props?.pageProps?.results
+        const pageProps = nd?.props?.pageProps ?? {};
+        (globalThis as any).__otVerifyDebug = `nextdata keys=${Object.keys(pageProps).join(',')}`;
+        // Try multiple known paths to restaurant list
+        const searchResults: any[] = pageProps.searchResults
+          ?? pageProps.restaurants
+          ?? pageProps.results
+          ?? pageProps.restaurantList
+          ?? pageProps.data?.restaurants
+          ?? pageProps.initialData?.restaurants
           ?? [];
-        console.log(`[OT BB] nextdata: ${searchResults.length} results`);
-        (globalThis as any).__otVerifyDebug = `nextdata keys=${Object.keys(nd?.props?.pageProps??{}).join(',')}`;
-      } catch { /* parse failed */ }
+        console.log(`[OT BB] nextdata: ${searchResults.length} results, pageProps keys=${Object.keys(pageProps).join(',')}`);
+        if (searchResults.length > 0) {
+          restaurants = searchResults.slice(0, 20).flatMap((item: any) => {
+            const name = item.name ?? item.restaurantName ?? "";
+            if (!name) return [];
+            const rid   = String(item.rid ?? item.restaurantId ?? item.id ?? "").match(/\d+/)?.[0];
+            const slug  = item.urlSlug ?? item.slug ?? (rid ? rid : "");
+            const baseUrl = `https://www.opentable.com/r/${slug || slugify(name)}`;
+            const r = normToOT({ url: baseUrl, title: name, description: "" }, params);
+            if (!r) return [];
+            // Extract slots from availability data if present
+            const avail: any[] = item.availability?.slots ?? item.timeslots ?? item.slots ?? [];
+            const rawTimes: string[] = avail
+              .map((s: any) => s.timeString ?? s.time ?? s.startTime ?? "")
+              .filter(Boolean);
+            const windowed = filterWindow(
+              rawTimes.map((t: string) => ({ time: t })),
+              params.time,
+            );
+            if (windowed.length > 0) {
+              r.timeSlots    = windowed.map(s => ({ ...s, url: buildSlotUrl("opentable", baseUrl, params, s.time) }));
+              r._preVerified = true;
+            } else {
+              r.softVerified = true;
+              r._preVerified = true;
+            }
+            if (rid) r._rid = rid;
+            return [r];
+          });
+        }
+      } catch (e: any) {
+        (globalThis as any).__otVerifyDebug = `nextdata parse error: ${e?.message}`;
+      }
     }
 
     if (parsed.type === "dom" && parsed.cards?.length) {
@@ -2248,7 +2299,10 @@ async function verifyOne(
   scraperUrl = "", scraperSecret = "", bbKey = "", bbProject = "",
 ): Promise<Restaurant | null> {
   if (r._preVerified && !r.softVerified) return r; // hard-verified during discovery — pass through
-  if (r._preVerified &&  r.softVerified) return null; // API confirmed venue exists but no slots in window
+  // OT soft-verified = BB found the restaurant on the search page but couldn't extract times.
+  // Show it with a "Check on OT" link rather than silently discarding it.
+  if (r._preVerified &&  r.softVerified && r.platform === "opentable") return r;
+  if (r._preVerified &&  r.softVerified) return null; // Resy: API returned but no slots in time window
   if (r.platform === "resy")      return scraperUrl && scraperSecret
     ? verifyResyViaBB(r, params, scraperUrl, scraperSecret)
     : verifyResy(r, params, fcKey);
