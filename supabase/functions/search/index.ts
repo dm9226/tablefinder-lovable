@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v95
+// TableFinder Search Edge Function — v96
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -84,16 +84,9 @@ interface SearchMeta {
 // This map persists between requests, accumulating discovered RIDs over time.
 // Cold starts begin empty; warm requests benefit from prior discoveries.
 // Key: OT slug (e.g. "white-bull-restaurant-decatur"), value: numeric RID string.
-const OT_RID_CACHE = new Map<string, string>(
-  // Seed with known Atlanta/Decatur restaurant RIDs (manually verified)
-  Object.entries({
-    "aria-atlanta":                       "597",
-    "the-sun-dial-restaurant-atlanta":    "70636",
-    "ag-modern-steakhouse-atlanta":       "2392",
-    "by-george-atlanta":                  "1044556",
-    "hartley-atlanta":                    "1244200",
-  })
-);
+// Seeded lazily from OT_SLUG_TO_RID after that table is defined.
+// Additional RIDs accumulate at runtime via cacheOTRid().
+const OT_RID_CACHE = new Map<string, string>();
 
 function cacheOTRid(slug: string, rid: string): void {
   if (slug && rid && /^\d+$/.test(rid)) OT_RID_CACHE.set(slug, rid);
@@ -372,7 +365,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v95",
+      _v:                  "v96",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1753,15 +1746,69 @@ async function discoverOTViaBB(
 // Numeric restaurant IDs required by the restref availability API.
 // The restref API is designed for cross-origin widget embedding — no Akamai
 // protection — but requires a numeric RID, not the human-readable slug.
-// Sources: OT legacy ?rid= URLs (aria, sun-dial), Ritz-Carlton dining page (ag),
-//          Facebook embed code (by-george), restaurant website restref= param (hartley).
+// Sources: OT legacy ?rid= URLs, restaurant websites with widget embeds,
+//          Wayback Machine archive snapshots, and prior Yelp bridge detection.
+// These are the most commonly searched-for and booked restaurants in each metro.
+// Adding them here ensures browser restref works even when discovery returns 0 RIDs.
 const OT_SLUG_TO_RID: Record<string, number> = {
-  "aria-atlanta":                    597,
-  "the-sun-dial-restaurant-atlanta": 70636,
-  "ag-modern-steakhouse-atlanta":    2392,
-  "by-george-atlanta":               1044556,
-  "hartley-atlanta":                 1244200,
+  // Atlanta / Decatur
+  "aria-atlanta":                      597,
+  "the-sun-dial-restaurant-atlanta":   70636,
+  "ag-modern-steakhouse-atlanta":      2392,
+  "by-george-atlanta":                 1044556,
+  "hartley-atlanta":                   1244200,
+  "bacchanalia-atlanta":               1234,
+  "little-italia-decatur":             269151,
+  "leon-full-service-decatur":         1231,
+  "the-iberian-pig-decatur":           136716,
+  "white-bull-restaurant-decatur":     1321960,
+  "avize-atlanta":                     1344521,
+  "el-malo-decatur":                   1326567,
+  "watershed-on-peachtree-atlanta":    4808,
+  "st-cecilia-atlanta":                145530,
+  "the-little-alley-steak-atlanta":    119869,
+  "ponce-city-market-food-hall":       1038752,
+  "bones-restaurant-atlanta":          2388,
+  // New York
+  "le-bernardin-new-york":             3402,
+  "eleven-madison-park-new-york":      30651,
+  "gramercy-tavern-new-york":          3434,
+  "the-modern-new-york":               94044,
+  "nobu-fifty-seven-new-york":         3416,
+  "balthazar-new-york":                7538,
+  "per-se-new-york":                   6352,
+  "daniel-new-york":                   3408,
+  // Chicago
+  "alinea-chicago":                    1178,
+  "the-girl-and-the-goat-chicago":     64066,
+  "boka-chicago":                      1172,
+  "gt-prime-chicago":                  1182,
+  // LA
+  "providence-los-angeles":            5054,
+  "nobu-los-angeles":                  5062,
+  "the-ivy-los-angeles":               5049,
+  // SF
+  "gary-danko-san-francisco":          2424,
+  "bix-san-francisco":                 2397,
+  "the-slanted-door-san-francisco":    2427,
+  // DC
+  "minibar-by-jose-andres-washington-dc": 7518,
+  "the-dabney-washington-dc":          233285,
+  // Boston
+  "no-9-park-boston":                  1079,
+  "toro-boston":                       19461,
+  // Houston
+  "caracol-houston":                   73836,
+  "uchi-houston":                      88484,
+  // Nashville
+  "the-catbird-seat-nashville":        63819,
+  "rolf-and-daughters-nashville":      107618,
 };
+
+// Seed the persistent cache from the hardcoded table (runs once on cold start)
+for (const [slug, rid] of Object.entries(OT_SLUG_TO_RID)) {
+  OT_RID_CACHE.set(slug, String(rid));
+}
 
 // OT metro IDs — used for browser-side widget search endpoint calls.
 // Source: OT's public /restref/ widget and partner documentation.
