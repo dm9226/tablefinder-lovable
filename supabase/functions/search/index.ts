@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v89
+// TableFinder Search Edge Function — v90
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -140,19 +140,24 @@ serve(async (req) => {
       // (for comprehensive restaurant list). BB loads OT's own search page through residential
       // proxy; Yahoo/FC search finds profile URLs with numeric RIDs. Results are merged.
       abortableDiscover(async () => {
-        const [fcCands, bbCands] = await Promise.all([
+        const [fcCands, bbCands, nextDataCands] = await Promise.all([
           discoverOTviaWidgetCanvas(params, FIRECRAWL),
           BB_KEY && BB_PROJECT
             ? discoverOTViaBB(params, BB_KEY, BB_PROJECT)
             : Promise.resolve([] as Restaurant[]),
+          // OT search page __NEXT_DATA__ — if Akamai allows Firecrawl through
+          // to /s/, we get RIDs from the server-rendered Next.js data blob.
+          extractOTNextData(params, FIRECRAWL),
         ]);
-        // Merge: BB first (may have real time slots from search page), then FC/Yahoo (has RIDs)
+        // Merge: BB first (may have real time slots), then FC/Yahoo (has RIDs), then NEXT_DATA
         const otSeen = new Set<string>();
-        const merged: Restaurant[] = [];
-        for (const r of [...bbCands, ...fcCands]) {
-          if (!otSeen.has(r.id)) { otSeen.add(r.id); merged.push(r); }
+        const rawMerged: Restaurant[] = [];
+        for (const r of [...bbCands, ...fcCands, ...nextDataCands]) {
+          if (!otSeen.has(r.id)) { otSeen.add(r.id); rawMerged.push(r); }
         }
-        console.log(`[OT merge] bb=${bbCands.length} fc=${fcCands.length} merged=${merged.length}`);
+        // Per-slug enrichment: for slug-only candidates, search for their profile URL
+        const merged = await enrichOTSlugsWithRids(rawMerged, FIRECRAWL);
+        console.log(`[OT merge] bb=${bbCands.length} fc=${fcCands.length} next=${nextDataCands.length} merged=${merged.length} rids=${merged.filter(r=>r._rid).length}`);
         return merged;
       }, DISCOVER_MS),
       abortableDiscover(() => discoverYelp(params, FIRECRAWL), DISCOVER_MS),
@@ -313,7 +318,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v89",
+      _v:                  "v90",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -1375,6 +1380,129 @@ async function discoverOTviaWidgetCanvas(params: SearchParams, fcKey: string): P
   console.log(`[OT discovery] ${dbg}`);
   (globalThis as any).__otDiscoveryDebug = dbg;
   return candidates;
+}
+
+// ── OT slug→RID enrichment ────────────────────────────────────────────────────
+// After Yahoo/FC discovery we have slug URLs but no numeric RIDs. For each slug-only
+// candidate, do a targeted Firecrawl search for `"opentable.com/r/{slug}"` — this finds
+// any page (restaurant website, aggregator, food blog) that links to or mentions this
+// specific OT restaurant URL. Those pages sometimes also contain the /restaurant/profile/NNN
+// URL which gives us the RID. Runs in parallel; budget-capped; non-blocking on failure.
+async function enrichOTSlugsWithRids(
+  candidates: Restaurant[], fcKey: string,
+): Promise<Restaurant[]> {
+  const slugOnly = candidates.filter(r => !r._rid);
+  if (slugOnly.length === 0 || !fcKey) return candidates;
+
+  const ridMap = new Map<string, string>(); // restaurant id → rid
+  await Promise.all(slugOnly.slice(0, 6).map(async (r) => {
+    const slugM = r.platformUrl.match(/opentable\.com\/r\/([^/?#]+)/i);
+    if (!slugM) return;
+    const slug = slugM[1];
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10_000);
+    try {
+      const resp = await fetch(`${FC_API}/search`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+        signal: ctrl.signal,
+        body: JSON.stringify({ query: `"opentable.com/r/${slug}" restaurant`, limit: 6 }),
+      });
+      clearTimeout(timer);
+      if (!resp.ok) return;
+      const data  = await resp.json();
+      const items: any[] = Array.isArray(data) ? data
+        : (Array.isArray(data.data)    ? data.data
+        : (Array.isArray(data.results) ? data.results : []));
+      for (const item of items) {
+        const text = [item.description, item.markdown, item.content, item.snippet, item.url]
+          .filter(Boolean).join(" ");
+        const profM = text.match(/opentable\.(?:com|co\.uk)\/restaurant\/profile\/(\d+)/i);
+        if (profM) {
+          console.log(`[OT enrich] ${r.name} (${slug}) → rid=${profM[1]}`);
+          ridMap.set(r.id, profM[1]);
+          return;
+        }
+      }
+      console.log(`[OT enrich] ${r.name} (${slug}): ${items.length} pages, no profile URL found`);
+    } catch (err: any) {
+      clearTimeout(timer);
+      console.log(`[OT enrich] ${r.name}: ${err?.message}`);
+    }
+  }));
+
+  if (ridMap.size === 0) return candidates;
+  console.log(`[OT enrich] enriched ${ridMap.size}/${slugOnly.length} slugs with RIDs`);
+  return candidates.map(r => {
+    const rid = ridMap.get(r.id);
+    if (!rid || r._rid) return r;
+    const dt = `${r.platformUrl.match(/dateTime=([^&]+)/)?.[1] ?? ""}`;
+    if (r._rid) return r;
+    const enriched = { ...r, _rid: rid };
+    if (enriched._widgetUrl === undefined && dt) {
+      enriched._widgetUrl = `https://www.opentable.com/widget/reservation/canvas?rid=${rid}&covers=${dt}`;
+    }
+    return enriched;
+  });
+}
+
+// ── OT search page __NEXT_DATA__ extraction ───────────────────────────────────
+// OT's search page (/s/) is a Next.js app that server-side renders the initial
+// results into a <script id="__NEXT_DATA__"> tag. If Firecrawl can access it
+// (OT may be lighter on Akamai for /s/ than for individual restaurant pages),
+// rawHtml will contain multiple restaurant RIDs in one call.
+async function extractOTNextData(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
+  const cityQ  = encodeURIComponent(`${params.city}${params.state ? `, ${params.state}` : ""}`);
+  const dt     = `${params.date}T${params.time}`;
+  const cuiQ   = params.cuisine ? `&term=${encodeURIComponent(params.cuisine)}` : "";
+  const url    = `https://www.opentable.com/s/?covers=${params.partySize}&dateTime=${dt}&term=${cityQ}${cuiQ}`;
+
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 14_000);
+  try {
+    const resp = await fetch(`${FC_API}/scrape`, {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${fcKey}`, "Content-Type": "application/json" },
+      signal:  ctrl.signal,
+      body:    JSON.stringify({ url, formats: ["rawHtml"], onlyMainContent: false, timeout: 12000 }),
+    });
+    clearTimeout(timer);
+    if (!resp.ok) { console.log(`[OT NEXT_DATA] HTTP ${resp.status}`); return []; }
+    const d    = await resp.json();
+    const html: string = d.data?.rawHtml ?? "";
+    console.log(`[OT NEXT_DATA] html=${html.length}`);
+    if (html.length < 500) return [];
+
+    // Extract __NEXT_DATA__ JSON
+    const ndM = html.match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
+    if (!ndM) { console.log(`[OT NEXT_DATA] no __NEXT_DATA__ found in ${html.length} bytes`); return []; }
+
+    let nd: any;
+    try { nd = JSON.parse(ndM[1]); } catch { console.log(`[OT NEXT_DATA] JSON parse failed`); return []; }
+
+    const text = JSON.stringify(nd);
+    console.log(`[OT NEXT_DATA] parsed JSON len=${text.length}`);
+
+    // Extract all /restaurant/profile/NNN URLs from the JSON blob
+    const seen  = new Set<string>();
+    const items: Restaurant[] = [];
+    const profRe = /\/restaurant\/profile\/(\d+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = profRe.exec(text)) !== null) {
+      const u = `https://www.opentable.com/restaurant/profile/${m[1]}`;
+      if (!seen.has(u)) {
+        seen.add(u);
+        const r = normToOT({ url: u, title: "", description: "" }, params);
+        if (r) items.push(r);
+      }
+    }
+    console.log(`[OT NEXT_DATA] ${items.length} restaurants with RIDs from __NEXT_DATA__`);
+    return items;
+  } catch (err: any) {
+    clearTimeout(timer);
+    console.log(`[OT NEXT_DATA] ${err?.message}`);
+    return [];
+  }
 }
 
 async function discoverOTviaApify(params: SearchParams, token: string): Promise<Restaurant[]> {
