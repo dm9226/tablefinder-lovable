@@ -1,7 +1,7 @@
 {
   "name": "TableFinder",
   "short_name": "TableFinder",
-  "description": "Find restaurant reservations across Resy, OpenTable, and Yelp in one search",
+  "description": "A better way to find restaurant reservations is coming soon.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#1a1510",
