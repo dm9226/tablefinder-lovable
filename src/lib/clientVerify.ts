@@ -73,9 +73,9 @@ function filterWindow(slots: TimeSlot[], requestedTime24: string): TimeSlot[] {
       if (mm[3].toLowerCase() === "am" && h === 12) h = 0;
       return { slot: s, mins: h * 60 + mn };
     })
-    .filter(x => x && Math.abs(x.mins - reqMins) <= 90)
+    .filter(x => x && Math.abs(x.mins - reqMins) <= 120)  // ±2h window (was ±90min)
     .sort((a, b) => Math.abs(a!.mins - reqMins) - Math.abs(b!.mins - reqMins))
-    .slice(0, 5)
+    .slice(0, 6)  // show up to 6 slots
     .sort((a, b) => a!.mins - b!.mins)
     .map(x => x!.slot);
 }

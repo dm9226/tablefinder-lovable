@@ -114,7 +114,7 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
         {slots.length > 0 && (
           <div className="flex items-center gap-1.5 flex-wrap">
             <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
-            {slots.slice(0, 5).map((slot, i) => (
+            {slots.slice(0, 6).map((slot, i) => (
               <a
                 key={i}
                 href={getSlotUrl(restaurant, slot, searchMeta)}

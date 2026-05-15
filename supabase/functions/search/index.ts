@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v94
+// TableFinder Search Edge Function — v95
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -372,7 +372,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v94",
+      _v:                  "v95",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -385,8 +385,11 @@ serve(async (req) => {
         ot_discovery:    (globalThis as any).__otDiscoveryDebug ?? null,
         ot_cand:         (globalThis as any).__otCandDebug       ?? null,
         ot_restref:      (globalThis as any).__otRestrefDebug    ?? null,
-        ot_verify:       (globalThis as any).__otVerifyDebug    ?? null,
-        ot_yelp_bridge:  (globalThis as any).__yelpOTBridgeDebug ?? null,
+        ot_verify:         (globalThis as any).__otVerifyDebug      ?? null,
+        ot_yelp_bridge:    (globalThis as any).__yelpOTBridgeDebug  ?? null,
+        ot_bridge_count:   bridgeOTForClient.length,
+        client_ot_merged:  clientVerifyOTMerged.length,
+        client_ot_slugs:   clientVerifyOTSlugs.length,
         yelp_api:        (globalThis as any).__yelpApiDebug           ?? null,
         yelp_lambda:     (globalThis as any).__yelpLambdaDebug       ?? null,
         yelp_lambda_fetch: (globalThis as any).__yelpLambdaFetchDebug ?? null,
@@ -3388,9 +3391,9 @@ function filterWindow(slots: TimeSlot[], requestedTime: string): TimeSlot[] {
       if (m[3].toLowerCase() === "am" && h === 12) h = 0;
       return { slot: s, mins: h * 60 + mn };
     })
-    .filter(x => x && Math.abs(x.mins - reqMins) <= 90)
+    .filter(x => x && Math.abs(x.mins - reqMins) <= 120)  // ±2h window; ±90min was cutting too many slots
     .sort((a, b) => Math.abs(a!.mins - reqMins) - Math.abs(b!.mins - reqMins))
-    .slice(0, 5)
+    .slice(0, 6)    // show up to 6 slots (was 5)
     .sort((a, b) => a!.mins - b!.mins)
     .map(x => x!.slot);
 }
