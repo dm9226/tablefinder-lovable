@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v99
+// TableFinder Search Edge Function — v100
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -379,7 +379,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v99",
+      _v:                  "v100",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
@@ -2716,53 +2716,63 @@ async function verifyOTViaBB(
 
 // Direct Yelp SeatMe availability API — called by the widget JS before rendering.
 // Bypasses JS rendering entirely; returns JSON time slots from Deno directly.
+// v100 fix: Yelp time param must be "HHMM" (no colon), e.g. "1900" not "19:00".
 async function verifyYelpViaDirectAPI(r: Restaurant, params: SearchParams): Promise<Restaurant | null> {
   // Accept both /reservations/slug and /biz/slug URL shapes
   const slugM = r.platformUrl.match(/yelp\.com\/(?:reservations\/|biz\/)([^/?#\s]+)/i);
   if (!slugM) return null;
   const slug = slugM[1];
 
-  const url = `https://www.yelp.com/reservations/${slug}/availability?covers=${params.partySize}&date=${params.date}&time=${params.time}`;
-  const ctrl  = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 9000);
-  try {
-    const resp = await fetch(url, {
-      headers: {
-        "User-Agent":        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer":           `https://www.yelp.com/reservations/${slug}`,
-        "Accept":            "application/json",
-        "Accept-Language":   "en-US,en;q=0.9",
-        "X-Requested-With":  "XMLHttpRequest",
-        "x-yelp-request-id": crypto.randomUUID(),
-      },
-      signal: ctrl.signal,
-    });
-    clearTimeout(timer);
-    if (!resp.ok) {
-      (globalThis as any).__yelpApiDebug = `HTTP ${resp.status} for ${r.name}`;
-      console.log(`[Yelp API] ${r.name}: HTTP ${resp.status}`);
-      return null;
+  // Yelp SeatMe widget uses HHMM format (no colon) for the time parameter.
+  const timeNoColon = params.time.replace(":", "");
+
+  const urls = [
+    `https://www.yelp.com/reservations/${slug}/availability?covers=${params.partySize}&date=${params.date}&time=${timeNoColon}`,
+    `https://www.yelp.com/reservations/${slug}/find_booking?covers=${params.partySize}&date=${params.date}&time=${timeNoColon}`,
+  ];
+
+  const headers = {
+    "User-Agent":        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Referer":           `https://www.yelp.com/reservations/${slug}`,
+    "Accept":            "application/json",
+    "Accept-Language":   "en-US,en;q=0.9",
+    "X-Requested-With":  "XMLHttpRequest",
+    "x-yelp-request-id": crypto.randomUUID(),
+  };
+
+  for (const url of urls) {
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 9000);
+    try {
+      const resp = await fetch(url, { headers, signal: ctrl.signal });
+      clearTimeout(timer);
+      const statusInfo = `HTTP ${resp.status} url=${url.split("?")[0].split("/").pop()}`;
+      if (!resp.ok) {
+        (globalThis as any).__yelpApiDebug = ((globalThis as any).__yelpApiDebug ?? "") + `${r.name}:${statusInfo} `;
+        console.log(`[Yelp API] ${r.name}: ${statusInfo}`);
+        continue;
+      }
+      const raw  = await resp.json();
+      const text = JSON.stringify(raw);
+      if (!(globalThis as any).__yelpApiDebug || !(globalThis as any).__yelpApiDebug.includes("200")) {
+        (globalThis as any).__yelpApiDebug = `200ok:${r.name}:${text.substring(0, 300)}`;
+      }
+      const slots    = extractTimes(text);
+      const windowed = filterWindow(slots, params.time);
+      if (windowed.length === 0) {
+        console.log(`[Yelp API] ${r.name}: no slots in window (raw=${text.substring(0, 120)})`);
+        continue;
+      }
+      const base          = `https://www.yelp.com/reservations/${slug}`;
+      const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
+      console.log(`[Yelp API] ${r.name}: ${windowed.length} slots ✓`);
+      return { ...r, timeSlots: slotsWithUrls, softVerified: false };
+    } catch (err: any) {
+      clearTimeout(timer);
+      console.log(`[Yelp API] ${r.name}: ${err?.message}`);
     }
-    const raw  = await resp.json();
-    const text = JSON.stringify(raw);
-    if (!(globalThis as any).__yelpApiDebug) {
-      (globalThis as any).__yelpApiDebug = text.substring(0, 500);
-    }
-    const slots    = extractTimes(text);
-    const windowed = filterWindow(slots, params.time);
-    if (windowed.length === 0) {
-      console.log(`[Yelp API] ${r.name}: no slots (raw=${text.substring(0, 120)})`);
-      return null;
-    }
-    const base          = `https://www.yelp.com/reservations/${slug}`;
-    const slotsWithUrls = windowed.map(s => ({ ...s, url: buildSlotUrl("yelp", base, params, s.time) }));
-    console.log(`[Yelp API] ${r.name}: ${windowed.length} slots ✓`);
-    return { ...r, timeSlots: slotsWithUrls, softVerified: false };
-  } catch (err: any) {
-    clearTimeout(timer);
-    console.log(`[Yelp API] ${r.name}: ${err?.message}`);
-    return null;
   }
+  return null;
 }
 
 async function verifyYelp(r: Restaurant, params: SearchParams, fcKey: string): Promise<Restaurant | null> {
