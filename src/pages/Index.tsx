@@ -138,14 +138,32 @@ const Index = () => {
             if (searchId !== searchIdRef.current) return;
             console.log(`[mergeVerified] ${verified.platform} ${verified.name}: ${verified.timeSlots.length} slots — streaming into results`);
             setResults(prev => {
-              // If this restaurant already exists (e.g. BB returned fake times), replace it
-              // with the browser-side restref result which has real availability data.
-              const alreadyExists = prev.some(r => r.id === verified.id);
-              if (alreadyExists) {
-                // Only replace if we got actual time slots (don't downgrade to empty)
+              // 1. ID-based match: replace same platform entry (e.g. BB placeholder → real restref)
+              const idMatch = prev.some(r => r.id === verified.id);
+              if (idMatch) {
                 if (verified.timeSlots.length === 0) return prev;
                 return prev.map(r => r.id === verified.id ? verified : r);
               }
+
+              // 2. Name-based dedup: same restaurant appearing on multiple platforms.
+              //    e.g. White Bull verified by OT restref AND Yelp SeatMe — keep only the
+              //    entry with more slots; if tied, prefer OT > Yelp > Resy for link quality.
+              const normName = (n: string) => n.toLowerCase().replace(/[^a-z0-9]/g, "");
+              const PLATFORM_PREF: Record<string, number> = { opentable: 3, resy: 2, yelp: 1 };
+              const nameMatch = prev.findIndex(r => normName(r.name) === normName(verified.name));
+              if (nameMatch !== -1) {
+                const existing = prev[nameMatch];
+                // Keep the new one if it has more slots, or equal slots but higher-pref platform
+                const keepNew =
+                  verified.timeSlots.length > existing.timeSlots.length ||
+                  (verified.timeSlots.length === existing.timeSlots.length &&
+                   (PLATFORM_PREF[verified.platform] ?? 0) > (PLATFORM_PREF[existing.platform] ?? 0));
+                if (!keepNew) return prev; // existing is better — discard incoming
+                console.log(`[mergeVerified] name-dedup: replacing ${existing.platform}/${existing.name} with ${verified.platform} (${verified.timeSlots.length} vs ${existing.timeSlots.length} slots)`);
+                return prev.map((r, i) => i === nameMatch ? verified : r);
+              }
+
+              // 3. New restaurant — insert and re-sort by distance then rating
               const merged = [...prev, verified];
               merged.sort((a, b) => {
                 const dA = a.distanceMiles ?? Number.POSITIVE_INFINITY;

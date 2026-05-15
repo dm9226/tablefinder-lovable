@@ -327,37 +327,56 @@ export async function verifyYelpAvailability(
   // Yelp availability endpoint uses colon-free time (e.g. "1900" not "19:00")
   const timeNoColon = time24.replace(":", "");
 
-  try {
-    const url = `https://www.yelp.com/reservations/${slug}/availability?covers=${partySize}&date=${date}&time=${timeNoColon}`;
-    console.log(`[clientVerifyYelp] ${r.name}: fetching ${url}`);
-    const resp = await fetch(url, {
-      headers: {
-        "Accept": "application/json",
-      },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!resp.ok) {
-      console.warn(`[clientVerifyYelp] ${r.name}: HTTP ${resp.status}`);
-      return null;
+  // Two endpoint formats — try both since Yelp/SeatMe has changed URL structure over time.
+  // The SeatMe widget is embedded on restaurant websites (cross-origin by design),
+  // so the CORS policy must allow arbitrary origins for widget embedding to work.
+  const urls = [
+    // Primary: /reservations/{slug}/availability (SeatMe v3 widget endpoint)
+    `https://www.yelp.com/reservations/${slug}/availability?covers=${partySize}&date=${date}&time=${timeNoColon}`,
+    // Fallback: /reservations/{slug}/find_booking (older SeatMe endpoint shape)
+    `https://www.yelp.com/reservations/${slug}/find_booking?covers=${partySize}&date=${date}&time=${timeNoColon}`,
+  ];
+
+  for (const url of urls) {
+    try {
+      console.log(`[clientVerifyYelp] ${r.name}: GET ${url}`);
+      const resp = await fetch(url, {
+        mode: "cors",
+        credentials: "omit",  // no cookies — widget endpoint must work anonymously
+        headers: {
+          "Accept": "application/json, */*",
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+
+      const body = await resp.text();
+      console.log(`[clientVerifyYelp] ${r.name}: HTTP ${resp.status} len=${body.length} sample=${body.slice(0, 150)}`);
+
+      if (!resp.ok || body.length < 10) continue;
+
+      let json: any;
+      try { json = JSON.parse(body); } catch { continue; }
+
+      const text  = JSON.stringify(json);
+      const slots = filterWindow(extractTimes(text), time24);
+      console.log(`[clientVerifyYelp] ${r.name}: ${slots.length} slots in window (keys: ${Object.keys(json).slice(0, 8).join(",")})`);
+      if (slots.length === 0) continue; // try next URL
+
+      const base = `https://www.yelp.com/reservations/${slug}`;
+      return {
+        ...r,
+        timeSlots: slots.map(s => ({
+          ...s,
+          url: buildYelpSlotUrl(base, date, s.time, partySize),
+        })),
+        softVerified: false,
+      };
+    } catch (err) {
+      // Log CORS errors specifically — they show up as TypeError: Failed to fetch
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[clientVerifyYelp] ${r.name}: ${msg.includes("fetch") ? "CORS/network error" : "error"} — ${msg}`);
+      // Continue to next URL
     }
-
-    const json = await resp.json();
-    const text  = JSON.stringify(json);
-    const slots = filterWindow(extractTimes(text), time24);
-    console.log(`[clientVerifyYelp] ${r.name}: ${slots.length} slots in window (raw keys: ${Object.keys(json).join(",")})`);
-    if (slots.length === 0) return null;
-
-    const base = `https://www.yelp.com/reservations/${slug}`;
-    return {
-      ...r,
-      timeSlots: slots.map(s => ({
-        ...s,
-        url: buildYelpSlotUrl(base, date, s.time, partySize),
-      })),
-      softVerified: false,
-    };
-  } catch (err) {
-    console.error(`[clientVerifyYelp] ${r.name}: fetch error —`, err);
-    return null;
   }
+  return null;
 }

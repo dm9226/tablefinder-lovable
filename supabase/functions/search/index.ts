@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v98
+// TableFinder Search Edge Function — v99
 // Platforms: Resy, OpenTable, Yelp
 //
 // Required env vars:
@@ -379,7 +379,7 @@ serve(async (req) => {
         } : null;
       })() : null,
       clientVerifyYelp,
-      _v:                  "v98",
+      _v:                  "v99",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otCands.length, yelp: yelpCands.length },
