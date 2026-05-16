@@ -18,6 +18,11 @@ const DEMO_RESULTS: Restaurant[] = [
   { id: "demo-yelp-leons", name: "Leon's Full Service", cuisine: "American", neighborhood: "Decatur", rating: 4.6, platform: "yelp", platformUrl: "https://www.yelp.com/reservations/leons-full-service-decatur", timeSlots: [{ time: "6:15 PM", url: "https://www.yelp.com/reservations/leons-full-service-decatur" }, { time: "7:30 PM", url: "https://www.yelp.com/reservations/leons-full-service-decatur" }, { time: "8:45 PM", url: "https://www.yelp.com/reservations/leons-full-service-decatur" }], distanceMiles: 3.8, description: "Beloved Decatur neighborhood restaurant with a lively bar scene.", vibeTags: ["Casual", "Lively"] },
   { id: "demo-yelp-deer-dove", name: "The Deer & The Dove", cuisine: "Southern", neighborhood: "Decatur", rating: 4.7, platform: "yelp", platformUrl: "https://www.yelp.com/reservations/the-deer-and-the-dove-decatur", timeSlots: [{ time: "6:00 PM", url: "https://www.yelp.com/reservations/the-deer-and-the-dove-decatur" }, { time: "7:15 PM", url: "https://www.yelp.com/reservations/the-deer-and-the-dove-decatur" }], distanceMiles: 3.4, description: "Southern-inspired small plates in a warm, intimate setting.", vibeTags: ["Date Night", "Romantic"] },
   { id: "demo-sr-canoe", name: "Canoe", cuisine: "American", neighborhood: "Vinings", rating: 4.7, platform: "sevenrooms", platformUrl: "https://www.sevenrooms.com/reservations/canoeatlanta", timeSlots: [{ time: "6:30 PM", url: "https://www.sevenrooms.com/reservations/canoeatlanta" }, { time: "7:00 PM", url: "https://www.sevenrooms.com/reservations/canoeatlanta" }, { time: "8:30 PM", url: "https://www.sevenrooms.com/reservations/canoeatlanta" }], distanceMiles: 11.2, description: "Scenic riverside dining with upscale American cuisine.", vibeTags: ["Romantic", "Outdoor Seating"] },
+  { id: "demo-tock-gunshow", name: "Gunshow", cuisine: "New American", neighborhood: "Glenwood Park", rating: 4.8, platform: "tock", platformUrl: "https://www.exploretock.com/gunshow", timeSlots: [{ time: "5:45 PM", url: "https://www.exploretock.com/gunshow" }, { time: "7:30 PM", url: "https://www.exploretock.com/gunshow" }], distanceMiles: 5.1, description: "Kevin Gillespie's unconventional dim-sum-style New American.", vibeTags: ["Unique Experience", "Chef-Driven"] },
+  { id: "demo-wi-bones", name: "Bones", cuisine: "Steakhouse", neighborhood: "Buckhead", rating: 4.8, platform: "wisely", platformUrl: "https://bones.com/reservations", timeSlots: [{ time: "6:00 PM", url: "https://bones.com/reservations" }, { time: "7:15 PM", url: "https://bones.com/reservations" }, { time: "8:30 PM", url: "https://bones.com/reservations" }], distanceMiles: 9.3, description: "Atlanta's premier power-lunch steakhouse since 1979.", vibeTags: ["Fine Dining", "Business Dining", "Classic"] },
+  { id: "demo-ti-bacchanalia", name: "Bacchanalia", cuisine: "New American", neighborhood: "West Midtown", rating: 4.9, platform: "tablein", platformUrl: "https://starprovisions.com/bacchanalia", timeSlots: [{ time: "6:00 PM", url: "https://starprovisions.com/bacchanalia" }, { time: "8:00 PM", url: "https://starprovisions.com/bacchanalia" }], distanceMiles: 6.4, description: "Atlanta's most celebrated fine dining restaurant.", vibeTags: ["Fine Dining", "Special Occasion", "Tasting Menu"] },
+  { id: "demo-ea-antico", name: "Antico Pizza Napoletana", cuisine: "Italian", neighborhood: "Home Park", rating: 4.7, platform: "eatapp", platformUrl: "https://anticopizza.it", timeSlots: [{ time: "6:30 PM", url: "https://anticopizza.it" }, { time: "7:45 PM", url: "https://anticopizza.it" }, { time: "9:00 PM", url: "https://anticopizza.it" }], distanceMiles: 5.8, description: "Legendary wood-fired Neapolitan pizza in a bustling communal space.", vibeTags: ["Casual", "Lively", "Group Friendly"] },
+  { id: "demo-bk-nikolais", name: "Nikolai's Roof", cuisine: "French", neighborhood: "Downtown", rating: 4.6, platform: "bookatable", platformUrl: "https://www.hilton.com/en/hotels/atlahhh-hilton-atlanta/dining/nikolais-roof/", timeSlots: [{ time: "6:15 PM", url: "https://www.hilton.com/en/hotels/atlahhh-hilton-atlanta/dining/nikolais-roof/" }, { time: "7:30 PM", url: "https://www.hilton.com/en/hotels/atlahhh-hilton-atlanta/dining/nikolais-roof/" }], distanceMiles: 7.2, description: "Elegant rooftop French-continental cuisine with sweeping Atlanta skyline views.", vibeTags: ["Fine Dining", "Views", "Romantic"] },
 ];
 
 const Index = () => {
@@ -279,6 +284,10 @@ const Index = () => {
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-purple-500/15 text-purple-400">Tock</span>
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-orange-500/15 text-orange-400">Yelp</span>
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-blue-500/15 text-blue-400">SevenRooms</span>
+          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-teal-500/15 text-teal-400">Tablein</span>
+          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-amber-500/15 text-amber-400">Wisely</span>
+          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-rose-500/15 text-rose-400">Eat App</span>
+          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-indigo-500/15 text-indigo-400">Bookatable</span>
         </div>
       </header>
 
@@ -308,7 +317,7 @@ const Index = () => {
 
       <footer className="py-6 text-center border-t border-border space-y-2">
         <p className="text-xs text-muted-foreground font-body">
-          Resy · Tock · Yelp · OpenTable
+          Resy · OpenTable · Tock · Yelp · SevenRooms · Tablein · Wisely · Eat App · Bookatable
         </p>
         <nav className="flex justify-center gap-4">
           <Link to="/about" className="text-xs text-muted-foreground hover:text-primary transition-colors font-body">About</Link>
