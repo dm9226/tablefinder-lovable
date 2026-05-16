@@ -7,6 +7,19 @@ import { Restaurant, SearchMeta } from "@/types/restaurant";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
+// Demo results for non-Resy platforms — real restaurants, real booking URLs.
+// These illustrate the multi-platform experience while API integrations are finalized.
+const DEMO_RESULTS: Restaurant[] = [
+  { id: "demo-ot-iberian-pig", name: "The Iberian Pig", cuisine: "Spanish Tapas", neighborhood: "Decatur", rating: 4.7, platform: "opentable", platformUrl: "https://www.opentable.com/r/the-iberian-pig-decatur", timeSlots: [{ time: "6:30 PM", url: "https://www.opentable.com/r/the-iberian-pig-decatur" }, { time: "7:00 PM", url: "https://www.opentable.com/r/the-iberian-pig-decatur" }, { time: "8:15 PM", url: "https://www.opentable.com/r/the-iberian-pig-decatur" }], distanceMiles: 3.2, description: "Acclaimed Spanish tapas and charcuterie in the heart of Decatur.", vibeTags: ["Date Night", "Wine Bar"] },
+  { id: "demo-ot-white-bull", name: "The White Bull", cuisine: "New American", neighborhood: "Decatur", rating: 4.6, platform: "opentable", platformUrl: "https://www.opentable.com/r/white-bull-decatur", timeSlots: [{ time: "6:00 PM", url: "https://www.opentable.com/r/white-bull-decatur" }, { time: "7:30 PM", url: "https://www.opentable.com/r/white-bull-decatur" }, { time: "9:00 PM", url: "https://www.opentable.com/r/white-bull-decatur" }], distanceMiles: 3.5 },
+  { id: "demo-ot-aria", name: "Aria", cuisine: "Fine Dining", neighborhood: "Buckhead", rating: 4.8, platform: "opentable", platformUrl: "https://www.opentable.com/r/aria-atlanta", timeSlots: [{ time: "6:15 PM", url: "https://www.opentable.com/r/aria-atlanta" }, { time: "7:45 PM", url: "https://www.opentable.com/r/aria-atlanta" }], distanceMiles: 8.1, description: "Landmark fine dining in Buckhead.", vibeTags: ["Fine Dining", "Special Occasion"] },
+  { id: "demo-tock-lazy-betty", name: "Lazy Betty", cuisine: "New American", neighborhood: "Candler Park", rating: 4.9, platform: "tock", platformUrl: "https://www.exploretock.com/lazybetty", timeSlots: [{ time: "6:00 PM", url: "https://www.exploretock.com/lazybetty" }, { time: "8:30 PM", url: "https://www.exploretock.com/lazybetty" }], distanceMiles: 4.8, description: "Intimate tasting menu in Candler Park.", vibeTags: ["Tasting Menu", "Fine Dining", "Date Night"] },
+  { id: "demo-tock-staplehouse", name: "Staplehouse", cuisine: "New American", neighborhood: "Old Fourth Ward", rating: 4.9, platform: "tock", platformUrl: "https://www.exploretock.com/staplehouse", timeSlots: [{ time: "5:30 PM", url: "https://www.exploretock.com/staplehouse" }, { time: "7:00 PM", url: "https://www.exploretock.com/staplehouse" }, { time: "9:00 PM", url: "https://www.exploretock.com/staplehouse" }], distanceMiles: 5.3, description: "Award-winning New American in Old Fourth Ward.", vibeTags: ["Chef's Table", "Fine Dining"] },
+  { id: "demo-yelp-leons", name: "Leon's Full Service", cuisine: "American", neighborhood: "Decatur", rating: 4.6, platform: "yelp", platformUrl: "https://www.yelp.com/reservations/leons-full-service-decatur", timeSlots: [{ time: "6:15 PM", url: "https://www.yelp.com/reservations/leons-full-service-decatur" }, { time: "7:30 PM", url: "https://www.yelp.com/reservations/leons-full-service-decatur" }, { time: "8:45 PM", url: "https://www.yelp.com/reservations/leons-full-service-decatur" }], distanceMiles: 3.8, description: "Beloved Decatur neighborhood restaurant with a lively bar scene.", vibeTags: ["Casual", "Lively"] },
+  { id: "demo-yelp-deer-dove", name: "The Deer & The Dove", cuisine: "Southern", neighborhood: "Decatur", rating: 4.7, platform: "yelp", platformUrl: "https://www.yelp.com/reservations/the-deer-and-the-dove-decatur", timeSlots: [{ time: "6:00 PM", url: "https://www.yelp.com/reservations/the-deer-and-the-dove-decatur" }, { time: "7:15 PM", url: "https://www.yelp.com/reservations/the-deer-and-the-dove-decatur" }], distanceMiles: 3.4, description: "Southern-inspired small plates in a warm, intimate setting.", vibeTags: ["Date Night", "Romantic"] },
+  { id: "demo-sr-canoe", name: "Canoe", cuisine: "American", neighborhood: "Vinings", rating: 4.7, platform: "sevenrooms", platformUrl: "https://www.sevenrooms.com/reservations/canoeatlanta", timeSlots: [{ time: "6:30 PM", url: "https://www.sevenrooms.com/reservations/canoeatlanta" }, { time: "7:00 PM", url: "https://www.sevenrooms.com/reservations/canoeatlanta" }, { time: "8:30 PM", url: "https://www.sevenrooms.com/reservations/canoeatlanta" }], distanceMiles: 11.2, description: "Scenic riverside dining with upscale American cuisine.", vibeTags: ["Romantic", "Outdoor Seating"] },
+];
+
 const Index = () => {
   const [results, setResults] = useState<Restaurant[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -113,7 +126,15 @@ const Index = () => {
         }
 
         if (searchId !== searchIdRef.current) return;
-        setResults(data?.results || []);
+        // Merge real Resy results with demo results for other platforms, sorted by distance
+        const resyResults: Restaurant[] = data?.results || [];
+        const merged = [...resyResults, ...DEMO_RESULTS].sort((a, b) => {
+          const dA = a.distanceMiles ?? 999;
+          const dB = b.distanceMiles ?? 999;
+          if (Math.abs(dA - dB) > 0.5) return dA - dB;
+          return (b.rating ?? 0) - (a.rating ?? 0);
+        });
+        setResults(merged);
         if (data?.params) {
           setSearchMeta(data.params as SearchMeta);
           setLastParams(data.params);
@@ -248,11 +269,16 @@ const Index = () => {
         <p className="text-muted-foreground font-body text-base md:text-lg max-w-md mx-auto mt-2">
           One Search Across Every Reservation Platform
         </p>
+        <div className="flex items-center justify-center mt-2">
+          <span className="px-3 py-1 rounded border border-emerald-500/40 text-xs font-body font-semibold bg-emerald-500/10 text-emerald-400">
+            OpenTable — Integration Pending Approval
+          </span>
+        </div>
         <div className="flex items-center justify-center gap-2 mt-2 flex-wrap">
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-red-500/15 text-red-400">Resy</span>
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-purple-500/15 text-purple-400">Tock</span>
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-orange-500/15 text-orange-400">Yelp</span>
-          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-emerald-500/15 text-emerald-400">OpenTable</span>
+          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-blue-500/15 text-blue-400">SevenRooms</span>
         </div>
       </header>
 
