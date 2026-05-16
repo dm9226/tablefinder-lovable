@@ -206,7 +206,7 @@ const Index = () => {
     <div className="h-screen bg-background flex flex-col overflow-hidden">
       <Helmet>
         <title>TableFinder — Find Resy Restaurant Reservations Near You</title>
-        <meta name="description" content="Search OpenTable and Resy reservations with natural language. Find available tables near you instantly — powered by OpenTable." />
+        <meta name="description" content="Search Resy, Tock, Yelp, and OpenTable reservations in one place. Find available tables near you with natural language search." />
         <link rel="canonical" href="https://tablefinder.ai/" />
         <script type="application/ld+json">{JSON.stringify({
           "@context": "https://schema.org",
@@ -246,11 +246,13 @@ const Index = () => {
           </h1>
         </Link>
         <p className="text-muted-foreground font-body text-base md:text-lg max-w-md mx-auto mt-2">
-          Natural Language Search for OpenTable &amp; Resy Reservations
+          One Search Across Every Reservation Platform
         </p>
-        <div className="flex items-center justify-center gap-2 mt-2">
-          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-emerald-500/15 text-emerald-400">OpenTable</span>
+        <div className="flex items-center justify-center gap-2 mt-2 flex-wrap">
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-red-500/15 text-red-400">Resy</span>
+          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-purple-500/15 text-purple-400">Tock</span>
+          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-orange-500/15 text-orange-400">Yelp</span>
+          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-emerald-500/15 text-emerald-400">OpenTable</span>
         </div>
       </header>
 
@@ -280,7 +282,7 @@ const Index = () => {
 
       <footer className="py-6 text-center border-t border-border space-y-2">
         <p className="text-xs text-muted-foreground font-body">
-          Powered by OpenTable &amp; Resy
+          Resy · Tock · Yelp · OpenTable
         </p>
         <nav className="flex justify-center gap-4">
           <Link to="/about" className="text-xs text-muted-foreground hover:text-primary transition-colors font-body">About</Link>
