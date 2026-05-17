@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v107
+// TableFinder Search Edge Function — v108
 // Platforms: Resy (live) + OpenTable/Tock/Yelp/SevenRooms (pending — discovery only)
 //
 // Required env vars:
@@ -84,6 +84,7 @@ serve(async (req) => {
     const AI_KEY         = Deno.env.get("LOVABLE_API_KEY") ?? "";
     const SCRAPER_URL    = Deno.env.get("SCRAPER_LAMBDA_URL") ?? "";
     const SCRAPER_SECRET = Deno.env.get("SCRAPER_SECRET") ?? "";
+    const SERPER_KEY     = Deno.env.get("SERPER_API_KEY") ?? "";
 
     if (body.extended === true) {
       const extra = await runExtendedSearch(body, FIRECRAWL, AI_KEY, SCRAPER_URL, SCRAPER_SECRET);
@@ -118,11 +119,11 @@ serve(async (req) => {
         }
         return [];
       }, DISCOVER_MS),
-      abortableDiscover(() => discoverPlatformPending("opentable", params, FIRECRAWL), DISCOVER_MS),
-      abortableDiscover(() => discoverPlatformPending("tock",      params, FIRECRAWL), DISCOVER_MS),
-      abortableDiscover(() => discoverPlatformPending("yelp",      params, FIRECRAWL), DISCOVER_MS),
-      abortableDiscover(() => discoverPlatformPending("sevenrooms", params, FIRECRAWL), DISCOVER_MS),
-      abortableDiscover(() => discoverPlatformPending("thefork",    params, FIRECRAWL), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("opentable",  params, FIRECRAWL, SERPER_KEY), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("tock",       params, FIRECRAWL, SERPER_KEY), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("yelp",       params, FIRECRAWL, SERPER_KEY), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("sevenrooms", params, FIRECRAWL, SERPER_KEY), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("thefork",    params, FIRECRAWL, SERPER_KEY), DISCOVER_MS),
     ]);
 
     console.log(`[discovery] resy=${resyCands.length} ot=${otPendingCands.length} tock=${tockPendingCands.length} yelp=${yelpPendingCands.length} sr=${srPendingCands.length} tf=${tfPendingCands.length} at ${Date.now()-start}ms`);
@@ -184,7 +185,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v107-ot-name-cleanup",
+      _v:                  "v108-serper-discovery",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otPendingCands.length, tock: tockPendingCands.length, yelp: yelpPendingCands.length, sr: srPendingCands.length, tf: tfPendingCands.length },
@@ -654,11 +655,73 @@ async function discoverResyViaBB(
   }
 }
 
+// ─── SERPER (GOOGLE SEARCH API) ──────────────────────────────────────────────
+
+async function serperSearch(
+  query: string, serperKey: string, num = 10,
+): Promise<Array<{ title: string; link: string; snippet: string }>> {
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8_000);
+  try {
+    const resp = await fetch("https://google.serper.dev/search", {
+      method:  "POST",
+      headers: { "X-API-KEY": serperKey, "Content-Type": "application/json" },
+      signal:  ctrl.signal,
+      body:    JSON.stringify({ q: query, num }),
+    });
+    clearTimeout(timer);
+    if (!resp.ok) { console.warn(`[serper] HTTP ${resp.status} for "${query.slice(0, 60)}"`); return []; }
+    const data = await resp.json();
+    return (data.organic ?? []) as Array<{ title: string; link: string; snippet: string }>;
+  } catch (err: any) {
+    clearTimeout(timer);
+    console.warn(`[serper] "${query.slice(0, 60)}": ${err?.message}`);
+    return [];
+  }
+}
+
+function serperItemsToRestaurants(
+  items: Array<{ title: string; link: string; snippet: string }>,
+  platform: string,
+  urlRe: RegExp,
+  skipSlugs: Set<string>,
+  params: SearchParams,
+): Restaurant[] {
+  const results: Restaurant[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const url = (item.link ?? "").split("?")[0];
+    const m   = url.match(urlRe);
+    if (!m) continue;
+    const slug = (m[m.length - 1] ?? "").toLowerCase().replace(/\/$/, "");
+    if (!slug || slug.length < 2 || seen.has(slug) || skipSlugs.has(slug)) continue;
+    seen.add(slug);
+    const name = cleanTitle(item.title, url, platform);
+    if (!name || name.length < 2) continue;
+    const descCuisine = (item.snippet ?? "").match(
+      /\b(italian|french|american|japanese|mexican|chinese|indian|thai|seafood|steakhouse|pizza|sushi|mediterranean|spanish|greek|korean|vietnamese|barbecue|burgers?|farm.to.table)\b/i
+    )?.[1];
+    results.push({
+      id:                  `${platform}-${slug}`,
+      name,
+      cuisine:             params.cuisine || descCuisine || "Restaurant",
+      neighborhood:        extractNeighborhood(item.title, item.snippet),
+      platform,
+      platformUrl:         url,
+      timeSlots:           [],
+      distanceMiles:       null,
+      availabilityPending: true,
+      softVerified:        true,
+    } as Restaurant);
+    if (results.length >= 10) break;
+  }
+  return results;
+}
+
 // ─── MULTI-PLATFORM PENDING DISCOVERY ────────────────────────────────────────
-// Scrapes each platform's own search/discovery page directly using Firecrawl's
-// scrape endpoint (not the search API, which returned 0 results for all queries).
-// No verification or time slots — returned with availabilityPending:true so the
-// UI shows "Book on [Platform] →" instead of times.
+// Uses Serper (Google Search API) when available — real Google index guarantees
+// actual restaurant pages exist for every major city.
+// Falls back to Firecrawl scrape if no Serper key.
 
 async function firecrawlScrapeMd(
   url: string, fcKey: string, waitFor = 3000, timeoutMs = 12000,
@@ -725,99 +788,86 @@ function extractPendingFromMd(
 }
 
 async function discoverPlatformPending(
-  platform: string, params: SearchParams, fcKey: string,
+  platform: string, params: SearchParams, fcKey: string, serperKey = "",
 ): Promise<Restaurant[]> {
-  if (!fcKey) return [];
   try {
-    const city  = params.city;
-    const state = params.state || "";
-    const loc   = encodeURIComponent(`${city}${state ? `, ${state}` : ""}`);
+    const city    = params.city;
+    const state   = params.state || "";
+    const loc     = `${city}${state ? `, ${state}` : ""}`;
+    const cuisine = params.cuisine ? `${params.cuisine} ` : "";
+
+    // ── Serper (Google Search API) — preferred when key is available ───────
+    if (serperKey) {
+      const CONFIGS: Record<string, { query: string; urlRe: RegExp; skip: Set<string> }> = {
+        opentable:  {
+          query: `${cuisine}restaurants ${loc} site:opentable.com/r`,
+          urlRe: /opentable\.com(?:\/[a-z]{2})?\/r\/([\w-]+)/i,
+          skip:  new Set(["search","home","login","signup","blog","press","about","careers","gift-cards","help","contact","privacy","terms","partners","for-restaurants"]),
+        },
+        tock: {
+          query: `${cuisine}restaurants ${loc} site:exploretock.com`,
+          urlRe: /exploretock\.com\/([\w-]+)/i,
+          skip:  new Set(["search","login","signup","blog","about","careers","help","contact","privacy","terms","gift-cards","experiences","home","explore","discover","find"]),
+        },
+        yelp: {
+          query: `${cuisine}restaurants ${loc} reservations site:yelp.com/biz`,
+          urlRe: /yelp\.com\/biz\/([\w-]+)/i,
+          skip:  new Set(["biz-owner","biz-success","writeareview","mobile","home","search","about","careers","help","contact","privacy","terms","business","advertise"]),
+        },
+        sevenrooms: {
+          query: `${cuisine}restaurants ${loc} site:sevenrooms.com/reservations`,
+          urlRe: /sevenrooms\.com\/reservations\/([\w-]+)/i,
+          skip:  new Set(["search","login","signup","about","careers","help","contact","privacy","terms","demo"]),
+        },
+        thefork: {
+          query: `${cuisine}restaurants ${loc} site:thefork.com/restaurant`,
+          urlRe: /thefork\.com\/restaurant\/([\w-]+)/i,
+          skip:  new Set(["search","login","signup","about","careers","help","contact","privacy","terms","blog","press"]),
+        },
+      };
+      const cfg = CONFIGS[platform];
+      if (!cfg) return [];
+      const items   = await serperSearch(cfg.query, serperKey, 10);
+      const results = serperItemsToRestaurants(items, platform, cfg.urlRe, cfg.skip, params);
+      console.log(`[${platform} pending/serper] ${results.length} for ${city}`);
+      return results;
+    }
+
+    // ── Firecrawl scrape fallback (no Serper key) ──────────────────────────
+    if (!fcKey) return [];
+    const locEnc = encodeURIComponent(loc);
 
     switch (platform) {
-
       case "yelp": {
-        // Yelp search is largely server-rendered — high scrape success rate.
         const desc = encodeURIComponent(params.cuisine ? `${params.cuisine} restaurants` : "restaurants");
-        const url  = `https://www.yelp.com/search?find_desc=${desc}&find_loc=${loc}&attrs=RestaurantsReservations&sortby=recommended`;
+        const url  = `https://www.yelp.com/search?find_desc=${desc}&find_loc=${locEnc}&attrs=RestaurantsReservations&sortby=recommended`;
         const md   = await firecrawlScrapeMd(url, fcKey, 3000, 12000);
-        if (md.length < 100) { console.log(`[yelp pending] empty scrape (${md.length} chars)`); return []; }
+        if (md.length < 100) { console.log(`[yelp pending] empty scrape`); return []; }
         const YELP_SKIP = new Set(["biz-owner","biz-success","writeareview","mobile","home","search","about","careers","help","contact","privacy","terms","business","advertise","collections"]);
         const results   = extractPendingFromMd(md, /yelp\.com\/biz\/([\w-]+)/i, "yelp", YELP_SKIP, params);
-        console.log(`[yelp pending] ${results.length} restaurants for ${city} (md=${md.length})`);
+        console.log(`[yelp pending/scrape] ${results.length} for ${city}`);
         return results;
       }
-
       case "opentable": {
-        // OT search is a React SPA; Akamai may block — fails gracefully if so.
         const dt  = `${params.date}T${params.time}`;
-        const url = `https://www.opentable.com/s/?covers=${params.partySize}&dateTime=${encodeURIComponent(dt)}&term=${loc}`;
+        const url = `https://www.opentable.com/s/?covers=${params.partySize}&dateTime=${encodeURIComponent(dt)}&term=${locEnc}`;
         const md  = await firecrawlScrapeMd(url, fcKey, 5000, 15000);
-        if (md.length < 100) { console.log(`[opentable pending] empty scrape (likely blocked, ${md.length} chars)`); return []; }
+        if (md.length < 100) { console.log(`[opentable pending] empty scrape`); return []; }
         const OT_SKIP = new Set(["search","home","login","signup","blog","press","about","careers","gift-cards","help","contact","privacy","terms","partners","for-restaurants"]);
         const results  = extractPendingFromMd(md, /opentable\.com(?:\/[a-z]{2})?\/r\/([\w-]+)/i, "opentable", OT_SKIP, params);
-        console.log(`[opentable pending] ${results.length} restaurants for ${city} (md=${md.length})`);
+        console.log(`[opentable pending/scrape] ${results.length} for ${city}`);
         return results;
       }
-
       case "tock": {
         const q   = encodeURIComponent(`${city}${state ? ` ${state}` : ""}`);
         const url = `https://exploretock.com/search?q=${q}&type=restaurant`;
         const md  = await firecrawlScrapeMd(url, fcKey, 4000, 12000);
-        if (md.length < 100) { console.log(`[tock pending] empty scrape (${md.length} chars)`); return []; }
+        if (md.length < 100) { console.log(`[tock pending] empty scrape`); return []; }
         const TOCK_SKIP = new Set(["search","login","signup","blog","about","careers","help","contact","privacy","terms","gift-cards","experiences","home","explore","discover","find","type"]);
         const results   = extractPendingFromMd(md, /exploretock\.com\/([\w-]+)/i, "tock", TOCK_SKIP, params);
-        console.log(`[tock pending] ${results.length} restaurants for ${city} (md=${md.length})`);
+        console.log(`[tock pending/scrape] ${results.length} for ${city}`);
         return results;
       }
-
-      case "sevenrooms": {
-        // SevenRooms has no public search page — fall back to web search.
-        const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
-        const items = await firecrawlSearch([
-          `site:sevenrooms.com/reservations ${city}${state ? ` ${state}` : ""}${cuisine}`,
-          `sevenrooms.com/reservations ${city}${state ? ` ${state}` : ""} restaurant dinner`,
-        ], fcKey, 8);
-        const SR_SKIP = new Set(["search","login","signup","about","careers","help","contact","privacy","terms","demo"]);
-        return items.map(fc => {
-          const url = (fc.url ?? "").split("?")[0];
-          const m   = url.match(/sevenrooms\.com\/reservations\/([\w-]+)/i);
-          if (!m) return null;
-          const slug = m[1].toLowerCase();
-          if (SR_SKIP.has(slug)) return null;
-          const name = cleanTitle(fc.title, url, "sevenrooms");
-          if (!name || name.length < 2) return null;
-          return { id: `sevenrooms-${slug}`, name, cuisine: params.cuisine || "Restaurant",
-            neighborhood: extractNeighborhood(fc.title, fc.description),
-            platform: "sevenrooms", platformUrl: url,
-            timeSlots: [], distanceMiles: null, availabilityPending: true, softVerified: true,
-          } as Restaurant;
-        }).filter(Boolean) as Restaurant[];
-      }
-
-      case "thefork": {
-        // TheFork uses opaque numeric city IDs — fall back to web search.
-        const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
-        const items = await firecrawlSearch([
-          `site:thefork.com/restaurant ${city}${state ? ` ${state}` : ""}${cuisine}`,
-          `thefork.com restaurant ${city}${state ? ` ${state}` : ""} reservation`,
-        ], fcKey, 8);
-        const TF_SKIP = new Set(["search","login","signup","about","careers","help","contact","privacy","terms","blog","press"]);
-        return items.map(fc => {
-          const url = (fc.url ?? "").split("?")[0];
-          const m   = url.match(/thefork\.com\/restaurant\/([\w-]+)/i);
-          if (!m) return null;
-          const slug = m[1].toLowerCase();
-          if (TF_SKIP.has(slug)) return null;
-          const name = cleanTitle(fc.title, url, "thefork");
-          if (!name || name.length < 2) return null;
-          return { id: `thefork-${slug}`, name, cuisine: params.cuisine || "Restaurant",
-            neighborhood: extractNeighborhood(fc.title, fc.description),
-            platform: "thefork", platformUrl: url,
-            timeSlots: [], distanceMiles: null, availabilityPending: true, softVerified: true,
-          } as Restaurant;
-        }).filter(Boolean) as Restaurant[];
-      }
-
       default: return [];
     }
   } catch (err: any) {
