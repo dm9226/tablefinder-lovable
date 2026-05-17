@@ -260,10 +260,7 @@ const Index = () => {
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-purple-500/15 text-purple-400">Tock</span>
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-orange-500/15 text-orange-400">Yelp</span>
           <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-blue-500/15 text-blue-400">SevenRooms</span>
-          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-teal-500/15 text-teal-400">Tablein</span>
-          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-amber-500/15 text-amber-400">Wisely</span>
-          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-rose-500/15 text-rose-400">Eat App</span>
-          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-indigo-500/15 text-indigo-400">Bookatable</span>
+          <span className="px-2 py-0.5 rounded text-xs font-body font-semibold bg-lime-500/15 text-lime-400">TheFork</span>
         </div>
       </header>
 
@@ -293,7 +290,7 @@ const Index = () => {
 
       <footer className="py-6 text-center border-t border-border space-y-2">
         <p className="text-xs text-muted-foreground font-body">
-          Resy · OpenTable · Tock · Yelp · SevenRooms · Tablein · Wisely · Eat App · Bookatable
+          Resy · OpenTable · Tock · Yelp · SevenRooms · TheFork
         </p>
         <nav className="flex justify-center gap-4">
           <Link to="/about" className="text-xs text-muted-foreground hover:text-primary transition-colors font-body">About</Link>

@@ -99,7 +99,7 @@ serve(async (req) => {
     console.log(`[params] ${JSON.stringify(params)}`);
 
     // ── Discovery (all platforms in parallel) ─────────────────────────────────
-    const [resyCands, otPendingCands, tockPendingCands, yelpPendingCands, srPendingCands] = await Promise.all([
+    const [resyCands, otPendingCands, tockPendingCands, yelpPendingCands, srPendingCands, tfPendingCands] = await Promise.all([
       abortableDiscover(async () => {
         const apiResults = await discoverResyViaAPI(params);
         if (apiResults.length > 0) {
@@ -121,10 +121,11 @@ serve(async (req) => {
       abortableDiscover(() => discoverPlatformPending("opentable", params, FIRECRAWL), DISCOVER_MS),
       abortableDiscover(() => discoverPlatformPending("tock",      params, FIRECRAWL), DISCOVER_MS),
       abortableDiscover(() => discoverPlatformPending("yelp",      params, FIRECRAWL), DISCOVER_MS),
-      abortableDiscover(() => discoverPlatformPending("sevenrooms",params, FIRECRAWL), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("sevenrooms", params, FIRECRAWL), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("thefork",    params, FIRECRAWL), DISCOVER_MS),
     ]);
 
-    console.log(`[discovery] resy=${resyCands.length} ot=${otPendingCands.length} tock=${tockPendingCands.length} yelp=${yelpPendingCands.length} sr=${srPendingCands.length} at ${Date.now()-start}ms`);
+    console.log(`[discovery] resy=${resyCands.length} ot=${otPendingCands.length} tock=${tockPendingCands.length} yelp=${yelpPendingCands.length} sr=${srPendingCands.length} tf=${tfPendingCands.length} at ${Date.now()-start}ms`);
 
     const resySlice = resyCands.slice(0, 20);
 
@@ -139,8 +140,8 @@ serve(async (req) => {
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
     const allPending = dedup([
-      ...otPendingCands, ...tockPendingCands, ...yelpPendingCands, ...srPendingCands,
-    ]).slice(0, 20);
+      ...otPendingCands, ...tockPendingCands, ...yelpPendingCands, ...srPendingCands, ...tfPendingCands,
+    ]).slice(0, 24);
 
     const [ranked, pendingRanked] = await Promise.all([
       withTimeout(geocodeAndRank(verified, params), GEOCODE_MS, verified),
@@ -186,7 +187,7 @@ serve(async (req) => {
       _v:                  "v105-resy-live-all-pending",
       _debug: {
         elapsed_ms:      elapsed,
-        discovery:       { resy: resyCands.length, ot: otPendingCands.length, tock: tockPendingCands.length, yelp: yelpPendingCands.length, sr: srPendingCands.length },
+        discovery:       { resy: resyCands.length, ot: otPendingCands.length, tock: tockPendingCands.length, yelp: yelpPendingCands.length, sr: srPendingCands.length, tf: tfPendingCands.length },
         verified:        { resy: resyVer.length, pending: pendingFiltered.length },
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
         resy_api:        (globalThis as any).__resyApiDebug ?? null,
@@ -696,6 +697,15 @@ const PLATFORM_CONFIGS: Record<string, {
     urlPattern: /sevenrooms\.com\/reservations\/([^/?#\s]+)/i,
     slugIndex: 1,
     skip: new Set(["search","login","signup","about","careers","help","contact","privacy","terms","demo"]),
+  },
+  thefork: {
+    queries: (city, state, cuisine) => [
+      `site:thefork.com/restaurant ${city}${state}${cuisine} restaurant`,
+      `site:thefork.com/restaurant ${city}${state} dinner restaurant`,
+    ],
+    urlPattern: /thefork\.com\/restaurant\/([^/?#\s]+)/i,
+    slugIndex: 1,
+    skip: new Set(["search","login","signup","about","careers","help","contact","privacy","terms","blog","press"]),
   },
 };
 

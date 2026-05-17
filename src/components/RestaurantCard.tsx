@@ -8,10 +8,7 @@ const PLATFORM_STYLES: Record<string, string> = {
   yelp:       "bg-orange-500/15 text-orange-400",
   sevenrooms: "bg-blue-500/15 text-blue-400",
   tablein:    "bg-teal-500/15 text-teal-400",
-  quandoo:    "bg-cyan-500/15 text-cyan-400",
-  wisely:     "bg-amber-500/15 text-amber-400",
-  eatapp:     "bg-rose-500/15 text-rose-400",
-  bookatable: "bg-indigo-500/15 text-indigo-400",
+  thefork:    "bg-lime-500/15 text-lime-400",
 };
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -21,10 +18,7 @@ const PLATFORM_LABELS: Record<string, string> = {
   yelp:       "Yelp",
   sevenrooms: "SevenRooms",
   tablein:    "Tablein",
-  quandoo:    "Quandoo",
-  wisely:     "Wisely",
-  eatapp:     "Eat App",
-  bookatable: "Bookatable",
+  thefork:    "TheFork",
 };
 
 interface RestaurantCardProps {
