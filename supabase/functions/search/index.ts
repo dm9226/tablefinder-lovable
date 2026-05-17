@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v106
+// TableFinder Search Edge Function — v107
 // Platforms: Resy (live) + OpenTable/Tock/Yelp/SevenRooms (pending — discovery only)
 //
 // Required env vars:
@@ -184,7 +184,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v106-scrape-based-pending",
+      _v:                  "v107-ot-name-cleanup",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otPendingCands.length, tock: tockPendingCands.length, yelp: yelpPendingCands.length, sr: srPendingCands.length, tf: tfPendingCands.length },
@@ -1254,6 +1254,8 @@ function addResyParams(base: string, p: SearchParams): string {
 function cleanTitle(title: string | undefined, url: string, platform: string): string {
   if (title) {
     let t = title
+      .replace(/^View\s+/i, "")                                              // OT: "View Duke's Seafood" → "Duke's Seafood"
+      .replace(/\s+restaurant\s+details?\s*$/i, "")                          // OT: "Momiji Capitol Hill restaurant details" → "Momiji Capitol Hill"
       .replace(/\s*[|–-]\s*(Resy|OpenTable|Yelp).*$/i, "")
       .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "")
       .replace(/\s+on\s+(OpenTable|Resy|Yelp)$/i, "")
