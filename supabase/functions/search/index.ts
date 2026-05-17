@@ -667,8 +667,8 @@ const PLATFORM_CONFIGS: Record<string, {
 }> = {
   opentable: {
     queries: (city, state, cuisine) => [
-      `site:opentable.com ${city}${state}${cuisine} restaurant reservation`,
-      `site:opentable.com ${city}${state} dinner restaurant`,
+      `opentable.com/r ${city}${state}${cuisine} restaurant reservation`,
+      `opentable.com/r ${city}${state} dinner restaurant book table`,
     ],
     urlPattern: /opentable\.com(?:\/[a-z]{2})?\/r\/([^/?#\s]+)/i,
     slugIndex: 1,
@@ -676,8 +676,8 @@ const PLATFORM_CONFIGS: Record<string, {
   },
   tock: {
     queries: (city, state, cuisine) => [
-      `site:exploretock.com ${city}${state}${cuisine} restaurant reservation`,
-      `site:exploretock.com ${city}${state} restaurant dinner`,
+      `exploretock.com ${city}${state}${cuisine} restaurant reservation`,
+      `exploretock.com ${city}${state} dinner restaurant book`,
     ],
     urlPattern: /exploretock\.com\/([^/?#\s]+)/i,
     slugIndex: 1,
@@ -685,8 +685,8 @@ const PLATFORM_CONFIGS: Record<string, {
   },
   yelp: {
     queries: (city, state, cuisine) => [
-      `site:yelp.com ${city}${state}${cuisine} restaurant reservations`,
-      `site:yelp.com ${city}${state} dinner restaurant make a reservation`,
+      `yelp.com/reservations ${city}${state}${cuisine} restaurant`,
+      `yelp.com/reservations ${city}${state} dinner restaurant`,
     ],
     urlPattern: /yelp\.com\/reservations\/([^/?#\s]+)/i,
     slugIndex: 1,
@@ -694,8 +694,8 @@ const PLATFORM_CONFIGS: Record<string, {
   },
   sevenrooms: {
     queries: (city, state, cuisine) => [
-      `site:sevenrooms.com ${city}${state}${cuisine} restaurant reservation`,
-      `site:sevenrooms.com ${city}${state} dinner restaurant`,
+      `sevenrooms.com/reservations ${city}${state}${cuisine} restaurant`,
+      `sevenrooms.com/reservations ${city}${state} dinner restaurant`,
     ],
     urlPattern: /sevenrooms\.com\/reservations\/([^/?#\s]+)/i,
     slugIndex: 1,
@@ -703,8 +703,8 @@ const PLATFORM_CONFIGS: Record<string, {
   },
   thefork: {
     queries: (city, state, cuisine) => [
-      `site:thefork.com ${city}${state}${cuisine} restaurant reservation`,
-      `site:thefork.com ${city}${state} dinner restaurant`,
+      `thefork.com/restaurant ${city}${state}${cuisine} restaurant reservation`,
+      `thefork.com/restaurant ${city}${state} dinner restaurant`,
     ],
     urlPattern: /thefork\.com\/restaurant\/([^/?#\s]+)/i,
     slugIndex: 1,
