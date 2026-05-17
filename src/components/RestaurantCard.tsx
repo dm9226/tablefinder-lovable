@@ -123,8 +123,8 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
           </div>
         )}
 
-        {/* Time slots (up to 5) — each links to booking page with that specific time */}
-        {slots.length > 0 && (
+        {/* Time slots or pending state */}
+        {slots.length > 0 ? (
           <div className="flex items-center gap-1.5 flex-wrap">
             <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
             {slots.slice(0, 6).map((slot, i) => (
@@ -141,7 +141,22 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
               </a>
             ))}
           </div>
-        )}
+        ) : restaurant.availabilityPending ? (
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-muted-foreground/70 font-body italic">
+              Live availability pending API integration —
+            </span>
+            <a
+              href={restaurant.platformUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs font-body font-medium text-emerald-400 hover:text-emerald-300 transition-colors"
+              onClick={(e) => e.stopPropagation()}
+            >
+              Book on OpenTable →
+            </a>
+          </div>
+        ) : null}
 
       </div>
     </div>

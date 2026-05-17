@@ -21,6 +21,7 @@ export interface Restaurant {
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
   softVerified?: boolean;
+  availabilityPending?: boolean;
   _lat?: number;
   _lng?: number;
 }

@@ -1,5 +1,5 @@
-// TableFinder Search Edge Function — v103
-// Platforms: Resy only
+// TableFinder Search Edge Function — v104
+// Platforms: Resy (live) + OpenTable (pending — discovery only, no time slots)
 //
 // Required env vars:
 //   FIRECRAWL_API_KEY
@@ -46,11 +46,12 @@ interface Restaurant {
   priceRange?: string;
   description?: string;
   vibeTags?: string[];
-  platform: "resy";
+  platform: string;
   platformUrl: string;
   timeSlots: TimeSlot[];
   distanceMiles?: number | null;
   softVerified?: boolean;
+  availabilityPending?: boolean;
   _lat?: number; _lng?: number;
   _slug?: string;
   _preVerified?: boolean;
@@ -97,29 +98,31 @@ serve(async (req) => {
     );
     console.log(`[params] ${JSON.stringify(params)}`);
 
-    // ── Discovery ─────────────────────────────────────────────────────────────
-    const resyCands = await abortableDiscover(async () => {
-      const apiResults = await discoverResyViaAPI(params);
-      if (apiResults.length > 0) {
-        console.log(`[Resy] API returned ${apiResults.length} pre-verified venues`);
-        return apiResults;
-      }
-      // Tier 2: Firecrawl Google search — works when the API key is rotated/blocked
-      console.log("[Resy] API returned 0 — falling back to Firecrawl");
-      const fcResults = await discoverResy(params, FIRECRAWL);
-      if (fcResults.length > 0) {
-        console.log(`[Resy] Firecrawl returned ${fcResults.length} venues`);
-        return fcResults;
-      }
-      // Tier 3: Lambda real-browser — renders the Resy SPA and extracts venue links
-      if (SCRAPER_URL && SCRAPER_SECRET) {
-        console.log("[Resy] Firecrawl returned 0 — falling back to Lambda browser");
-        return discoverResyViaBB(params, SCRAPER_URL, SCRAPER_SECRET);
-      }
-      return [];
-    }, DISCOVER_MS);
+    // ── Discovery (Resy + OT pending run in parallel) ─────────────────────────
+    const [resyCands, otPendingCands] = await Promise.all([
+      abortableDiscover(async () => {
+        const apiResults = await discoverResyViaAPI(params);
+        if (apiResults.length > 0) {
+          console.log(`[Resy] API returned ${apiResults.length} pre-verified venues`);
+          return apiResults;
+        }
+        console.log("[Resy] API returned 0 — falling back to Firecrawl");
+        const fcResults = await discoverResy(params, FIRECRAWL);
+        if (fcResults.length > 0) {
+          console.log(`[Resy] Firecrawl returned ${fcResults.length} venues`);
+          return fcResults;
+        }
+        if (SCRAPER_URL && SCRAPER_SECRET) {
+          console.log("[Resy] Firecrawl returned 0 — falling back to Lambda browser");
+          return discoverResyViaBB(params, SCRAPER_URL, SCRAPER_SECRET);
+        }
+        return [];
+      }, DISCOVER_MS),
+      // OT: discover real restaurants in the searched city — no time slots, just names + links
+      abortableDiscover(() => discoverOTPending(params, FIRECRAWL), DISCOVER_MS),
+    ]);
 
-    console.log(`[discovery] resy=${resyCands.length} at ${Date.now()-start}ms`);
+    console.log(`[discovery] resy=${resyCands.length} ot_pending=${otPendingCands.length} at ${Date.now()-start}ms`);
 
     const resySlice = resyCands.slice(0, 20);
 
@@ -133,14 +136,26 @@ serve(async (req) => {
       .filter(r => !r.softVerified);
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
-    const [ranked] = await Promise.all([
+    // Geocode OT pending in parallel with Resy verified
+    const otPendingDedup = dedup(otPendingCands).slice(0, 12);
+    const [ranked, otRanked] = await Promise.all([
       withTimeout(geocodeAndRank(verified, params), GEOCODE_MS, verified),
+      withTimeout(geocodeAndRank(otPendingDedup, params), GEOCODE_MS, otPendingDedup),
       withTimeout(enrich(verified, params, AI_KEY), ENRICH_MS,  verified),
     ]);
     verified = ranked;
 
+    // Merge OT pending with verified Resy, sort by distance
+    const verifiedNames = new Set(verified.map(r => normName(r.name)));
+    const otFiltered = otRanked.filter(r => !verifiedNames.has(normName(r.name)));
+    const allResults = [...verified, ...otFiltered].sort((a, b) => {
+      const dA = a.distanceMiles ?? 999, dB = b.distanceMiles ?? 999;
+      if (Math.abs(dA - dB) > 0.5) return dA - dB;
+      return (b.rating ?? 0) - (a.rating ?? 0);
+    });
+
     // Remaining candidates for optional second pass
-    const verifiedIds = new Set(verified.map(r => r.id));
+    const verifiedIds = new Set(allResults.map(r => r.id));
     const attempted   = new Set(resySlice.map(r => r.id));
     const remaining   = dedup(
       resyCands
@@ -158,17 +173,17 @@ serve(async (req) => {
     };
 
     const elapsed = Date.now() - start;
-    console.log(`[done] ${verified.length} results in ${elapsed}ms`);
+    console.log(`[done] ${allResults.length} results (${verified.length} resy + ${otFiltered.length} ot_pending) in ${elapsed}ms`);
     return json({
-      results:             verified.slice(0, 24),
+      results:             allResults.slice(0, 30),
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v103-resy-only",
+      _v:                  "v104-resy-live-ot-pending",
       _debug: {
         elapsed_ms:      elapsed,
-        discovery:       { resy: resyCands.length },
-        verified:        { resy: resyVer.length },
+        discovery:       { resy: resyCands.length, ot_pending: otPendingCands.length },
+        verified:        { resy: resyVer.length, ot_pending: otFiltered.length },
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
         resy_api:        (globalThis as any).__resyApiDebug ?? null,
         // Resy URL samples — helps diagnose broken-link reports.
@@ -629,6 +644,68 @@ async function discoverResyViaBB(
     console.log(`[Resy Lambda] discovery error: ${err?.message}`);
     return [];
   }
+}
+
+// ─── OPENTABLE PENDING DISCOVERY ─────────────────────────────────────────────
+// Discovers real OT restaurants in the searched city via Google.
+// No verification or time slots — returned with availabilityPending:true so the
+// UI can show a "Live availability pending API approval" note instead of times.
+
+async function discoverOTPending(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
+  if (!fcKey) return [];
+  const city    = params.city;
+  const state   = params.state ? `, ${params.state}` : "";
+  const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
+
+  const queries = [
+    `site:opentable.com/r/ ${city}${state}${cuisine} restaurant`,
+    `site:opentable.com/r/ ${city}${state} dinner restaurant`,
+  ];
+
+  try {
+    const items = await firecrawlSearch(queries, fcKey, 10);
+    const results = items.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
+    console.log(`[OT pending] ${results.length} restaurants found for ${city}`);
+    return results;
+  } catch (err: any) {
+    console.log(`[OT pending] error: ${err?.message}`);
+    return [];
+  }
+}
+
+const OT_SKIP = new Set([
+  "search","home","login","signup","blog","press","about","careers",
+  "gift-cards","help","contact","privacy","terms","partners","for-restaurants",
+]);
+
+function normToOT(fc: any, params: SearchParams): Restaurant | null {
+  const url = (fc.url ?? "").split("?")[0];
+  const m   = url.match(/opentable\.com(?:\/[a-z]{2})?\/r\/([^/?#\s]+)/i)
+           || url.match(/opentable\.com\/restaurant\/profile\/([^/?#\s]+)/i);
+  if (!m) return null;
+  const slug = m[1].toLowerCase();
+  if (OT_SKIP.has(slug)) return null;
+
+  const name = cleanTitle(fc.title, url, "opentable");
+  if (!name || name.length < 2) return null;
+
+  // Try to extract cuisine from description snippet
+  const descCuisine = (fc.description ?? "").match(
+    /\b(italian|french|american|japanese|mexican|chinese|indian|thai|seafood|steakhouse|pizza|sushi|mediterranean|spanish|greek|korean|vietnamese|barbecue|burgers?|farm.to.table)\b/i
+  )?.[1];
+
+  return {
+    id:                  `opentable-${slug}`,
+    name,
+    cuisine:             params.cuisine || descCuisine || "Restaurant",
+    neighborhood:        extractNeighborhood(fc.title, fc.description),
+    platform:            "opentable",
+    platformUrl:         url,
+    timeSlots:           [],
+    distanceMiles:       null,
+    availabilityPending: true,
+    softVerified:        true,
+  };
 }
 
 // ─── VERIFICATION ─────────────────────────────────────────────────────────────
