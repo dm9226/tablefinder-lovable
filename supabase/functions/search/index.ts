@@ -1323,23 +1323,32 @@ function nearestResyMetro(lat: number, lng: number): { slug: string; name: strin
 }
 
 function resyCitySlug(city: string, state: string, _country: string, lat?: number, lng?: number): string {
+  // City name takes priority — if user searched "dinner in new york", use NYC slug
+  // regardless of where their GPS says they are.
+  const cityLower = city.toLowerCase();
+  for (const m of RESY_METROS) {
+    if (m.name.toLowerCase() === cityLower) return m.slug;
+  }
+  // Partial match: "new york" matches "New York", "dc" matches "Washington DC", etc.
+  for (const m of RESY_METROS) {
+    if (m.name.toLowerCase().includes(cityLower) || cityLower.includes(m.name.toLowerCase().split(" ")[0])) return m.slug;
+  }
+  // Only fall back to GPS if the city name didn't match anything
   if (lat != null && lng != null) {
     const metro = nearestResyMetro(lat, lng);
     if (metro) return metro.slug;
-  }
-  for (const m of RESY_METROS) {
-    if (m.name.toLowerCase() === city.toLowerCase()) return m.slug;
   }
   return slugify(city);
 }
 
 function resyCityName(city: string, _state: string, lat?: number, lng?: number): string {
+  const cityLower = city.toLowerCase();
+  for (const m of RESY_METROS) {
+    if (m.name.toLowerCase() === cityLower) return m.name;
+  }
   if (lat != null && lng != null) {
     const metro = nearestResyMetro(lat, lng);
     if (metro) return metro.name;
-  }
-  for (const m of RESY_METROS) {
-    if (m.name.toLowerCase() === city.toLowerCase()) return m.name;
   }
   return city;
 }
