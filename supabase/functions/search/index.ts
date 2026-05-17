@@ -381,8 +381,11 @@ async function lambdaLoad(
 async function discoverResyViaAPI(params: SearchParams): Promise<Restaurant[]> {
   const slug  = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
   const metro = RESY_METROS.find(m => m.slug === slug);
-  const lat   = params.lat  ?? metro?.lat;
-  const lng   = params.lng  ?? metro?.lng;
+  // Prefer metro coords (city-based) over GPS — ensures "dinner in new york"
+  // searches NYC even when the user's device is in Atlanta.
+  // Fall back to GPS only when the city isn't in our metro list.
+  const lat   = metro?.lat ?? params.lat;
+  const lng   = metro?.lng ?? params.lng;
   if (lat == null || lng == null) {
     (globalThis as any).__resyApiDebug = `no_coords city=${params.city}`;
     console.log(`[Resy API] no coordinates for "${params.city}"`);
@@ -664,8 +667,8 @@ const PLATFORM_CONFIGS: Record<string, {
 }> = {
   opentable: {
     queries: (city, state, cuisine) => [
-      `site:opentable.com/r/ ${city}${state}${cuisine} restaurant`,
-      `site:opentable.com/r/ ${city}${state} dinner restaurant`,
+      `site:opentable.com ${city}${state}${cuisine} restaurant reservation`,
+      `site:opentable.com ${city}${state} dinner restaurant`,
     ],
     urlPattern: /opentable\.com(?:\/[a-z]{2})?\/r\/([^/?#\s]+)/i,
     slugIndex: 1,
@@ -682,8 +685,8 @@ const PLATFORM_CONFIGS: Record<string, {
   },
   yelp: {
     queries: (city, state, cuisine) => [
-      `site:yelp.com/reservations ${city}${state}${cuisine} restaurant`,
-      `site:yelp.com/reservations ${city}${state} dinner restaurant`,
+      `site:yelp.com ${city}${state}${cuisine} restaurant reservations`,
+      `site:yelp.com ${city}${state} dinner restaurant make a reservation`,
     ],
     urlPattern: /yelp\.com\/reservations\/([^/?#\s]+)/i,
     slugIndex: 1,
@@ -691,8 +694,8 @@ const PLATFORM_CONFIGS: Record<string, {
   },
   sevenrooms: {
     queries: (city, state, cuisine) => [
-      `site:sevenrooms.com/reservations ${city}${state}${cuisine} restaurant`,
-      `site:sevenrooms.com/reservations ${city}${state} dinner restaurant`,
+      `site:sevenrooms.com ${city}${state}${cuisine} restaurant reservation`,
+      `site:sevenrooms.com ${city}${state} dinner restaurant`,
     ],
     urlPattern: /sevenrooms\.com\/reservations\/([^/?#\s]+)/i,
     slugIndex: 1,
@@ -700,8 +703,8 @@ const PLATFORM_CONFIGS: Record<string, {
   },
   thefork: {
     queries: (city, state, cuisine) => [
-      `site:thefork.com/restaurant ${city}${state}${cuisine} restaurant`,
-      `site:thefork.com/restaurant ${city}${state} dinner restaurant`,
+      `site:thefork.com ${city}${state}${cuisine} restaurant reservation`,
+      `site:thefork.com ${city}${state} dinner restaurant`,
     ],
     urlPattern: /thefork\.com\/restaurant\/([^/?#\s]+)/i,
     slugIndex: 1,
@@ -893,11 +896,13 @@ async function verifyResyViaBB(
 async function geocodeAndRank(restaurants: Restaurant[], params: SearchParams): Promise<Restaurant[]> {
   if (restaurants.length === 0) return [];
 
-  const userLat = params.lat;
-  const userLng = params.lng;
-  const geoCity = (params.lat != null && params.lng != null)
-    ? (nearestResyMetro(params.lat, params.lng)?.name ?? params.city)
-    : params.city;
+  // Use city-based (metro) coordinates when the user is searching in a different city
+  // e.g. user is in Atlanta but searched "dinner in new york" → use NYC coords
+  const searchSlug  = resyCitySlug(params.city, params.state, params.country, params.lat, params.lng);
+  const searchMetro = RESY_METROS.find(m => m.slug === searchSlug);
+  const userLat = searchMetro?.lat ?? params.lat;
+  const userLng = searchMetro?.lng ?? params.lng;
+  const geoCity   = searchMetro?.name ?? params.city;
   const geoRegion = params.state || params.country;
   const bboxParam = (userLat != null && userLng != null)
     ? `&bbox=${(userLng-1.5).toFixed(4)},${(userLat-1.5).toFixed(4)},${(userLng+1.5).toFixed(4)},${(userLat+1.5).toFixed(4)}`
