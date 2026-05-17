@@ -144,16 +144,16 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
         ) : restaurant.availabilityPending ? (
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-muted-foreground/70 font-body italic">
-              Live availability pending API integration —
+              Live availability pending integration —
             </span>
             <a
               href={restaurant.platformUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs font-body font-medium text-emerald-400 hover:text-emerald-300 transition-colors"
+              className="text-xs font-body font-medium text-primary hover:text-primary/80 transition-colors"
               onClick={(e) => e.stopPropagation()}
             >
-              Book on OpenTable →
+              Book on {PLATFORM_LABELS[restaurant.platform] ?? restaurant.platform} →
             </a>
           </div>
         ) : null}

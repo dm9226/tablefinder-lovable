@@ -1,5 +1,5 @@
-// TableFinder Search Edge Function — v104
-// Platforms: Resy (live) + OpenTable (pending — discovery only, no time slots)
+// TableFinder Search Edge Function — v105
+// Platforms: Resy (live) + OpenTable/Tock/Yelp/SevenRooms (pending — discovery only)
 //
 // Required env vars:
 //   FIRECRAWL_API_KEY
@@ -98,8 +98,8 @@ serve(async (req) => {
     );
     console.log(`[params] ${JSON.stringify(params)}`);
 
-    // ── Discovery (Resy + OT pending run in parallel) ─────────────────────────
-    const [resyCands, otPendingCands] = await Promise.all([
+    // ── Discovery (all platforms in parallel) ─────────────────────────────────
+    const [resyCands, otPendingCands, tockPendingCands, yelpPendingCands, srPendingCands] = await Promise.all([
       abortableDiscover(async () => {
         const apiResults = await discoverResyViaAPI(params);
         if (apiResults.length > 0) {
@@ -118,11 +118,13 @@ serve(async (req) => {
         }
         return [];
       }, DISCOVER_MS),
-      // OT: discover real restaurants in the searched city — no time slots, just names + links
-      abortableDiscover(() => discoverOTPending(params, FIRECRAWL), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("opentable", params, FIRECRAWL), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("tock",      params, FIRECRAWL), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("yelp",      params, FIRECRAWL), DISCOVER_MS),
+      abortableDiscover(() => discoverPlatformPending("sevenrooms",params, FIRECRAWL), DISCOVER_MS),
     ]);
 
-    console.log(`[discovery] resy=${resyCands.length} ot_pending=${otPendingCands.length} at ${Date.now()-start}ms`);
+    console.log(`[discovery] resy=${resyCands.length} ot=${otPendingCands.length} tock=${tockPendingCands.length} yelp=${yelpPendingCands.length} sr=${srPendingCands.length} at ${Date.now()-start}ms`);
 
     const resySlice = resyCands.slice(0, 20);
 
@@ -136,19 +138,21 @@ serve(async (req) => {
       .filter(r => !r.softVerified);
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
-    // Geocode OT pending in parallel with Resy verified
-    const otPendingDedup = dedup(otPendingCands).slice(0, 12);
-    const [ranked, otRanked] = await Promise.all([
+    const allPending = dedup([
+      ...otPendingCands, ...tockPendingCands, ...yelpPendingCands, ...srPendingCands,
+    ]).slice(0, 20);
+
+    const [ranked, pendingRanked] = await Promise.all([
       withTimeout(geocodeAndRank(verified, params), GEOCODE_MS, verified),
-      withTimeout(geocodeAndRank(otPendingDedup, params), GEOCODE_MS, otPendingDedup),
+      withTimeout(geocodeAndRank(allPending, params), GEOCODE_MS, allPending),
       withTimeout(enrich(verified, params, AI_KEY), ENRICH_MS,  verified),
     ]);
     verified = ranked;
 
-    // Merge OT pending with verified Resy, sort by distance
+    // Merge pending with verified Resy — dedupe by name, sort by distance
     const verifiedNames = new Set(verified.map(r => normName(r.name)));
-    const otFiltered = otRanked.filter(r => !verifiedNames.has(normName(r.name)));
-    const allResults = [...verified, ...otFiltered].sort((a, b) => {
+    const pendingFiltered = pendingRanked.filter(r => !verifiedNames.has(normName(r.name)));
+    const allResults = [...verified, ...pendingFiltered].sort((a, b) => {
       const dA = a.distanceMiles ?? 999, dB = b.distanceMiles ?? 999;
       if (Math.abs(dA - dB) > 0.5) return dA - dB;
       return (b.rating ?? 0) - (a.rating ?? 0);
@@ -173,17 +177,17 @@ serve(async (req) => {
     };
 
     const elapsed = Date.now() - start;
-    console.log(`[done] ${allResults.length} results (${verified.length} resy + ${otFiltered.length} ot_pending) in ${elapsed}ms`);
+    console.log(`[done] ${allResults.length} results (${verified.length} resy + ${pendingFiltered.length} pending) in ${elapsed}ms`);
     return json({
       results:             allResults.slice(0, 30),
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v104-resy-live-ot-pending",
+      _v:                  "v105-resy-live-all-pending",
       _debug: {
         elapsed_ms:      elapsed,
-        discovery:       { resy: resyCands.length, ot_pending: otPendingCands.length },
-        verified:        { resy: resyVer.length, ot_pending: otFiltered.length },
+        discovery:       { resy: resyCands.length, ot: otPendingCands.length, tock: tockPendingCands.length, yelp: yelpPendingCands.length, sr: srPendingCands.length },
+        verified:        { resy: resyVer.length, pending: pendingFiltered.length },
         scraper_enabled: !!(SCRAPER_URL && SCRAPER_SECRET),
         resy_api:        (globalThis as any).__resyApiDebug ?? null,
         // Resy URL samples — helps diagnose broken-link reports.
@@ -646,66 +650,99 @@ async function discoverResyViaBB(
   }
 }
 
-// ─── OPENTABLE PENDING DISCOVERY ─────────────────────────────────────────────
-// Discovers real OT restaurants in the searched city via Google.
+// ─── MULTI-PLATFORM PENDING DISCOVERY ────────────────────────────────────────
+// Discovers real restaurants on each platform in the searched city via Google.
 // No verification or time slots — returned with availabilityPending:true so the
-// UI can show a "Live availability pending API approval" note instead of times.
+// UI shows "Book on [Platform] →" instead of times.
 
-async function discoverOTPending(params: SearchParams, fcKey: string): Promise<Restaurant[]> {
+const PLATFORM_CONFIGS: Record<string, {
+  queries: (city: string, state: string, cuisine: string) => string[];
+  urlPattern: RegExp;
+  slugIndex: number;
+  skip: Set<string>;
+}> = {
+  opentable: {
+    queries: (city, state, cuisine) => [
+      `site:opentable.com/r/ ${city}${state}${cuisine} restaurant`,
+      `site:opentable.com/r/ ${city}${state} dinner restaurant`,
+    ],
+    urlPattern: /opentable\.com(?:\/[a-z]{2})?\/r\/([^/?#\s]+)/i,
+    slugIndex: 1,
+    skip: new Set(["search","home","login","signup","blog","press","about","careers","gift-cards","help","contact","privacy","terms","partners","for-restaurants"]),
+  },
+  tock: {
+    queries: (city, state, cuisine) => [
+      `site:exploretock.com ${city}${state}${cuisine} restaurant reservation`,
+      `site:exploretock.com ${city}${state} restaurant dinner`,
+    ],
+    urlPattern: /exploretock\.com\/([^/?#\s]+)/i,
+    slugIndex: 1,
+    skip: new Set(["search","login","signup","blog","about","careers","help","contact","privacy","terms","gift-cards","experiences","home"]),
+  },
+  yelp: {
+    queries: (city, state, cuisine) => [
+      `site:yelp.com/reservations ${city}${state}${cuisine} restaurant`,
+      `site:yelp.com/reservations ${city}${state} dinner restaurant`,
+    ],
+    urlPattern: /yelp\.com\/reservations\/([^/?#\s]+)/i,
+    slugIndex: 1,
+    skip: new Set(["search","login","signup","about","careers","help","contact","privacy","terms"]),
+  },
+  sevenrooms: {
+    queries: (city, state, cuisine) => [
+      `site:sevenrooms.com/reservations ${city}${state}${cuisine} restaurant`,
+      `site:sevenrooms.com/reservations ${city}${state} dinner restaurant`,
+    ],
+    urlPattern: /sevenrooms\.com\/reservations\/([^/?#\s]+)/i,
+    slugIndex: 1,
+    skip: new Set(["search","login","signup","about","careers","help","contact","privacy","terms","demo"]),
+  },
+};
+
+async function discoverPlatformPending(
+  platform: string, params: SearchParams, fcKey: string,
+): Promise<Restaurant[]> {
   if (!fcKey) return [];
+  const config = PLATFORM_CONFIGS[platform];
+  if (!config) return [];
+
   const city    = params.city;
   const state   = params.state ? `, ${params.state}` : "";
   const cuisine = params.cuisine ? ` ${params.cuisine}` : "";
 
-  const queries = [
-    `site:opentable.com/r/ ${city}${state}${cuisine} restaurant`,
-    `site:opentable.com/r/ ${city}${state} dinner restaurant`,
-  ];
-
   try {
-    const items = await firecrawlSearch(queries, fcKey, 10);
-    const results = items.map(r => normToOT(r, params)).filter(Boolean) as Restaurant[];
-    console.log(`[OT pending] ${results.length} restaurants found for ${city}`);
+    const items = await firecrawlSearch(config.queries(city, state, cuisine), fcKey, 10);
+    const results = items.map(fc => {
+      const url  = (fc.url ?? "").split("?")[0];
+      const m    = url.match(config.urlPattern);
+      if (!m) return null;
+      const slug = m[config.slugIndex].toLowerCase();
+      if (config.skip.has(slug)) return null;
+      const name = cleanTitle(fc.title, url, platform);
+      if (!name || name.length < 2) return null;
+      const descCuisine = (fc.description ?? "").match(
+        /\b(italian|french|american|japanese|mexican|chinese|indian|thai|seafood|steakhouse|pizza|sushi|mediterranean|spanish|greek|korean|vietnamese|barbecue|burgers?|farm.to.table)\b/i
+      )?.[1];
+      return {
+        id:                  `${platform}-${slug}`,
+        name,
+        cuisine:             params.cuisine || descCuisine || "Restaurant",
+        neighborhood:        extractNeighborhood(fc.title, fc.description),
+        platform,
+        platformUrl:         url,
+        timeSlots:           [],
+        distanceMiles:       null,
+        availabilityPending: true,
+        softVerified:        true,
+      } as Restaurant;
+    }).filter(Boolean) as Restaurant[];
+
+    console.log(`[${platform} pending] ${results.length} restaurants for ${city}`);
     return results;
   } catch (err: any) {
-    console.log(`[OT pending] error: ${err?.message}`);
+    console.log(`[${platform} pending] error: ${err?.message}`);
     return [];
   }
-}
-
-const OT_SKIP = new Set([
-  "search","home","login","signup","blog","press","about","careers",
-  "gift-cards","help","contact","privacy","terms","partners","for-restaurants",
-]);
-
-function normToOT(fc: any, params: SearchParams): Restaurant | null {
-  const url = (fc.url ?? "").split("?")[0];
-  const m   = url.match(/opentable\.com(?:\/[a-z]{2})?\/r\/([^/?#\s]+)/i)
-           || url.match(/opentable\.com\/restaurant\/profile\/([^/?#\s]+)/i);
-  if (!m) return null;
-  const slug = m[1].toLowerCase();
-  if (OT_SKIP.has(slug)) return null;
-
-  const name = cleanTitle(fc.title, url, "opentable");
-  if (!name || name.length < 2) return null;
-
-  // Try to extract cuisine from description snippet
-  const descCuisine = (fc.description ?? "").match(
-    /\b(italian|french|american|japanese|mexican|chinese|indian|thai|seafood|steakhouse|pizza|sushi|mediterranean|spanish|greek|korean|vietnamese|barbecue|burgers?|farm.to.table)\b/i
-  )?.[1];
-
-  return {
-    id:                  `opentable-${slug}`,
-    name,
-    cuisine:             params.cuisine || descCuisine || "Restaurant",
-    neighborhood:        extractNeighborhood(fc.title, fc.description),
-    platform:            "opentable",
-    platformUrl:         url,
-    timeSlots:           [],
-    distanceMiles:       null,
-    availabilityPending: true,
-    softVerified:        true,
-  };
 }
 
 // ─── VERIFICATION ─────────────────────────────────────────────────────────────
