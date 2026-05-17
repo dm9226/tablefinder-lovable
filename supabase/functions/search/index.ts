@@ -268,13 +268,13 @@ Rules:
 - date: YYYY-MM-DD. "tonight"/"today"=${todayStr}. "tomorrow"=${tomorrowStr}. Day names map (use exactly): ${dayMapStr}.
 - time: HH:MM 24h. Default 19:00. lunch≈12:00 brunch≈11:00 dinner≈19:00.
 - partySize: integer, default 2.
-- city: infer from location context. Do not guess.
-- state: 2-letter US or empty for UK.
+- city: CRITICAL — if the user mentions ANY city, neighborhood, or location in their query, use that EXACTLY. Only fall back to location context if the query contains no location at all.
+- state: 2-letter US or empty for UK/international.
 - country: "us" or "gb". Default "us".
 - cuisine: specific type (e.g. "Italian","sushi","steakhouse") or "" if none.
 - cuisineType: broad category or "".
 - dishKeyword: specific dish or "".
-Location context: ${locCtx}
+Location context (only use if query has no location): ${locCtx}
 Query: "${query}"
 Respond ONLY with valid JSON (no markdown):
 {"cuisine":"","cuisineType":"","dishKeyword":"","date":"","time":"","partySize":2,"city":"","state":"","country":"us"}`;
