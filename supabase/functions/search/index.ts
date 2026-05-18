@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v109
+// TableFinder Search Edge Function — v110
 // Platforms: Resy (live) + OpenTable/Tock/Yelp/SevenRooms (pending — discovery only)
 //
 // Required env vars:
@@ -187,7 +187,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v109-synthetic-slots",
+      _v:                  "v110-date-fix",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otPendingCands.length, tock: tockPendingCands.length, yelp: yelpPendingCands.length, sr: srPendingCands.length, tf: tfPendingCands.length },
@@ -301,11 +301,15 @@ Respond ONLY with valid JSON (no markdown):
   const raw    = data.choices?.[0]?.message?.content ?? "{}";
   const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
 
+  // Override the AI's date with our own deterministic day-name resolver.
+  // LLMs occasionally miscount day-of-week; our server-side map is always correct.
+  const resolvedDate = resolveDateFromQuery(query, parsed.date || todayStr, _dayMap, todayStr, tomorrowStr);
+
   return {
     cuisine:     parsed.cuisine     || "",
     cuisineType: parsed.cuisineType || "",
     dishKeyword: parsed.dishKeyword || "",
-    date:        parsed.date        || todayStr,
+    date:        resolvedDate,
     time:        parsed.time        || "19:00",
     partySize:   Number(parsed.partySize) || 2,
     city:        parsed.city  || extractCityFromLocation(location),
@@ -313,6 +317,43 @@ Respond ONLY with valid JSON (no markdown):
     country:     parsed.country || "us",
     lat, lng,
   };
+}
+
+// Server-side day-name resolver.  The AI sometimes miscounts day-of-week
+// (returning Friday for "Thursday").  We compute the correct YYYY-MM-DD from
+// our own JS Date arithmetic and override whatever the model returned.
+function resolveDateFromQuery(
+  query: string,
+  aiDate: string,
+  dayMap: Record<string, string>,
+  todayStr: string,
+  tomorrowStr: string,
+): string {
+  const q = query.toLowerCase();
+
+  // Absolute keywords that override everything
+  if (/\b(tonight|today)\b/.test(q))   return todayStr;
+  if (/\btomorrow\b/.test(q))           return tomorrowStr;
+
+  // Full day names + common abbreviations → look up in our computed dayMap
+  const aliases: [RegExp, string][] = [
+    [/\bmondays?\b/,              "Monday"],
+    [/\btuesdays?\b|\btues?\b/,   "Tuesday"],
+    [/\bwednesdays?\b|\bweds?\b/, "Wednesday"],
+    [/\bthursdays?\b|\bthurs?\b|\bthur\b/, "Thursday"],
+    [/\bfridays?\b|\bfri\b/,     "Friday"],
+    [/\bsaturdays?\b|\bsat\b/,   "Saturday"],
+    [/\bsundays?\b|\bsun\b/,     "Sunday"],
+  ];
+  for (const [re, dayName] of aliases) {
+    if (re.test(q) && dayMap[dayName]) {
+      console.log(`[date] override: AI said ${aiDate} → using ${dayName}=${dayMap[dayName]}`);
+      return dayMap[dayName];
+    }
+  }
+
+  // No day name in query — trust the AI
+  return aiDate;
 }
 
 function fallbackParams(lat?: number, lng?: number, location?: string): SearchParams {
