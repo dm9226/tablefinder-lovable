@@ -84,8 +84,10 @@ serve(async (req) => {
       });
     }
 
-    // ── Render template ─────────────────────────────────────────────────────
-    const html    = await render(tmpl.component(templateData as any));
+    // ── Render template (HTML + plain text) ────────────────────────────────
+    const component = tmpl.component(templateData as any);
+    const html    = await render(component);
+    const text    = await render(component, { plainText: true });
     const subject = tmpl.subject(templateData as any);
 
     // ── Insert pending log row ──────────────────────────────────────────────
@@ -106,6 +108,7 @@ serve(async (req) => {
         sender_domain:    "notify.tablefinder.ai",
         subject,
         html,
+        text,
         purpose:          "transactional",
         label:            templateName,
         idempotency_key:  idempotencyKey ?? messageId,
