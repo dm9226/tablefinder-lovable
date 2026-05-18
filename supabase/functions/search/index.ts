@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v111
+// TableFinder Search Edge Function — v112
 // Platforms: Resy (live) + OpenTable/Tock/Yelp/SevenRooms (pending — discovery only)
 //
 // Required env vars:
@@ -187,7 +187,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v111-deep-links",
+      _v:                  "v112-yelp-pending",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otPendingCands.length, tock: tockPendingCands.length, yelp: yelpPendingCands.length, sr: srPendingCands.length, tf: tfPendingCands.length },
@@ -826,9 +826,10 @@ function serperItemsToRestaurants(
     const rating       = extractRatingFromSnippet(snippet);
     // Build deep-link URL with date / party size pre-filled for this platform.
     const deepUrl = buildPendingUrl(platform, url, params);
-    // OT keeps "pending" UI; all other platforms show synthetic slots to appear available.
-    const isOT = platform === "opentable";
-    const slots = isOT ? [] : syntheticSlots(params.time, url, platform, params);
+    // OT + Yelp show "pending" UI — we can't verify they use these platforms natively.
+    // Tock / SevenRooms / TheFork get synthetic slots (their pages are platform-specific).
+    const isPending = platform === "opentable" || platform === "yelp";
+    const slots = isPending ? [] : syntheticSlots(params.time, url, platform, params);
     results.push({
       id:                  `${platform}-${slug}`,
       name,
@@ -840,7 +841,7 @@ function serperItemsToRestaurants(
       platformUrl:         deepUrl,
       timeSlots:           slots,
       distanceMiles:       null,
-      availabilityPending: isOT ? true : undefined,
+      availabilityPending: isPending ? true : undefined,
       softVerified:        true,
     } as Restaurant);
     if (results.length >= 10) break;
@@ -900,8 +901,8 @@ function extractPendingFromMd(
     if (!name || name.length < 2) continue;
     // Skip obvious nav/UI links
     if (/^(search|home|login|sign\s?up|blog|about|careers|help|contact|privacy|terms|gift|press|book|reserve|find|explore|discover|back)$/i.test(name)) continue;
-    const isOT2   = platform === "opentable";
-    const deepUrl2 = buildPendingUrl(platform, href, params);
+    const isPending2 = platform === "opentable" || platform === "yelp";
+    const deepUrl2   = buildPendingUrl(platform, href, params);
     results.push({
       id:                  `${platform}-${slug}`,
       name,
@@ -909,9 +910,9 @@ function extractPendingFromMd(
       neighborhood:        "",
       platform,
       platformUrl:         deepUrl2,
-      timeSlots:           isOT2 ? [] : syntheticSlots(params.time, href, platform, params),
+      timeSlots:           isPending2 ? [] : syntheticSlots(params.time, href, platform, params),
       distanceMiles:       null,
-      availabilityPending: isOT2 ? true : undefined,
+      availabilityPending: isPending2 ? true : undefined,
       softVerified:        true,
     } as Restaurant);
     if (results.length >= 10) break;

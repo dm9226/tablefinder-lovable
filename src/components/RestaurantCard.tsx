@@ -137,18 +137,32 @@ export function RestaurantCard({ restaurant, searchMeta }: RestaurantCardProps) 
           </div>
         ) : restaurant.availabilityPending ? (
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-muted-foreground/70 font-body italic">
-              Live availability pending integration —
-            </span>
-            <a
-              href={restaurant.platformUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs font-body font-medium text-primary hover:text-primary/80 transition-colors"
-              onClick={(e) => e.stopPropagation()}
-            >
-              Book on {PLATFORM_LABELS[restaurant.platform] ?? restaurant.platform} →
-            </a>
+            {restaurant.platform === "yelp" ? (
+              <a
+                href={restaurant.platformUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs font-body font-medium text-primary hover:text-primary/80 transition-colors"
+                onClick={(e) => e.stopPropagation()}
+              >
+                Check availability on Yelp →
+              </a>
+            ) : (
+              <>
+                <span className="text-xs text-muted-foreground/70 font-body italic">
+                  Live availability pending integration —
+                </span>
+                <a
+                  href={restaurant.platformUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-body font-medium text-primary hover:text-primary/80 transition-colors"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  Book on {PLATFORM_LABELS[restaurant.platform] ?? restaurant.platform} →
+                </a>
+              </>
+            )}
           </div>
         ) : null}
 
