@@ -71,7 +71,7 @@ export function ResultsGrid({ results, isLoading, isRefreshing, error, hasSearch
       <div className="mb-3 px-4 py-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 flex items-center gap-3 flex-wrap">
         <span className="shrink-0 px-1.5 py-0.5 rounded text-xs font-body font-semibold uppercase tracking-wider bg-emerald-500/15 text-emerald-400">OpenTable</span>
         <p className="text-xs text-muted-foreground font-body">
-          OpenTable integration pending approval — <span className="text-emerald-400 font-medium">Powered by OpenTable</span>
+          OpenTable integration pending approval — <a href="https://www.opentable.com" target="_blank" rel="noopener noreferrer" className="text-emerald-400 font-medium hover:text-emerald-300 transition-colors">Powered by OpenTable</a>
         </p>
       </div>
 

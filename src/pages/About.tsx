@@ -2,12 +2,13 @@ import { Helmet } from "react-helmet-async";
 import { Link } from "react-router-dom";
 import { Search, Utensils, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { SiteFooter } from "@/components/SiteFooter";
 
 const About = () => (
   <div className="min-h-screen bg-background flex flex-col">
     <Helmet>
-      <title>About TableFinder — Find Resy Reservations Near You</title>
-      <meta name="description" content="TableFinder searches Resy so you can find restaurant reservations near you with a simple natural language search." />
+      <title>About TableFinder — Search Resy, OpenTable, Tock, Yelp &amp; More</title>
+      <meta name="description" content="TableFinder searches Resy, OpenTable, Tock, Yelp, SevenRooms, and TheFork so you can find restaurant reservations near you with a simple natural language search." />
       <link rel="canonical" href="https://tablefinder.ai/about" />
     </Helmet>
 
@@ -21,12 +22,12 @@ const About = () => (
 
     <main className="flex-1 max-w-2xl mx-auto px-4 py-10">
       <h2 className="font-heading text-3xl md:text-4xl font-bold text-foreground mb-6">
-        Resy Reservations, Instantly.
+        One Search, Every Table.
       </h2>
 
       <p className="text-muted-foreground font-body text-lg leading-relaxed mb-8">
         Finding a restaurant reservation shouldn't be complicated.
-        TableFinder searches <strong className="text-foreground">Resy</strong> with natural language so you can find available tables near you in seconds.
+        TableFinder searches <strong className="text-foreground">Resy, OpenTable, Tock, Yelp, SevenRooms, and TheFork</strong> with natural language so you can find available tables near you in seconds.
       </p>
 
       <div className="grid gap-6 mb-10">
@@ -66,15 +67,7 @@ const About = () => (
       </div>
     </main>
 
-    <footer className="py-6 text-center border-t border-border">
-      <nav className="flex justify-center gap-6 mb-3">
-        <Link to="/" className="text-xs text-muted-foreground hover:text-foreground font-body transition-colors">Home</Link>
-        <Link to="/how-it-works" className="text-xs text-muted-foreground hover:text-foreground font-body transition-colors">How It Works</Link>
-      </nav>
-      <p className="text-xs text-muted-foreground font-body">
-        TableFinder searches Resy for available reservations near you
-      </p>
-    </footer>
+    <SiteFooter />
   </div>
 );
 

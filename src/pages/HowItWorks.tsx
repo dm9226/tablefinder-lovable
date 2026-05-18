@@ -2,6 +2,7 @@ import { Helmet } from "react-helmet-async";
 import { Link } from "react-router-dom";
 import { MessageSquare, Radar, CalendarCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { SiteFooter } from "@/components/SiteFooter";
 
 const steps = [
   {
@@ -12,9 +13,9 @@ const steps = [
   },
   {
     icon: Radar,
-    title: "We Search Resy for You",
+    title: "We Search Every Platform",
     description:
-      "TableFinder searches Resy and verifies real-time availability for your exact date, time, and party size.",
+      "TableFinder searches Resy, OpenTable, Tock, Yelp, SevenRooms, and TheFork and verifies real-time availability for your exact date, time, and party size.",
   },
   {
     icon: CalendarCheck,
@@ -71,15 +72,7 @@ const HowItWorks = () => (
       </div>
     </main>
 
-    <footer className="py-6 text-center border-t border-border">
-      <nav className="flex justify-center gap-6 mb-3">
-        <Link to="/" className="text-xs text-muted-foreground hover:text-foreground font-body transition-colors">Home</Link>
-        <Link to="/about" className="text-xs text-muted-foreground hover:text-foreground font-body transition-colors">About</Link>
-      </nav>
-      <p className="text-xs text-muted-foreground font-body">
-        TableFinder searches Resy for available reservations near you
-      </p>
-    </footer>
+    <SiteFooter />
   </div>
 );
 
