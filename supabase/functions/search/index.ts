@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v110
+// TableFinder Search Edge Function — v111
 // Platforms: Resy (live) + OpenTable/Tock/Yelp/SevenRooms (pending — discovery only)
 //
 // Required env vars:
@@ -187,7 +187,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v110-date-fix",
+      _v:                  "v111-deep-links",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otPendingCands.length, tock: tockPendingCands.length, yelp: yelpPendingCands.length, sr: srPendingCands.length, tf: tfPendingCands.length },
@@ -723,8 +723,48 @@ async function serperSearch(
   }
 }
 
+// Build a deep-link URL for a pending platform, filling in date / time / party size.
+// Each platform has its own query-param convention.
+function buildPendingUrl(platform: string, baseUrl: string, params: SearchParams, slotTime?: string): string {
+  const date      = params.date;                    // YYYY-MM-DD
+  const time      = slotTime ?? params.time;        // HH:MM 24h
+  const party     = params.partySize;
+  const [hStr = "19", mStr = "00"] = time.split(":");
+  const h = parseInt(hStr, 10);
+  const m = parseInt(mStr, 10);
+  const hh = hStr.padStart(2, "0");
+  const mm = mStr.padStart(2, "0");
+
+  switch (platform) {
+    case "opentable":
+      // ?covers=2&dateTime=2026-05-21T19:00
+      return `${baseUrl}?covers=${party}&dateTime=${date}T${hh}%3A${mm}`;
+    case "tock":
+      // ?date=2026-05-21&size=2&time=19:00
+      return `${baseUrl}?date=${date}&size=${party}&time=${hh}%3A${mm}`;
+    case "yelp": {
+      // ?reservation_date=2026-05-21&reservation_time=7%3A00+PM&party_size=2
+      const period = h >= 12 ? "PM" : "AM";
+      const dispH  = h > 12 ? h - 12 : h === 0 ? 12 : h;
+      const yelpTime = encodeURIComponent(`${dispH}:${mm} ${period}`);
+      return `${baseUrl}?reservation_date=${date}&reservation_time=${yelpTime}&party_size=${party}`;
+    }
+    case "sevenrooms":
+      // ?date=2026-05-21&party_size=2&time=19:00
+      return `${baseUrl}?date=${date}&party_size=${party}&time=${hh}%3A${mm}`;
+    case "thefork": {
+      // ?date=20260521&hour=19%3A00&covers=2
+      const dateCompact = date.replace(/-/g, "");
+      return `${baseUrl}?date=${dateCompact}&hour=${hh}%3A${mm}&covers=${party}`;
+    }
+    default:
+      return baseUrl;
+  }
+}
+
 // Generate 3-4 synthetic time slots centred on the search time (for non-OT pending platforms).
-function syntheticSlots(searchTime: string, platformUrl: string): TimeSlot[] {
+// Each slot URL is deep-linked to that specific time on the platform.
+function syntheticSlots(searchTime: string, baseUrl: string, platform: string, params: SearchParams): TimeSlot[] {
   const [hStr = "19", mStr = "00"] = searchTime.split(":");
   const baseMin = parseInt(hStr, 10) * 60 + parseInt(mStr, 10);
   const offsets = [-30, 0, 30, 60];
@@ -736,7 +776,9 @@ function syntheticSlots(searchTime: string, platformUrl: string): TimeSlot[] {
     const slotM = total % 60;
     const period = slotH >= 12 ? "PM" : "AM";
     const dispH  = slotH > 12 ? slotH - 12 : slotH === 0 ? 12 : slotH;
-    slots.push({ time: `${dispH}:${slotM.toString().padStart(2, "0")} ${period}`, url: platformUrl });
+    const slotTime24 = `${slotH.toString().padStart(2, "0")}:${slotM.toString().padStart(2, "0")}`;
+    const url = buildPendingUrl(platform, baseUrl, params, slotTime24);
+    slots.push({ time: `${dispH}:${slotM.toString().padStart(2, "0")} ${period}`, url });
   }
   return slots;
 }
@@ -782,9 +824,11 @@ function serperItemsToRestaurants(
       /\b(italian|french|american|japanese|mexican|chinese|indian|thai|seafood|steakhouse|pizza|sushi|mediterranean|spanish|greek|korean|vietnamese|barbecue|burgers?|farm.to.table)\b/i
     )?.[1];
     const rating       = extractRatingFromSnippet(snippet);
+    // Build deep-link URL with date / party size pre-filled for this platform.
+    const deepUrl = buildPendingUrl(platform, url, params);
     // OT keeps "pending" UI; all other platforms show synthetic slots to appear available.
     const isOT = platform === "opentable";
-    const slots = isOT ? [] : syntheticSlots(params.time, url);
+    const slots = isOT ? [] : syntheticSlots(params.time, url, platform, params);
     results.push({
       id:                  `${platform}-${slug}`,
       name,
@@ -793,7 +837,7 @@ function serperItemsToRestaurants(
       description:         snippet.length > 10 ? snippet : undefined,
       rating,
       platform,
-      platformUrl:         url,
+      platformUrl:         deepUrl,
       timeSlots:           slots,
       distanceMiles:       null,
       availabilityPending: isOT ? true : undefined,
@@ -856,15 +900,16 @@ function extractPendingFromMd(
     if (!name || name.length < 2) continue;
     // Skip obvious nav/UI links
     if (/^(search|home|login|sign\s?up|blog|about|careers|help|contact|privacy|terms|gift|press|book|reserve|find|explore|discover|back)$/i.test(name)) continue;
-    const isOT2 = platform === "opentable";
+    const isOT2   = platform === "opentable";
+    const deepUrl2 = buildPendingUrl(platform, href, params);
     results.push({
       id:                  `${platform}-${slug}`,
       name,
       cuisine:             params.cuisine || "Restaurant",
       neighborhood:        "",
       platform,
-      platformUrl:         href,
-      timeSlots:           isOT2 ? [] : syntheticSlots(params.time, href),
+      platformUrl:         deepUrl2,
+      timeSlots:           isOT2 ? [] : syntheticSlots(params.time, href, platform, params),
       distanceMiles:       null,
       availabilityPending: isOT2 ? true : undefined,
       softVerified:        true,
