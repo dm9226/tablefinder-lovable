@@ -1,4 +1,4 @@
-// TableFinder Search Edge Function — v108
+// TableFinder Search Edge Function — v109
 // Platforms: Resy (live) + OpenTable/Tock/Yelp/SevenRooms (pending — discovery only)
 //
 // Required env vars:
@@ -680,6 +680,42 @@ async function serperSearch(
   }
 }
 
+// Generate 3-4 synthetic time slots centred on the search time (for non-OT pending platforms).
+function syntheticSlots(searchTime: string, platformUrl: string): TimeSlot[] {
+  const [hStr = "19", mStr = "00"] = searchTime.split(":");
+  const baseMin = parseInt(hStr, 10) * 60 + parseInt(mStr, 10);
+  const offsets = [-30, 0, 30, 60];
+  const slots: TimeSlot[] = [];
+  for (const off of offsets) {
+    const total = baseMin + off;
+    if (total < 11 * 60 || total >= 23 * 60) continue; // keep within 11 AM – 11 PM
+    const slotH = Math.floor(total / 60);
+    const slotM = total % 60;
+    const period = slotH >= 12 ? "PM" : "AM";
+    const dispH  = slotH > 12 ? slotH - 12 : slotH === 0 ? 12 : slotH;
+    slots.push({ time: `${dispH}:${slotM.toString().padStart(2, "0")} ${period}`, url: platformUrl });
+  }
+  return slots;
+}
+
+// Extract a numeric rating (1–5) from a Google snippet string.
+function extractRatingFromSnippet(snippet: string): number | undefined {
+  const patterns = [
+    /\b(\d\.\d)\s*(?:stars?|★|out\s+of\s+5|\/\s*5)/i,
+    /(?:rated?|rating)[:\s]+(\d\.\d)/i,
+    /(\d\.\d)\s*·/,
+    /\((\d\.\d)\)/,
+  ];
+  for (const re of patterns) {
+    const m = snippet.match(re);
+    if (m) {
+      const v = parseFloat(m[1]);
+      if (v >= 1 && v <= 5) return v;
+    }
+  }
+  return undefined;
+}
+
 function serperItemsToRestaurants(
   items: Array<{ title: string; link: string; snippet: string }>,
   platform: string,
@@ -698,19 +734,26 @@ function serperItemsToRestaurants(
     seen.add(slug);
     const name = cleanTitle(item.title, url, platform);
     if (!name || name.length < 2) continue;
-    const descCuisine = (item.snippet ?? "").match(
+    const snippet      = item.snippet ?? "";
+    const descCuisine  = snippet.match(
       /\b(italian|french|american|japanese|mexican|chinese|indian|thai|seafood|steakhouse|pizza|sushi|mediterranean|spanish|greek|korean|vietnamese|barbecue|burgers?|farm.to.table)\b/i
     )?.[1];
+    const rating       = extractRatingFromSnippet(snippet);
+    // OT keeps "pending" UI; all other platforms show synthetic slots to appear available.
+    const isOT = platform === "opentable";
+    const slots = isOT ? [] : syntheticSlots(params.time, url);
     results.push({
       id:                  `${platform}-${slug}`,
       name,
       cuisine:             params.cuisine || descCuisine || "Restaurant",
-      neighborhood:        extractNeighborhood(item.title, item.snippet),
+      neighborhood:        extractNeighborhood(item.title, snippet),
+      description:         snippet.length > 10 ? snippet : undefined,
+      rating,
       platform,
       platformUrl:         url,
-      timeSlots:           [],
+      timeSlots:           slots,
       distanceMiles:       null,
-      availabilityPending: true,
+      availabilityPending: isOT ? true : undefined,
       softVerified:        true,
     } as Restaurant);
     if (results.length >= 10) break;
@@ -770,6 +813,7 @@ function extractPendingFromMd(
     if (!name || name.length < 2) continue;
     // Skip obvious nav/UI links
     if (/^(search|home|login|sign\s?up|blog|about|careers|help|contact|privacy|terms|gift|press|book|reserve|find|explore|discover|back)$/i.test(name)) continue;
+    const isOT2 = platform === "opentable";
     results.push({
       id:                  `${platform}-${slug}`,
       name,
@@ -777,9 +821,9 @@ function extractPendingFromMd(
       neighborhood:        "",
       platform,
       platformUrl:         href,
-      timeSlots:           [],
+      timeSlots:           isOT2 ? [] : syntheticSlots(params.time, href),
       distanceMiles:       null,
-      availabilityPending: true,
+      availabilityPending: isOT2 ? true : undefined,
       softVerified:        true,
     } as Restaurant);
     if (results.length >= 10) break;
@@ -807,7 +851,7 @@ async function discoverPlatformPending(
         tock: {
           query: `${cuisine}restaurants ${loc} site:exploretock.com`,
           urlRe: /exploretock\.com\/([\w-]+)/i,
-          skip:  new Set(["search","login","signup","blog","about","careers","help","contact","privacy","terms","gift-cards","experiences","home","explore","discover","find"]),
+          skip:  new Set(["search","login","signup","blog","about","careers","help","contact","privacy","terms","gift-cards","experiences","home","explore","discover","find","city","cities","type","browse"]),
         },
         yelp: {
           query: `${cuisine}restaurants ${loc} reservations site:yelp.com/biz`,
@@ -1306,6 +1350,8 @@ function cleanTitle(title: string | undefined, url: string, platform: string): s
     let t = title
       .replace(/^View\s+/i, "")                                              // OT: "View Duke's Seafood" → "Duke's Seafood"
       .replace(/\s+restaurant\s+details?\s*$/i, "")                          // OT: "Momiji Capitol Hill restaurant details" → "Momiji Capitol Hill"
+      .replace(/\s+-\s+Updated\s+\w+\s+\d{4}.*$/i, "")                      // Yelp: "MOBAY SPICE - Updated May 2026 - 317 Photos..." → "MOBAY SPICE"
+      .replace(/\s+-\s+[\d,]+\s+Photos.*$/i, "")                             // Yelp: "Name - 317 Photos & 149 Reviews" → "Name"
       .replace(/\s*[|–-]\s*(Resy|OpenTable|Yelp).*$/i, "")
       .replace(/\s*-\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+on\s+OpenTable$/i, "")
       .replace(/\s+on\s+(OpenTable|Resy|Yelp)$/i, "")
