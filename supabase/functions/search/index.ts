@@ -140,9 +140,11 @@ serve(async (req) => {
       .filter(r => !r.softVerified);
 
     // ── Geocode + Enrich ──────────────────────────────────────────────────────
-    const allPending = dedup([
-      ...otPendingCands, ...tockPendingCands, ...yelpPendingCands, ...srPendingCands, ...tfPendingCands,
-    ]).slice(0, 24);
+    // Round-robin interleave so every platform gets representation in the cap.
+    // Simple concat risks Tock+OT+Yelp filling all 24 slots before SR/TheFork.
+    const allPending = dedup(roundRobinMerge(
+      otPendingCands, tockPendingCands, yelpPendingCands, srPendingCands, tfPendingCands,
+    )).slice(0, 40);
 
     const [ranked, pendingRanked] = await Promise.all([
       withTimeout(geocodeAndRank(verified, params), GEOCODE_MS, verified),
@@ -185,7 +187,7 @@ serve(async (req) => {
       params:              meta,
       hasMore:             remaining.length > 0,
       remainingCandidates: remaining,
-      _v:                  "v108-serper-discovery",
+      _v:                  "v109-synthetic-slots",
       _debug: {
         elapsed_ms:      elapsed,
         discovery:       { resy: resyCands.length, ot: otPendingCands.length, tock: tockPendingCands.length, yelp: yelpPendingCands.length, sr: srPendingCands.length, tf: tfPendingCands.length },
@@ -1236,6 +1238,18 @@ async function firecrawlSearch(queries: string[], fcKey: string, limit = 8): Pro
 }
 
 // ─── DEDUP ────────────────────────────────────────────────────────────────────
+
+// Interleave N arrays in round-robin order so every array contributes equally.
+function roundRobinMerge<T>(...arrays: T[][]): T[] {
+  const result: T[] = [];
+  const maxLen = Math.max(0, ...arrays.map(a => a.length));
+  for (let i = 0; i < maxLen; i++) {
+    for (const arr of arrays) {
+      if (i < arr.length) result.push(arr[i]);
+    }
+  }
+  return result;
+}
 
 function dedup(restaurants: Restaurant[]): Restaurant[] {
   const seen = new Map<string, Restaurant>();
